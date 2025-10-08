@@ -17,9 +17,9 @@ import time
 import typing as t
 
 try:
-    import aiohttp
+    import openai
 except Exception:  # noqa: E722
-    aiohttp = None  # type: ignore
+    openai = None  # type: ignore
 
 from collections import defaultdict
 
@@ -41,7 +41,7 @@ FACT_PROMPT_TEMPLATE = (
     "Generate a set of 10 sentences, including as many facts as possible, about the concept"
     " {concept} as {article} {concept_pos} and defined as {definition}. Refer to the concept only as"
     " {concept} without including specific classes, types, or names of {concept}. Make sure the"
-    " sentences are diverse and do not repeat./no_think"
+    " sentences are diverse and do not repeat."
 )
 
 
@@ -49,7 +49,7 @@ STORY_PROMPT_TEMPLATE = (
     "Generate a set of 10 sentences, where each sentence is a short story about the concept"
     " {concept} as {article} {concept_pos} and defined as {definition}. Refer to the concept only as"
     " {concept} without including specific classes, types, or names of {concept}. Make sure the"
-    " sentences are diverse and do not repeat./no_think"
+    " sentences are diverse and do not repeat."
 )
 
 
@@ -152,7 +152,6 @@ def unique_preserve_order(items: t.Iterable[str]) -> t.List[str]:
 
 
 async def chat_completion_stream(
-    session: "aiohttp.ClientSession",
     *,
     base_url: str,
     model: str,
@@ -164,49 +163,48 @@ async def chat_completion_stream(
     timeout_s: int,
     api_key: t.Optional[str],
 ) -> str:
-    payload = {
-        "model": model,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-        "temperature": temperature,
-        "top_p": top_p,
-        "max_tokens": max_tokens,
-        "n": 1,
-        "stream": True,
-    }
-    headers = {
-        "Content-Type": "application/json",
-        "Accept": "text/event-stream",
-    }
-    if api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
-
-    url = base_url.rstrip("/") + "/v1/chat/completions"
-    chunks: t.List[str] = []
-    timeout = aiohttp.ClientTimeout(total=timeout_s)  # type: ignore
-    async with session.post(url, json=payload, headers=headers, timeout=timeout) as resp:
-        async for raw in resp.content:
-            resp.raise_for_status()
-            line = raw.decode().strip()
-            if not line or line == "data: [DONE]":
-                continue
-            if line.startswith("data: "):
-                line = line[len("data: ") :]
-            try:
-                obj = json.loads(line)
-            except Exception:
-                continue
-            # OpenAI-compatible streamed chunk
-            delta = (
-                obj.get("choices", [{}])[0]
-                .get("delta", {})
-                .get("content", "")
-            )
-            if delta:
-                chunks.append(delta)
-    return "".join(chunks)
+    """Simplified streaming chat completion using OpenAI SDK."""
+    if openai is None:
+        raise RuntimeError("openai package is required. Please install with: pip install openai")
+    
+    # Configure client with custom base URL for OpenAI-compatible APIs
+    client = openai.AsyncOpenAI(
+        api_key=api_key or "not-needed",  # Some APIs might not require a key
+        base_url=base_url.rstrip("/") + "/v1",
+        timeout=timeout_s,
+        max_retries=2,  # Built-in retry logic
+    )
+    
+    try:
+        response = await client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=temperature,
+            top_p=top_p,
+            max_tokens=max_tokens,
+            stream=True,  # Enable streaming
+            extra_body={
+                "chat_template_kwargs": {"enable_thinking": False},
+            }
+        )
+        
+        # Collect streaming response
+        chunks = []
+        async for chunk in response:
+            if chunk.choices and chunk.choices[0].delta.content:
+                chunks.append(chunk.choices[0].delta.content)
+        
+        return "".join(chunks)
+        
+    except openai.APIError as e:
+        # Handle OpenAI-specific errors
+        raise RuntimeError(f"OpenAI API error: {e}")
+    except Exception as e:
+        # Handle other errors (timeout, network, etc.)
+        raise RuntimeError(f"Request failed: {e}")
 
 
 def render_prompt(template: str, concept: str, concept_pos: str, definition: str) -> str:
@@ -237,7 +235,6 @@ def split_into_lines(text: str) -> t.List[str]:
 
 async def batched_generate_async(
     *,
-    session: "aiohttp.ClientSession",
     cfg: GenerationConfig,
     concept: str,
     concept_pos: str,
@@ -246,23 +243,20 @@ async def batched_generate_async(
     target_count: int,
     api_key: t.Optional[str],
 ) -> t.List[str]:
+    """Generate sentences until target count is reached, handling failures gracefully."""
     random_state = random.Random(cfg.seed)
     sentences: t.List[str] = []
-    required_batches = max(1, (target_count + cfg.batch_size - 1) // cfg.batch_size)
+    max_attempts = target_count * 3  # Safety limit to prevent infinite loops
+    attempt_count = 0
 
-    # Generate all batches for this template concurrently
-    async def generate_single_batch(batch_idx: int) -> t.List[str]:
+    async def generate_single_batch() -> t.List[str]:
         prompt = render_prompt(template, concept, concept_pos, definition)
+        
+        # The OpenAI SDK handles retries internally, but we can add our own for robustness
         backoff_s = 1.0
-        last_error = None
         for attempt in range(cfg.retries + 1):
             try:
-                if aiohttp is None:
-                    raise RuntimeError(
-                        "aiohttp is required. Please install with: pip install aiohttp"
-                    )
                 content = await chat_completion_stream(
-                    session,
                     base_url=cfg.base_url,
                     model=cfg.model,
                     system_prompt=DEFAULT_SYSTEM_PROMPT,
@@ -275,29 +269,55 @@ async def batched_generate_async(
                 )
                 return split_into_lines(content)
             except Exception as exc:  # noqa: BLE001
-                last_error = exc
                 if attempt < cfg.retries:
                     await asyncio.sleep(backoff_s)
                     backoff_s *= 2.0
                 else:
-                    raise RuntimeError(f"Failed generation for {concept} batch {batch_idx}: {last_error}")
+                    print(f"    Failed batch for {concept} ({template.split()[2]}): {exc}")
+                    return []  # Return empty list instead of raising
         return []
     
-    # Run all batches concurrently
-    batch_tasks = [generate_single_batch(i) for i in range(required_batches)]
-    batch_results = await asyncio.gather(*batch_tasks)
+    # Keep generating until we have enough sentences
+    print(f"    Generating {template.split()[2]} sentences for {concept} (target: {target_count})")
     
-    # Flatten results
-    for batch_lines in batch_results:
-        sentences.extend(batch_lines)
-
-    # Normalize and dedupe
-    sentences = [normalize_sentence(s) for s in sentences]
-    # Shuffle slightly to improve diversity before truncation
+    while len(sentences) < target_count and attempt_count < max_attempts:
+        # Calculate how many more batches we might need
+        remaining = target_count - len(sentences)
+        estimated_batches = max(1, (remaining + cfg.batch_size - 1) // cfg.batch_size)
+        
+        # Generate multiple batches concurrently, but not too many to avoid overwhelming
+        concurrent_batches = min(estimated_batches, 5)  # Limit concurrent requests
+        
+        batch_tasks = [generate_single_batch() for _ in range(concurrent_batches)]
+        batch_results = await asyncio.gather(*batch_tasks)
+        
+        # Process results
+        new_sentences = []
+        for batch_lines in batch_results:
+            if batch_lines:  # Only process non-empty results
+                new_sentences.extend(batch_lines)
+        
+        if new_sentences:
+            # Normalize new sentences
+            normalized_new = [normalize_sentence(s) for s in new_sentences if s]
+            # Add only unique sentences
+            for sent in normalized_new:
+                if sent and sent not in sentences:
+                    sentences.append(sent)
+            
+            print(f"      Progress: {len(sentences)}/{target_count} sentences")
+        else:
+            print(f"      No sentences generated in this batch, retrying...")
+            await asyncio.sleep(2.0)  # Brief pause before retrying
+        
+        attempt_count += concurrent_batches
+    
+    if len(sentences) < target_count:
+        print(f"    WARNING: Only generated {len(sentences)}/{target_count} sentences for {concept} after {attempt_count} attempts")
+    
+    # Shuffle for diversity and return exactly target_count (or all we have)
     random_state.shuffle(sentences)
     sentences = unique_preserve_order(sentences)
-    sentences = [s for s in sentences if s]
-    # Truncate to target count
     return sentences[:target_count]
 
 
@@ -414,7 +434,6 @@ def load_all_intermediate_positives(
 
 async def generate_concept_positives(
     *,
-    session: "aiohttp.ClientSession",
     cfg: GenerationConfig,
     concept: str,
     api_key: t.Optional[str],
@@ -425,7 +444,6 @@ async def generate_concept_positives(
 
     # Generate fact and story sentences concurrently
     fact_task = batched_generate_async(
-        session=session,
         cfg=cfg,
         concept=concept,
         concept_pos=concept_pos,
@@ -436,7 +454,6 @@ async def generate_concept_positives(
     )
     
     story_task = batched_generate_async(
-        session=session,
         cfg=cfg,
         concept=concept,
         concept_pos=concept_pos,
@@ -448,6 +465,7 @@ async def generate_concept_positives(
     
     fact_sentences, story_sentences = await asyncio.gather(fact_task, story_task)
     positives = unique_preserve_order(fact_sentences + story_sentences)
+    print(f"  Total positives for {concept}: {len(positives)} (fact: {len(fact_sentences)}, story: {len(story_sentences)})")
     return positives
 
 
@@ -460,54 +478,42 @@ async def phase1_generate_positives(
     api_key: t.Optional[str],
 ) -> None:
     """Phase 1: Generate positives for all concepts with high concurrency."""
-    if aiohttp is None:
-        raise RuntimeError("aiohttp is required. Please install with: pip install aiohttp")
+    if openai is None:
+        raise RuntimeError("openai package is required. Please install with: pip install openai")
 
-    timeout = aiohttp.ClientTimeout(total=cfg.timeout_s)  # type: ignore
+    # Process concepts in batches to avoid overwhelming the server
+    print(f"Phase 1: Generating positives for {len(concepts)} concepts with max {max_concurrent_concepts} concurrent concepts...")
     
-    async with aiohttp.ClientSession(base_url=cfg.base_url, timeout=timeout) as session:  # type: ignore
-        # Health check
-        try:
-            async with session.get("/health") as resp:
-                _ = resp.status
-        except Exception:
-            # Continue even if /health is not available
-            pass
-
-        # Process concepts in batches to avoid overwhelming the server
-        print(f"Phase 1: Generating positives for {len(concepts)} concepts with max {max_concurrent_concepts} concurrent concepts...")
+    for i in range(0, len(concepts), max_concurrent_concepts):
+        batch_concepts = concepts[i:i + max_concurrent_concepts]
         
-        for i in range(0, len(concepts), max_concurrent_concepts):
-            batch_concepts = concepts[i:i + max_concurrent_concepts]
+        # Create tasks for this batch of concepts
+        tasks = []
+        for concept in batch_concepts:
+            task = generate_concept_positives(
+                cfg=cfg,
+                concept=concept,
+                api_key=api_key,
+            )
+            tasks.append((concept, task))
+        
+        # Execute this batch concurrently
+        print(f"  Processing batch {i//max_concurrent_concepts + 1}: {len(batch_concepts)} concepts...")
+        results = await asyncio.gather(*[task for _, task in tasks], return_exceptions=True)
+        
+        # Save results
+        for (concept, _), result in zip(tasks, results):
+            if isinstance(result, Exception):
+                print(f"    ERROR for {concept}: {result}")
+                continue
             
-            # Create tasks for this batch of concepts
-            tasks = []
-            for concept in batch_concepts:
-                task = generate_concept_positives(
-                    session=session,
-                    cfg=cfg,
-                    concept=concept,
-                    api_key=api_key,
-                )
-                tasks.append((concept, task))
-            
-            # Execute this batch concurrently
-            print(f"  Processing batch {i//max_concurrent_concepts + 1}: {len(batch_concepts)} concepts...")
-            results = await asyncio.gather(*[task for _, task in tasks], return_exceptions=True)
-            
-            # Save results
-            for (concept, _), result in zip(tasks, results):
-                if isinstance(result, Exception):
-                    print(f"    ERROR for {concept}: {result}")
-                    continue
-                
-                positives = result
-                write_intermediate_positives(
-                    intermediate_dir=intermediate_dir,
-                    concept=concept,
-                    positives=positives,
-                )
-                print(f"    Generated {len(positives)} positives for {concept}")
+            positives = result
+            write_intermediate_positives(
+                intermediate_dir=intermediate_dir,
+                concept=concept,
+                positives=positives,
+            )
+            print(f"    Generated {len(positives)} positives for {concept}")
 
 
 def phase2_build_negatives_and_write(
