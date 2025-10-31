@@ -12,8 +12,7 @@ import torch
 from torch import nn
 from torch.utils.hooks import RemovableHandle
 from dataclasses import dataclass
-from transformers import AutoModelForPreTraining, AutoConfig
-
+from transformers import AutoModelForPreTraining, AutoConfig, AutoModelForCausalLM
 
 MODEL_INPUT_FIELDS = ["input_ids", "attention_mask"]
 LABELS_FIELD = "labels"
@@ -337,33 +336,41 @@ def transformers_model_name_to_family(model_name: str) -> str:
         return "distilbert"
     elif model_name.startswith("ctrl"):
         return "ctrl"
+    elif "pythia" in model_name.lower():
+        return "pythia"
+    elif "gpt-neox" in model_name.lower():
+        return "gpt-neox"
     else:
         raise NotImplementedError(f"Model name to type not considered: {model_name}")
 
 
 def transformers_class_from_name(
-    model_name: str, cache_dir: t.Optional[pathlib.Path] = None, rand_weights: bool = False
+    model_name: str,
+    cache_dir: t.Optional[pathlib.Path] = None,
+    rand_weights: bool = False,
 ) -> nn.Module:
     """
-    Obtain a model as pytorch nn.Module given a name (as defined in the Huggingface transformers repo)
+    Obtain a model as torch.nn.Module given a HuggingFace model name.
 
-    Args:
-        model_name: The huggingface transformers model name
-        cache_dir: Local cache dir
-        rand_weights: Use random weights or pre-trained weights
-
-    Returns:
-        nn.Module: a Pytorch nn.Module.
-
+    Automatically selects the right AutoModel class based on the model family.
     """
     try:
+        # Determine which AutoModel class to use
+        if any(x in model_name.lower() for x in ["pythia", "gpt-neox", "gpt2", "llama", "mistral", "falcon"]):
+            AutoModelClass = AutoModelForCausalLM
+        else:
+            AutoModelClass = AutoModelForPreTraining
+
         if rand_weights:
             config = AutoConfig.from_pretrained(model_name)
-            m = AutoModelForPreTraining.from_config(config)
+            m = AutoModelClass.from_config(config)
         else:
-            m = AutoModelForPreTraining.from_pretrained(model_name, cache_dir=cache_dir)
+            m = AutoModelClass.from_pretrained(model_name, cache_dir=cache_dir)
     except OSError:
         raise NotImplementedError(f"Model {model_name} could not be loaded.")
+    except ValueError as e:
+        raise NotImplementedError(f"Model {model_name} not compatible with selected AutoModel: {e}")
+
     assert m is not None
     return m
 
@@ -392,6 +399,14 @@ def get_layer_regex(model_name: str) -> t.Optional[t.List[str]]:
             "transformer.h.([0-9]|[0-9][0-9]).mlp.c_fc",
             "transformer.h.([0-9]|[0-9][0-9]).mlp.c_proj",
         ]
+    elif family in ["pythia", "gpt-neox"]:
+        # Based on GPT-NeoX architecture used by Pythia models
+        layer_types = [
+            r"gpt_neox\.layers\.[0-9]+\.attention\.query_key_value",
+            r"gpt_neox\.layers\.[0-9]+\.attention\.dense",
+            r"gpt_neox\.layers\.[0-9]+\.mlp\.dense_h_to_4h",
+            r"gpt_neox\.layers\.[0-9]+\.mlp\.dense_4h_to_h",
+        ]
     # Extend to other model families here if needed
     return layer_types
 
@@ -409,6 +424,20 @@ def _collect_responses_info_for_model(model: TorchModel, model_family: str) -> t
             ri
             for ri in model.get_response_infos()
             if ri.layer.kind in ["Conv1D", "BertLayerNorm", "Linear"]
+            and len(ri.shape) in [2, 3]
+            and "lm_head" not in ri.name
+        ],
+        "pythia": [
+            ri
+            for ri in model.get_response_infos()
+            if ri.layer.kind in ["Linear", "LayerNorm"]
+            and len(ri.shape) in [2, 3]
+            and "lm_head" not in ri.name
+        ],
+        "gpt-neox": [
+            ri
+            for ri in model.get_response_infos()
+            if ri.layer.kind in ["Linear", "LayerNorm"]
             and len(ri.shape) in [2, 3]
             and "lm_head" not in ri.name
         ],
