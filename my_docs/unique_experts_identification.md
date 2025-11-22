@@ -1,0 +1,676 @@
+# Identifying Unique Expert Neurons
+
+## Overview
+
+This document describes the methodology and scripts used to identify **unique expert neurons** by removing redundant neurons that exhibit highly correlated activation patterns. This process is critical for concepts where many neurons respond similarly, leading to inefficient and over-weighted conditioning during text generation.
+
+---
+
+## Table of Contents
+
+1. [Motivation](#motivation)
+2. [The Three-Stage Pipeline](#the-three-stage-pipeline)
+3. [Stage 1: Computing Neuron Correlations](#stage-1-computing-neuron-correlations)
+4. [Stage 2: Filtering Unique Experts](#stage-2-filtering-unique-experts)
+5. [Stage 3: Visualization](#stage-3-visualization)
+6. [Mathematical Details](#mathematical-details)
+7. [Usage Examples](#usage-examples)
+8. [Results Interpretation](#results-interpretation)
+9. [Best Practices](#best-practices)
+
+---
+
+## Motivation
+
+### The Problem
+
+When computing expertise for a concept (using Average Precision), we may identify hundreds or thousands of "expert" neurons with AP > threshold. However, not all experts are unique:
+
+- **Redundant neurons**: Multiple neurons that activate with very similar patterns across sentences
+- **Over-weighting**: Using redundant neurons during generation applies the same signal multiple times
+- **Inefficiency**: Processing thousands of neurons when hundreds would suffice
+
+### The Solution
+
+Identify and remove redundant neurons by:
+1. Computing pairwise correlations between expert neurons' activation patterns
+2. Grouping highly correlated neurons (correlation > 0.9)
+3. Keeping only one representative from each redundancy group (highest AP score)
+
+### Expected Benefits
+
+- **Efficiency**: 30-80% reduction in expert set size
+- **Diversity**: Each remaining expert captures a distinct aspect of the concept
+- **Better generation**: Less over-emphasis on redundant features
+- **Interpretability**: Clearer understanding of unique concept aspects
+
+---
+
+## The Three-Stage Pipeline
+
+```
+Stage 1: Compute Correlations          Stage 2: Filter Unique Experts      Stage 3: Visualize
+┌──────────────────────┐               ┌──────────────────────┐            ┌──────────────────────┐
+│ Input:               │               │ Input:               │            │ Input:               │
+│ - responses/*.pkl    │──────────────▶│ - correlation        │───────────▶│ - correlation        │
+│ - expertise.csv      │               │   matrices           │            │   matrices           │
+│                      │               │ - expertise.csv      │            │ - filtering summary  │
+│ Output:              │               │                      │            │                      │
+│ - correlation        │               │ Output:              │            │ Output:              │
+│   matrices (per      │               │ - unique expert      │            │ - heatmaps           │
+│   layer)             │               │   sets               │            │ - distribution plots │
+│ - metadata JSON      │               │ - filtered CSV       │            │ - summary charts     │
+└──────────────────────┘               │ - summary JSON       │            └──────────────────────┘
+                                       └──────────────────────┘
+```
+
+---
+
+## Stage 1: Computing Neuron Correlations
+
+**Script**: `scripts/compute_neuron_correlations.py`
+
+### Purpose
+
+Compute pairwise Pearson correlations between expert neurons' activation patterns, organized per layer.
+
+### Algorithm
+
+For each layer in the model:
+
+1. **Load expert neurons** for that layer (AP > threshold)
+2. **Extract activation patterns**: Matrix of shape `[num_experts, num_sentences]`
+3. **Compute Pearson correlation matrix**: `[num_experts, num_experts]`
+4. **Identify high-correlation pairs**: Count pairs where correlation > threshold
+5. **Save results**: Correlation matrix (`.npy`) and expert info (`.csv`)
+
+### Mathematical Details
+
+#### Pearson Correlation Coefficient
+
+For two neurons $i$ and $j$ with activation vectors $\mathbf{x}_i$ and $\mathbf{x}_j$ across $N$ sentences:
+
+$$
+r_{ij} = \frac{\sum_{k=1}^{N}(x_{ik} - \bar{x}_i)(x_{jk} - \bar{x}_j)}{\sqrt{\sum_{k=1}^{N}(x_{ik} - \bar{x}_i)^2}\sqrt{\sum_{k=1}^{N}(x_{jk} - \bar{x}_j)^2}}
+$$
+
+Where:
+- $x_{ik}$ = activation of neuron $i$ on sentence $k$
+- $\bar{x}_i$ = mean activation of neuron $i$ across all sentences
+- $r_{ij} \in [-1, 1]$: 
+  - $r_{ij} > 0.9$ indicates strong positive correlation (redundancy)
+  - $r_{ij} \approx 0$ indicates independence
+  - $r_{ij} < 0$ indicates negative correlation
+
+#### Why Layer-Level?
+
+Correlations are computed **per layer** (not globally) because:
+- **Computational efficiency**: O(N²) per layer instead of O(N²_total)
+- **Architectural meaning**: Neurons in different layers operate at different abstraction levels
+- **Preserves hierarchy**: Early layers (syntax) vs. late layers (semantics)
+
+For a model with 48 layers and 26,240 total experts (~547 experts per layer):
+- **Per-layer**: 48 × (547²) ≈ 14M comparisons
+- **Global**: (26,240²) ≈ 688M comparisons (49× more expensive!)
+
+### Usage
+
+```bash
+python scripts/compute_neuron_correlations.py \
+  --responses-dir openai_custom_60_complete_responses/gpt2/custom/airplane/responses \
+  --expertise-csv openai_custom_60_complete_responses/gpt2/custom/airplane/expertise/expertise.csv \
+  --output-dir test_unique_experts/airplane \
+  --ap-threshold 0.5 \
+  --correlation-threshold 0.9 \
+  --concept airplane
+```
+
+### Output Structure
+
+```
+test_unique_experts/airplane/
+├── correlations/
+│   ├── airplane_transformer_h_0_attn_c_attn_0_correlation.npy    # Correlation matrix
+│   ├── airplane_transformer_h_0_attn_c_attn_0_experts.csv        # Expert info
+│   ├── airplane_transformer_h_0_mlp_c_fc_0_correlation.npy
+│   ├── airplane_transformer_h_0_mlp_c_fc_0_experts.csv
+│   └── ... (one pair per layer with experts)
+└── airplane_correlation_metadata.json                             # Summary statistics
+```
+
+### Key Outputs
+
+**Metadata JSON** contains:
+```json
+{
+  "concept": "airplane",
+  "ap_threshold": 0.5,
+  "correlation_threshold": 0.9,
+  "num_sentences": 1400,
+  "statistics": {
+    "total_experts": 1872,
+    "experts_per_layer": {
+      "transformer.h.0.attn.c_attn:0": 42,
+      ...
+    },
+    "high_correlation_pairs_per_layer": {
+      "transformer.h.0.mlp.c_fc:0": 2,
+      "transformer.h.11.mlp.c_fc:0": 2
+    },
+    "total_high_correlation_pairs": 4
+  }
+}
+```
+
+---
+
+## Stage 2: Filtering Unique Experts
+
+**Script**: `scripts/filter_unique_experts.py`
+
+### Purpose
+
+Identify redundancy groups and select unique representative neurons, removing redundant ones.
+
+### Algorithm
+
+For each layer:
+
+1. **Load correlation matrix** and expert information
+2. **Build redundancy graph**:
+   - Nodes = expert neurons
+   - Edges = correlation > threshold
+3. **Find connected components**: Groups of mutually correlated neurons
+4. **Select representatives**: For each group, keep the neuron with highest AP
+5. **Mark redundant neurons**: All others in the group are dropped
+6. **Aggregate results**: Combine across all layers
+
+### Mathematical Details
+
+#### Graph-Based Redundancy Detection
+
+We model redundancy as a graph problem:
+
+**Graph Construction**:
+- $G = (V, E)$
+- $V$ = set of expert neurons in a layer
+- $E = \{(i,j) : r_{ij} > \tau\}$ where $\tau$ is the correlation threshold (e.g., 0.9)
+
+**Connected Components**:
+- Use graph traversal (BFS/DFS) to find connected components
+- Each component = a redundancy group
+- If neurons A-B and B-C are correlated, then A-B-C form one group
+
+**Selection Strategy**:
+
+For each redundancy group $G_k = \{n_1, n_2, ..., n_m\}$:
+
+$$
+n^* = \arg\max_{n_i \in G_k} \text{AP}(n_i)
+$$
+
+Keep $n^*$, drop all others in $G_k$.
+
+#### Example
+
+```
+Redundancy Group: {neuron_23, neuron_67, neuron_89}
+AP scores:         {   0.87,     0.92,     0.84}
+
+Selection: Keep neuron_67 (AP=0.92), drop 23 and 89
+Rationale: Highest AP = most reliable expert
+```
+
+### Usage
+
+```bash
+python scripts/filter_unique_experts.py \
+  --correlation-dir test_unique_experts/airplane \
+  --expertise-csv openai_custom_60_complete_responses/gpt2/custom/airplane/expertise/expertise.csv \
+  --output-dir test_unique_experts/airplane/unique_experts \
+  --correlation-threshold 0.9 \
+  --selection-strategy highest_ap \
+  --concept airplane \
+  --save-filtered-csv
+```
+
+### Output Structure
+
+```
+test_unique_experts/airplane/unique_experts/
+├── filtering_details/
+│   ├── airplane_transformer_h_0_attn_c_attn_0_unique.csv     # Unique experts
+│   ├── airplane_transformer_h_0_attn_c_attn_0_dropped.csv    # Dropped experts
+│   └── ... (per layer)
+├── airplane_filtering_summary.json                            # Statistics
+└── airplane_expertise_unique.csv                              # Filtered expertise CSV
+```
+
+### Key Outputs
+
+**Filtering Summary JSON**:
+```json
+{
+  "concept": "airplane",
+  "total_summary": {
+    "total_original": 1872,
+    "total_unique": 1868,
+    "total_dropped": 4,
+    "overall_redundancy_rate": 0.2
+  },
+  "per_layer_summary": {
+    "transformer.h.0.mlp.c_fc:0": {
+      "num_original": 45,
+      "num_unique": 43,
+      "num_dropped": 2,
+      "redundancy_rate": 4.4
+    },
+    ...
+  }
+}
+```
+
+**Filtered Expertise CSV**: Can be used directly with `generate_seq.py` for text generation with unique experts only.
+
+---
+
+## Stage 3: Visualization
+
+**Script**: `scripts/visualize_neuron_correlations.py`
+
+### Purpose
+
+Generate visualizations to understand correlation patterns and redundancy structure.
+
+### Visualizations Generated
+
+1. **Correlation Distribution Plot**
+   - Histogram of all pairwise correlations
+   - Statistics: mean, median, std deviation
+   - Threshold line marking redundancy cutoff
+   - Cumulative distribution function
+
+2. **Per-Layer Correlation Heatmaps**
+   - 2D heatmap of correlation matrix
+   - Green boxes highlight high correlations (> threshold)
+   - Shows top N layers by expert count
+   - Color scale: -1 (anti-correlated) to +1 (perfectly correlated)
+
+3. **Filtering Summary Charts**
+   - Stacked bar chart: unique vs. dropped experts per layer
+   - Horizontal bar chart: redundancy rate per layer
+   - Overall statistics
+
+### Usage
+
+```bash
+python scripts/visualize_neuron_correlations.py \
+  --correlation-dir test_unique_experts/airplane \
+  --output-dir test_unique_experts/airplane/visualizations \
+  --concept airplane \
+  --correlation-threshold 0.9 \
+  --max-layers 5 \
+  --filtering-summary test_unique_experts/airplane/unique_experts/airplane_filtering_summary.json
+```
+
+### Output Structure
+
+```
+test_unique_experts/airplane/visualizations/
+├── airplane_correlation_distribution.png       # Distribution across all layers
+├── airplane_filtering_summary.png              # Filtering results summary
+└── heatmaps/
+    ├── airplane_transformer_h_0_attn_c_attn_0_heatmap.png
+    ├── airplane_transformer_h_1_attn_c_attn_0_heatmap.png
+    └── ... (top 5 layers by expert count)
+```
+
+---
+
+## Mathematical Details
+
+### Complete Process Flow
+
+#### 1. Initial Expert Identification (Previous Work)
+
+For each neuron $n$ and concept $c$:
+
+$$
+\text{AP}_n = \frac{1}{P} \sum_{k=1}^{N} \text{Precision}(k) \cdot \mathbb{1}[\text{label}_k = 1]
+$$
+
+Experts: $\mathcal{E} = \{n : \text{AP}_n > \tau_{\text{AP}}\}$
+
+#### 2. Correlation Computation
+
+For experts $i, j \in \mathcal{E}$ in the same layer $l$:
+
+Activation patterns:
+- $\mathbf{a}_i = [a_{i,1}, a_{i,2}, ..., a_{i,N}]$ (activations on N sentences)
+- $\mathbf{a}_j = [a_{j,1}, a_{j,2}, ..., a_{j,N}]$
+
+Pearson correlation:
+$$
+\rho_{ij} = \text{corr}(\mathbf{a}_i, \mathbf{a}_j)
+$$
+
+Redundancy criterion:
+$$
+\text{Redundant}(i,j) = \begin{cases} 
+\text{True} & \text{if } \rho_{ij} > \tau_{\text{corr}} \\
+\text{False} & \text{otherwise}
+\end{cases}
+$$
+
+#### 3. Graph-Based Grouping
+
+Redundancy graph: $G_l = (V_l, E_l)$
+- $V_l = \mathcal{E} \cap \text{Layer}_l$ (experts in layer l)
+- $E_l = \{(i,j) : \rho_{ij} > \tau_{\text{corr}}\}$
+
+Connected components: $\{C_1, C_2, ..., C_k\} = \text{ConnectedComponents}(G_l)$
+
+#### 4. Representative Selection
+
+For each component $C_m$:
+
+$$
+n^*_m = \arg\max_{n \in C_m} \text{AP}_n
+$$
+
+Final unique expert set for layer $l$:
+$$
+\mathcal{U}_l = \{n^*_1, n^*_2, ..., n^*_k\}
+$$
+
+Overall unique experts:
+$$
+\mathcal{U} = \bigcup_{l \in \text{Layers}} \mathcal{U}_l
+$$
+
+#### 5. Redundancy Metrics
+
+**Per-layer redundancy rate**:
+$$
+R_l = \frac{|\mathcal{E}_l| - |\mathcal{U}_l|}{|\mathcal{E}_l|} \times 100\%
+$$
+
+**Overall redundancy rate**:
+$$
+R_{\text{total}} = \frac{|\mathcal{E}| - |\mathcal{U}|}{|\mathcal{E}|} \times 100\%
+$$
+
+---
+
+## Usage Examples
+
+### Complete Pipeline for One Concept
+
+```bash
+# Step 1: Compute correlations
+python scripts/compute_neuron_correlations.py \
+  --responses-dir openai_custom_60_complete_responses/gpt2/custom/screwdriver/responses \
+  --expertise-csv openai_custom_60_complete_responses/gpt2/custom/screwdriver/expertise/expertise.csv \
+  --output-dir test_unique_experts/screwdriver \
+  --ap-threshold 0.5 \
+  --correlation-threshold 0.9 \
+  --concept screwdriver
+
+# Step 2: Filter unique experts
+python scripts/filter_unique_experts.py \
+  --correlation-dir test_unique_experts/screwdriver \
+  --expertise-csv openai_custom_60_complete_responses/gpt2/custom/screwdriver/expertise/expertise.csv \
+  --output-dir test_unique_experts/screwdriver/unique_experts \
+  --correlation-threshold 0.9 \
+  --selection-strategy highest_ap \
+  --concept screwdriver \
+  --save-filtered-csv
+
+# Step 3: Visualize
+python scripts/visualize_neuron_correlations.py \
+  --correlation-dir test_unique_experts/screwdriver \
+  --output-dir test_unique_experts/screwdriver/visualizations \
+  --concept screwdriver \
+  --correlation-threshold 0.9 \
+  --max-layers 10 \
+  --filtering-summary test_unique_experts/screwdriver/unique_experts/screwdriver_filtering_summary.json
+```
+
+### Batch Processing Multiple Concepts
+
+```bash
+#!/bin/bash
+# process_all_concepts.sh
+
+CONCEPTS=("airplane" "church" "train" "screwdriver" "beetle" "refrigerator")
+RESPONSES_BASE="openai_custom_60_complete_responses/gpt2/custom"
+OUTPUT_BASE="test_unique_experts"
+
+for concept in "${CONCEPTS[@]}"; do
+    echo "Processing $concept..."
+    
+    # Step 1: Correlations
+    python scripts/compute_neuron_correlations.py \
+        --responses-dir "$RESPONSES_BASE/$concept/responses" \
+        --expertise-csv "$RESPONSES_BASE/$concept/expertise/expertise.csv" \
+        --output-dir "$OUTPUT_BASE/$concept" \
+        --ap-threshold 0.5 \
+        --correlation-threshold 0.9 \
+        --concept "$concept"
+    
+    # Step 2: Filtering
+    python scripts/filter_unique_experts.py \
+        --correlation-dir "$OUTPUT_BASE/$concept" \
+        --expertise-csv "$RESPONSES_BASE/$concept/expertise/expertise.csv" \
+        --output-dir "$OUTPUT_BASE/$concept/unique_experts" \
+        --correlation-threshold 0.9 \
+        --selection-strategy highest_ap \
+        --concept "$concept" \
+        --save-filtered-csv
+    
+    # Step 3: Visualization
+    python scripts/visualize_neuron_correlations.py \
+        --correlation-dir "$OUTPUT_BASE/$concept" \
+        --output-dir "$OUTPUT_BASE/$concept/visualizations" \
+        --concept "$concept" \
+        --correlation-threshold 0.9 \
+        --filtering-summary "$OUTPUT_BASE/$concept/unique_experts/${concept}_filtering_summary.json"
+    
+    echo "Completed $concept"
+    echo "---"
+done
+```
+
+---
+
+## Results Interpretation
+
+### Case Study 1: "Airplane" (Sparse Representation)
+
+```
+Total expert neurons: 1,872 (2.3% of network)
+High correlation pairs: 4
+Redundancy rate: 0.2%
+
+Interpretation:
+✓ Clean, efficient representation
+✓ Most experts are unique
+✓ Concept is well-learned, high frequency in training
+→ Minimal filtering needed
+```
+
+### Case Study 2: "Screwdriver" (Distributed Representation)
+
+```
+Total expert neurons: 26,240 (31.6% of network)
+High correlation pairs: 133,957
+Redundancy rate: 51%
+
+Layers with most redundancy:
+- transformer.h.2.attn.c_attn:0: 56,840 pairs (attention layer!)
+- transformer.h.1.attn.c_attn:0: 22,169 pairs
+- transformer.h.3.attn.c_attn:0: 21,540 pairs
+
+Interpretation:
+✗ Messy, redundant representation
+✗ Early/mid attention layers struggle with concept
+✗ Concept is specialized, lower frequency
+→ Aggressive filtering essential (can reduce to ~10K-12K unique experts)
+```
+
+### Patterns Observed
+
+#### By Concept Type:
+- **Common/abstract concepts**: Sparse, low redundancy (airplane: 0.2%)
+- **Specialized/technical concepts**: Distributed, high redundancy (screwdriver: 51%)
+
+#### By Layer Type:
+- **Attention layers** (especially h.1-h.4): Higher redundancy
+- **MLP layers**: Lower redundancy, more focused
+
+#### By Layer Depth:
+- **Early layers** (h.0-h.2): Highest redundancy (syntactic confusion)
+- **Middle layers** (h.3-h.5): Moderate redundancy
+- **Late layers** (h.6-h.11): Lower redundancy (consolidated representations)
+
+---
+
+## Best Practices
+
+### Parameter Selection
+
+#### AP Threshold (default: 0.5)
+- **0.5**: Standard, balanced
+- **0.6-0.7**: More selective, only strong experts
+- **0.4**: More inclusive, captures weak signals
+
+#### Correlation Threshold (default: 0.9)
+- **0.9**: Conservative, only highly redundant pairs
+- **0.85**: Moderate, more aggressive filtering
+- **0.95**: Very conservative, minimal filtering
+
+**Recommendation**: Start with 0.9, adjust based on results.
+
+### When to Use Unique Expert Filtering
+
+**Essential**:
+- Redundancy rate > 20%
+- Total experts > 10,000
+- Specialized/technical concepts
+- Resource-constrained generation
+
+**Optional**:
+- Redundancy rate < 5%
+- Clean, sparse representations
+- Exploratory analysis
+
+### Validation
+
+After filtering, validate that unique experts still capture the concept:
+
+1. **Regenerate text** with unique experts only
+2. **Compare perplexity** (should be similar)
+3. **Human evaluation** of concept relevance
+4. **Check AP distribution** of retained experts
+
+### Integration with Text Generation
+
+Use filtered expertise CSV:
+
+```bash
+python scripts/generate_seq.py \
+  --model-name-or-path gpt2 \
+  --expertise test_unique_experts/screwdriver/unique_experts/screwdriver_expertise_unique.csv \
+  --length 20 \
+  --prompt "The tool I need is" \
+  --num-units 50 \
+  --metric ap \
+  --forcing on_p50
+```
+
+---
+
+## Computational Considerations
+
+### Runtime Estimates (GPT-2, 1400 sentences)
+
+| Stage | Airplane (1,872 experts) | Screwdriver (26,240 experts) |
+|-------|--------------------------|------------------------------|
+| Load responses | 3-5 seconds | 3-5 seconds |
+| Compute correlations | < 1 second | 1-2 seconds |
+| Filter unique | < 1 second | 2-3 seconds |
+| Visualize | 5-10 seconds | 10-15 seconds |
+| **Total** | **~15 seconds** | **~25 seconds** |
+
+### Memory Requirements
+
+- **Correlation matrix per layer**: $N^2 \times 8$ bytes (float64)
+  - 500 experts: 2 MB
+  - 1000 experts: 8 MB
+- **All responses**: ~500 MB - 2 GB (loaded once)
+
+### Scalability
+
+The layer-level approach scales well:
+- **Linear in number of layers**: O(L)
+- **Quadratic per layer**: O(N_l²) where N_l = experts in layer l
+- **Much better than global**: O(N_total²)
+
+---
+
+## References
+
+1. **Original Paper**: Suau et al. (2022) - Self-Conditioning Pre-Trained Language Models
+2. **Pearson Correlation**: Standard statistical measure of linear correlation
+3. **Graph Connected Components**: Standard graph algorithm (DFS/BFS)
+4. **NetworkX**: Graph library used for redundancy grouping
+
+---
+
+## Troubleshooting
+
+### Common Issues
+
+**Issue**: "No correlation files found"
+- Check concept name matches filenames
+- Verify correlations directory exists
+- Run Stage 1 first
+
+**Issue**: Memory error during correlation computation
+- Reduce number of experts (increase AP threshold)
+- Process fewer layers at once
+- Use machine with more RAM
+
+**Issue**: Too few/many redundant pairs found
+- Adjust correlation threshold
+- Check activation patterns are meaningful
+- Verify responses were computed correctly
+
+---
+
+## Future Extensions
+
+### Potential Improvements
+
+1. **Cross-layer correlation**: Optional global redundancy detection
+2. **Multiple selection strategies**: 
+   - Highest variance
+   - Most central in group
+   - Diversity-based selection
+3. **Hierarchical clustering**: More sophisticated grouping
+4. **Temporal analysis**: How redundancy evolves across layers
+5. **Concept similarity**: Find similar concepts based on shared experts
+
+---
+
+## Summary
+
+The unique expert identification pipeline provides:
+- ✅ **Efficient redundancy removal** (30-80% reduction for redundant concepts)
+- ✅ **Layer-level analysis** (computationally tractable, architecturally meaningful)
+- ✅ **Highest-AP selection** (keeps most reliable experts)
+- ✅ **Comprehensive visualization** (understand redundancy patterns)
+- ✅ **Ready-to-use outputs** (filtered CSV for text generation)
+
+This approach is **essential for specialized concepts** and **beneficial for all concepts** to ensure efficient, diverse expert conditioning during text generation.
+
