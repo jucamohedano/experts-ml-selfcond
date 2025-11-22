@@ -187,6 +187,11 @@ def extract_experts_from_csv(
     
     # Load the CSV file
     df = pd.read_csv(expertise_csv_path)
+
+    # Ensure deterministic ordering of neurons regardless of how the CSV was saved
+    # This assumes 'layer' and 'unit' columns exist, which you validate later anyway
+    if 'layer' in df.columns and 'unit' in df.columns:
+        df = df.sort_values(by=['layer', 'unit'], ascending=[True, True])
     
     # Validate required columns
     required_columns = ['ap', 'layer', 'unit', 'concept', 'group']
