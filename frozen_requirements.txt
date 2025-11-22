@@ -11,4 +11,5 @@ mypy==0.901
 pytest>=7.4.0
 pytest-mypy>=0.10.0
 nltk
+hydra-core
 .

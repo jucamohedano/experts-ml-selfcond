@@ -1,0 +1,6 @@
+name: unique_experts
+ap_threshold: 0.5
+correlation_threshold: 0.9
+selection_strategy: highest_ap
+run_tag: corr-${task.correlation_threshold}
+

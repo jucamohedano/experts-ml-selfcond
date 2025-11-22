@@ -20,7 +20,7 @@ import json
 import numpy as np
 
 from selfcond.data import concept_list_to_df
-from selfcond.expert_analysis import extract_experts_from_csv
+from selfcond.expert_analysis import extract_experts_from_csv, load_multiple_expert_sets
 
 
 def load_expertise_for_concept(concept_dir: pathlib.Path, concept: str, concept_group: str, threshold: float):
@@ -49,35 +49,62 @@ def load_expertise_for_concept(concept_dir: pathlib.Path, concept: str, concept_
         return None
 
 
-def compute_shared_experts(root_dir: pathlib.Path, model_name: str, concepts_requested, output_dir: pathlib.Path, threshold: float):
+def run_shared_experts_stats(
+    output_dir: pathlib.Path,
+    threshold: float,
+    expertise_dir: pathlib.Path = None,
+    pattern: str = "**/expertise.csv",
+    root_dir: pathlib.Path = None,
+    model_name: str = None,
+    concepts_requested = None,
+):
     """
     Compute shared experts across all concepts.
 
     Args:
-        root_dir: Root directory with responses
-        model_name: Model name
-        concepts_requested: List of concepts or path to concept list
         output_dir: Where to save the output JSON
         threshold: AP threshold for defining expert neurons
+        expertise_dir: Directory containing multiple expertise.csv files (searches recursively)
+        pattern: Glob pattern to find expertise.csv files if expertise_dir is used
+        root_dir: Root directory with responses (legacy/structured mode)
+        model_name: Model name (legacy/structured mode)
+        concepts_requested: List of concepts or path to concept list (legacy/structured mode)
     """
-    # Load concepts
-    if isinstance(concepts_requested, list):
-        concept_list = concepts_requested
-    else:
-        concept_df = concept_list_to_df(concepts_requested)
-        concept_list = [(row["group"], row["concept"]) for _, row in concept_df.iterrows()]
+    output_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"Processing {len(concept_list)} concepts with AP threshold {threshold}...")
-
-    # Load expertise for all concepts
     expert_sets = []
-    for group, concept in concept_list:
-        concept_dir = root_dir / model_name / group / concept
-        expert_set = load_expertise_for_concept(concept_dir, concept, group, threshold)
-        if expert_set is not None:
-            expert_sets.append(expert_set)
+
+    # Mode 1: Load from directory using pattern (Flexible/Hydra mode)
+    if expertise_dir:
+        print(f"Loading expert sets from {expertise_dir} with pattern '{pattern}'...")
+        expert_sets = load_multiple_expert_sets(
+            expertise_dir,
+            threshold=threshold,
+            pattern=pattern
+        )
+    
+    # Mode 2: Load from structured paths (Legacy/Script mode)
+    elif root_dir and model_name and concepts_requested:
+        # Load concepts
+        if isinstance(concepts_requested, list):
+            concept_list = concepts_requested
         else:
-            print(f"Skipping {group}/{concept} due to missing expertise")
+            concept_df = concept_list_to_df(concepts_requested)
+            concept_list = [(row["group"], row["concept"]) for _, row in concept_df.iterrows()]
+
+        print(f"Processing {len(concept_list)} concepts from structured dirs with AP threshold {threshold}...")
+
+        for group, concept in concept_list:
+            concept_dir = root_dir / model_name / group / concept
+            expert_set = load_expertise_for_concept(concept_dir, concept, group, threshold)
+            if expert_set is not None:
+                expert_sets.append(expert_set)
+            else:
+                print(f"Skipping {group}/{concept} due to missing expertise")
+    
+    else:
+        print("Error: Must provide either expertise_dir OR (root_dir, model_name, concepts_requested)")
+        return
 
     if len(expert_sets) == 0:
         print("No concepts with expertise results found!")
@@ -161,7 +188,7 @@ def compute_shared_experts(root_dir: pathlib.Path, model_name: str, concepts_req
     print("="*60)
 
 
-if __name__ == "__main__":
+def main():
     parser = argparse.ArgumentParser(
         prog="compute_shared_experts.py",
         description=(
@@ -194,7 +221,7 @@ if __name__ == "__main__":
     # Load concepts
     if not args.concepts:
         # Use the standard dataset location
-        concepts_file = root_dir / "assets" / "openai_custom_60_complete" / "concept_list.csv"
+        concepts_file = root_dir / "assets" / "openai_custom_60" / "concept_list.csv"
         if not concepts_file.exists():
             raise FileNotFoundError(f"No --concepts provided and {concepts_file} not found")
         concepts_requested = concepts_file
@@ -211,4 +238,10 @@ if __name__ == "__main__":
         output_dir = root_dir / args.model_name / "shared_experts"
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    compute_shared_experts(root_dir, args.model_name, concepts_requested, output_dir, args.threshold)
+    run_shared_experts_stats(
+        output_dir=output_dir,
+        threshold=args.threshold,
+        root_dir=root_dir,
+        model_name=args.model_name,
+        concepts_requested=concepts_requested
+    )

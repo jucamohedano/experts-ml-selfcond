@@ -1,0 +1,16 @@
+name: visualize_overlap
+csv_path: null
+output_dir: null
+run_tag: viz-${task.visualization.layout_mode}
+visualization:
+  low_threshold: 0.2
+  layout_mode: mds
+  topk: 10
+  min_edge_width: 0.2
+  max_edge_width: 15.0
+  dpi: 200
+  fontsize: 9
+  spring_k: 0.5
+  hybrid_iterations: 100
+  seed: 0
+

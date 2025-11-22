@@ -9,6 +9,7 @@ Simplified script:
 
 import os
 import json
+import argparse
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -16,59 +17,47 @@ import networkx as nx
 # from sklearn.manifold import MDS
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 
-# ---------------- CONFIG ----------------
-CSV_PATH = "/home/juancm/trento/abns/project/juans_fork/ml-selfcond/pythia_openai_custom_60_expert_sim/similarity_matrix_tau_0.5.csv"   # path to your matrix CSV
-OUT_DIR = "/home/juancm/trento/abns/project/juans_fork/ml-selfcond/pythia_openai_custom_60_expert_sim/graph_outputs"
-os.makedirs(OUT_DIR, exist_ok=True)
-
-# Thresholds (tune for your matrix)
-LOW_THRESHOLD = 0.3    # edges with sim >= LOW_THRESHOLD are kept
-
-# Edge width mapping
-MIN_EDGE_WIDTH = 0.2
-MAX_EDGE_WIDTH = 15.0
-FIG_DPI = 200
-BASE_FONTSIZE = 9
-# Layout options: 'spring' | 'mds' | 'hybrid'
-LAYOUT_MODE = 'mds'
-SPRING_K = 0.4
-HYBRID_ITERATIONS = 100
-SEED = 0
+# ---------------- CONFIG (defaults) ----------------
+# Edge width mapping constants
+DEFAULT_MIN_EDGE_WIDTH = 0.2
+DEFAULT_MAX_EDGE_WIDTH = 15.0
+DEFAULT_FIG_DPI = 200
+DEFAULT_BASE_FONTSIZE = 9
+DEFAULT_SPRING_K = 0.5
+DEFAULT_HYBRID_ITERATIONS = 100
+DEFAULT_SEED = 0
 # ----------------------------------------
 
-# -------- Load matrix --------
-print(f"Loading matrix from: {CSV_PATH}")
-if not os.path.exists(CSV_PATH):
-    raise FileNotFoundError(f"Matrix file not found: {CSV_PATH}")
+def load_similarity_matrix(csv_path: str):
+    print(f"Loading matrix from: {csv_path}")
+    if not os.path.exists(csv_path):
+        raise FileNotFoundError(f"Matrix file not found: {csv_path}")
+    df = pd.read_csv(csv_path, index_col=0)
+    concepts = list(df.index.astype(str))
+    J = df.values
+    N = len(concepts)
+    print(f"Loaded {J.shape[0]}×{J.shape[1]} Jaccard matrix with {len(concepts)} concepts.")
+    # Validate matrix shape
+    if J.shape[0] != J.shape[1]:
+        raise ValueError(f"Matrix is not square: {J.shape}")
+    if J.shape[0] != len(concepts):
+        raise ValueError(f"Matrix size {J.shape[0]} doesn't match concepts count {len(concepts)}")
+    # Ensure diagonal = 1
+    np.fill_diagonal(J, 1.0)
+    return J, concepts
 
-df = pd.read_csv(CSV_PATH, index_col=0)
-concepts = list(df.index.astype(str))
-J = df.values
-N = len(concepts)
-print(f"Loaded {J.shape[0]}×{J.shape[1]} Jaccard matrix with {len(concepts)} concepts.")
-
-# Validate matrix shape
-if J.shape[0] != J.shape[1]:
-    raise ValueError(f"Matrix is not square: {J.shape}")
-if J.shape[0] != len(concepts):
-    raise ValueError(f"Matrix size {J.shape[0]} doesn't match concepts count {len(concepts)}")
-
-# Ensure diagonal = 1
-np.fill_diagonal(J, 1.0)
-
-# Extract top 10 highest similarities for JSON output
-top_similarities = []
-for i in range(N):
-    for j in range(i+1, N):
-        sim = J[i, j]
-        top_similarities.append((concepts[i], concepts[j], float(sim)))
-
-# Sort by similarity descending and take top 10
-top_similarities.sort(key=lambda x: x[2], reverse=True)
-top_10 = top_similarities[:10]
+def compute_top_k_pairs(J: np.ndarray, labels: list[str], k: int = 10):
+    N = len(labels)
+    pairs = []
+    for i in range(N):
+        for j in range(i+1, N):
+            sim = float(J[i, j])
+            pairs.append((labels[i], labels[j], sim))
+    pairs.sort(key=lambda x: x[2], reverse=True)
+    return pairs[:k]
 
 # -------- Heatmap --------
-def plot_heatmap(J, labels, outpath):
+def plot_heatmap(J, labels, outpath, dpi=DEFAULT_FIG_DPI):
     n = len(labels)
     # Scale figure size with number of labels (capped for practicality)
     side = min(28, max(8, 0.05 * n + 8))
@@ -101,12 +90,8 @@ def plot_heatmap(J, labels, outpath):
         ax.grid(True, which='major', color='w', alpha=0.15, linestyle='--')
 
     fig.tight_layout()
-    fig.savefig(outpath, dpi=FIG_DPI, bbox_inches='tight')
+    fig.savefig(outpath, dpi=dpi, bbox_inches='tight')
     plt.close(fig)
-
-heatmap_path = os.path.join(OUT_DIR, "jaccard_heatmap.png")
-plot_heatmap(J, concepts, heatmap_path)
-print("Saved heatmap →", heatmap_path)
 
 # -------- Build graph (threshold) --------
 def first_build_graph_threshold(J, concepts, threshold=0.1):
@@ -133,8 +118,8 @@ def first_build_graph_threshold(J, concepts, threshold=0.1):
 
 def build_graph_threshold_linear(J, labels,
                                  low_threshold=0.1,
-                                 min_edge_width=0.2,
-                                 max_edge_width=15.0,
+                                 min_edge_width=DEFAULT_MIN_EDGE_WIDTH,
+                                 max_edge_width=DEFAULT_MAX_EDGE_WIDTH,
                                  symmetrize=True):
     """
     Build an undirected weighted graph from similarity matrix J using a low threshold for edge inclusion.
@@ -172,16 +157,24 @@ def build_graph_threshold_linear(J, labels,
 
     return G, edge_widths
 
-G, edge_widths = build_graph_threshold_linear(J, concepts,
-                                             low_threshold=LOW_THRESHOLD,
-                                             min_edge_width=MIN_EDGE_WIDTH,
-                                             max_edge_width=MAX_EDGE_WIDTH,
-                                             symmetrize=True)
-
 # print(f"Threshold graph built with {G.number_of_nodes()} nodes and {G.number_of_edges()} edges (J>{THRESHOLD}).")
 
 # -------- Plot graph with MDS layout --------
-def plot_graph(G, J, concepts, outpath, edge_widths):
+def plot_graph(
+    G, 
+    J, 
+    concepts, 
+    outpath, 
+    edge_widths, 
+    layout_mode, 
+    low_threshold: float,
+    min_edge_width=DEFAULT_MIN_EDGE_WIDTH,
+    dpi=DEFAULT_FIG_DPI,
+    fontsize=DEFAULT_BASE_FONTSIZE,
+    spring_k=DEFAULT_SPRING_K,
+    hybrid_iterations=DEFAULT_HYBRID_ITERATIONS,
+    seed=DEFAULT_SEED,
+):
     # Remove isolated nodes (no edges kept by thresholds)
     isolated = [n for n, d in G.degree() if d == 0]
     if isolated:
@@ -203,21 +196,21 @@ def plot_graph(G, J, concepts, outpath, edge_widths):
     dist = 1.0 - J_sub
 
     # Compute positions based on layout mode
-    if LAYOUT_MODE == 'mds':
+    if layout_mode == 'mds':
         from sklearn.manifold import MDS
-        mds = MDS(n_components=2, dissimilarity='precomputed', random_state=SEED)
+        mds = MDS(n_components=2, dissimilarity='precomputed', random_state=seed)
         coords = mds.fit_transform(dist)
         pos = {node: (coords[idx_map[node], 0], coords[idx_map[node], 1]) for node in kept_nodes}
         layout_title = 'MDS'
-    elif LAYOUT_MODE == 'hybrid':
+    elif layout_mode == 'hybrid':
         from sklearn.manifold import MDS
-        mds = MDS(n_components=2, dissimilarity='precomputed', random_state=SEED)
+        mds = MDS(n_components=2, dissimilarity='precomputed', random_state=seed)
         coords = mds.fit_transform(dist)
         init_pos = {node: (coords[idx_map[node], 0], coords[idx_map[node], 1]) for node in kept_nodes}
-        pos = nx.spring_layout(G, weight='weight', seed=SEED, k=SPRING_K, pos=init_pos, iterations=HYBRID_ITERATIONS)
-        layout_title = f'Hybrid (MDS init + spring {HYBRID_ITERATIONS} it)'
+        pos = nx.spring_layout(G, weight='weight', seed=seed, k=spring_k, pos=init_pos, iterations=hybrid_iterations)
+        layout_title = f'Hybrid (MDS init + spring {hybrid_iterations} it)'
     else:  # 'spring'
-        pos = nx.spring_layout(G, weight='weight', seed=SEED, k=SPRING_K)
+        pos = nx.spring_layout(G, weight='weight', seed=seed, k=spring_k)
         layout_title = 'Spring'
     
     plt.figure(figsize=(10,10))
@@ -226,35 +219,117 @@ def plot_graph(G, J, concepts, outpath, edge_widths):
     ordered_edges = list(G.edges())
     for (u, v) in ordered_edges:
         key = (u, v) if u < v else (v, u)
-        w = edge_widths.get(key, MIN_EDGE_WIDTH)
+        w = edge_widths.get(key, min_edge_width)
         widths.append(w)
     nx.draw_networkx_edges(G, pos, width=widths, edge_color="#444", alpha=0.8)
     # nodes
     nx.draw_networkx_nodes(G, pos, node_size=200, node_color='red', edgecolors='k')
     # labels
     for node, (x,y) in pos.items():
-        plt.text(x, y, concepts[node], fontsize=BASE_FONTSIZE,
+        plt.text(x, y, concepts[node], fontsize=fontsize,
                  ha='center', va='center', bbox=dict(facecolor='white', alpha=0.7, edgecolor='none', pad=0.5))
-    plt.title(f"Graph of Concepts [{layout_title}] (edges where J ≥ {LOW_THRESHOLD}; linear width by sim)")
+    plt.title(f"Graph of Concepts [{layout_title}] (edges where J ≥ {low_threshold}; linear width by sim)")
     plt.axis('off')
     plt.tight_layout()
-    plt.savefig(outpath, dpi=FIG_DPI)
+    plt.savefig(outpath, dpi=dpi)
     plt.close()
 
-graph_path = os.path.join(OUT_DIR, f"graph_threshold_{LOW_THRESHOLD}_{LAYOUT_MODE}.png")
-plot_graph(G, J, concepts, graph_path, edge_widths)
-print("Saved threshold graph →", graph_path)
 
-# Save top 10 similarities to JSON
-top_10_json = {
-    "top_10_similarities": [
-        {"concept1": c1, "concept2": c2, "similarity": sim}
-        for c1, c2, sim in top_10
-    ]
-}
-json_path = os.path.join(OUT_DIR, "top_10_similarities.json")
-with open(json_path, 'w') as f:
-    json.dump(top_10_json, f, indent=2)
-print("Saved top 10 similarities →", json_path)
 
-print("\nDone! Outputs are in:", OUT_DIR)
+def run_overlap_visualization(
+    csv_path: str,
+    output_dir: str,
+    low_threshold: float = 0.2,
+    layout_mode: str = "mds",
+    topk: int = 10,
+    min_edge_width: float = DEFAULT_MIN_EDGE_WIDTH,
+    max_edge_width: float = DEFAULT_MAX_EDGE_WIDTH,
+    dpi: int = DEFAULT_FIG_DPI,
+    fontsize: int = DEFAULT_BASE_FONTSIZE,
+    spring_k: float = DEFAULT_SPRING_K,
+    hybrid_iterations: int = DEFAULT_HYBRID_ITERATIONS,
+    seed: int = DEFAULT_SEED,
+):
+    """
+    Run the expert overlap visualization pipeline.
+    
+    Args:
+        csv_path: Path to the CSV file containing the similarity matrix
+        output_dir: Path to the output directory
+        low_threshold: Low threshold for edge inclusion
+        layout_mode: Layout mode ('spring', 'mds', 'hybrid')
+        topk: Number of top similar pairs to save
+        min_edge_width: Minimum edge width
+        max_edge_width: Maximum edge width
+        dpi: Figure DPI
+        fontsize: Base font size
+        spring_k: Spring layout constant
+        hybrid_iterations: Number of iterations for hybrid layout
+        seed: Random seed
+    """
+    os.makedirs(output_dir, exist_ok=True)
+
+    # Load matrix
+    J, concepts = load_similarity_matrix(csv_path)
+
+    # Heatmap
+    heatmap_path = os.path.join(output_dir, "jaccard_heatmap.png")
+    plot_heatmap(J, concepts, heatmap_path, dpi=dpi)
+    print("Saved heatmap →", heatmap_path)
+
+    # Build graph and edge widths from similarity matrix
+    G, edge_widths = build_graph_threshold_linear(
+        J, concepts,
+        low_threshold=low_threshold,
+        min_edge_width=min_edge_width,
+        max_edge_width=max_edge_width,
+        symmetrize=True
+    )
+
+    # Plot graph
+    graph_path = os.path.join(output_dir, f"graph_threshold_{low_threshold}_{layout_mode}.png")
+    plot_graph(
+        G, J, concepts, graph_path, edge_widths, layout_mode, low_threshold,
+        min_edge_width=min_edge_width, dpi=dpi, fontsize=fontsize,
+        spring_k=spring_k, hybrid_iterations=hybrid_iterations, seed=seed
+    )
+    print("Saved threshold graph →", graph_path)
+
+    # Save top 10 similarities to JSON
+    top_ks = compute_top_k_pairs(J, concepts, k=topk)
+    top_k_json = {
+        "top_k": topk,
+        "pairs": [
+            {"concept1": c1, "concept2": c2, "similarity": sim}
+            for c1, c2, sim in top_ks
+        ]
+    }
+    json_path = os.path.join(output_dir, "top_similarities.json")
+    with open(json_path, 'w') as f:
+        json.dump(top_k_json, f, indent=2)
+    print("Saved top similarities →", json_path)
+
+    print("\nDone! Outputs are in:", output_dir)
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Visualize expert overlap")
+    parser.add_argument("--csv", type=str, required=True, help="Path to the CSV file containing the similarity matrix")
+    parser.add_argument("--output-dir", type=str, required=True, help="Path to the output directory")
+    parser.add_argument("--low-threshold", type=float, default=0.2, help="Low threshold for edge inclusion")
+    parser.add_argument("--layout-mode", type=str, default="mds", choices=["spring","mds","hybrid"], help="Layout mode")
+    parser.add_argument("--topk", type=int, default=10, help="Save JSON with top-K most similar pairs")
+    
+    args = parser.parse_args()
+    
+    run_overlap_visualization(
+        csv_path=args.csv,
+        output_dir=args.output_dir,
+        low_threshold=args.low_threshold,
+        layout_mode=args.layout_mode,
+        topk=args.topk,
+    )
+
+
+if __name__ == "__main__":
+    main()

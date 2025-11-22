@@ -99,6 +99,62 @@ def compute_and_save_responses(
     return
 
 
+def run_response_computation(
+    model_name_or_path: str,
+    data_path: pathlib.Path,
+    responses_path: pathlib.Path,
+    concepts: str = "",
+    model_cache: pathlib.Path = None,
+    tok_cache: pathlib.Path = None,
+    seq_len: int = 128,
+    num_per_concept: int = 1000,
+    inf_batch_size: int = 30,
+    device: str = None,
+):
+    """
+    Run the response computation pipeline.
+    """
+    if model_cache is not None and tok_cache is None:
+        tok_cache = model_cache
+
+    responses_path.mkdir(exist_ok=True, parents=True)
+
+    if not concepts:
+        assert (data_path / "concept_list.csv").exists()
+        concepts_requested = data_path / "concept_list.csv"
+    else:
+        concepts_requested = concepts.split(",")
+
+    # Normalize concept list into a dataframe
+    concept_df = concept_list_to_df(concepts_requested)
+
+    # Load a tokenizer for sentence pre-processing
+    tokenizer = PytorchTransformersTokenizer(model_name_or_path, tok_cache)
+
+    # Read responses for all concepts in concept_df
+    for _, row in concept_df.iterrows():
+        concept, concept_group = row["concept"], row["group"]
+
+        if concept in ["positive", "negative"] and concept_group == "keyword":
+            continue
+
+        print(f"Running inference to read responses on concept {concept_group}/{concept}")
+        compute_and_save_responses(
+            model_name=model_name_or_path,
+            model_cache_dir=model_cache,
+            data_path=data_path,
+            concept_group=concept_group,
+            concept=concept,
+            seq_len=seq_len,
+            num_per_concept=num_per_concept,
+            batch_size=inf_batch_size,
+            response_save_path=responses_path,
+            tokenizer=tokenizer,
+            verbose=True,
+            device=device,
+        )
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         prog="compute_responses.py",
@@ -178,46 +234,15 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    model_cache = args.model_cache if args.model_cache else None
-    tok_cache = args.tok_cache
-    if args.model_cache is not None and tok_cache is None:
-        tok_cache = args.model_cache
-
-    data_path = args.data_path
-    responses_path = args.responses_path
-    responses_path.mkdir(exist_ok=True, parents=True)
-
-    if not args.concepts:
-        assert (data_path / "concept_list.csv").exists()
-        concepts_requested = data_path / "concept_list.csv"
-    else:
-        concepts_requested = args.concepts.split(",")
-
-    # Normalize concept list into a dataframe
-    concept_df = concept_list_to_df(concepts_requested)
-
-    # Load a tokenizer for sentence pre-processing
-    tokenizer = PytorchTransformersTokenizer(args.model_name_or_path, tok_cache)
-
-    # Read responses for all concepts in concept_df
-    for _, row in concept_df.iterrows():
-        concept, concept_group = row["concept"], row["group"]
-
-        if concept in ["positive", "negative"] and concept_group == "keyword":
-            continue
-
-        print(f"Running inference to read responses on concept {concept_group}/{concept}")
-        compute_and_save_responses(
-            model_name=args.model_name_or_path,
-            model_cache_dir=model_cache,
-            data_path=data_path,
-            concept_group=concept_group,
-            concept=concept,
-            seq_len=args.seq_len,
-            num_per_concept=args.num_per_concept,
-            batch_size=args.inf_batch_size,
-            response_save_path=responses_path,
-            tokenizer=tokenizer,
-            verbose=True,
-            device=args.device,
-        )
+    run_response_computation(
+        model_name_or_path=args.model_name_or_path,
+        data_path=args.data_path,
+        responses_path=args.responses_path,
+        concepts=args.concepts,
+        model_cache=args.model_cache,
+        tok_cache=args.tok_cache,
+        seq_len=args.seq_len,
+        num_per_concept=args.num_per_concept,
+        inf_batch_size=args.inf_batch_size,
+        device=args.device,
+    )
