@@ -83,25 +83,6 @@ def run_shared_experts_stats(
             pattern=pattern
         )
     
-    # Mode 2: Load from structured paths (Legacy/Script mode)
-    elif root_dir and model_name and concepts_requested:
-        # Load concepts
-        if isinstance(concepts_requested, list):
-            concept_list = concepts_requested
-        else:
-            concept_df = concept_list_to_df(concepts_requested)
-            concept_list = [(row["group"], row["concept"]) for _, row in concept_df.iterrows()]
-
-        print(f"Processing {len(concept_list)} concepts from structured dirs with AP threshold {threshold}...")
-
-        for group, concept in concept_list:
-            concept_dir = root_dir / model_name / group / concept
-            expert_set = load_expertise_for_concept(concept_dir, concept, group, threshold)
-            if expert_set is not None:
-                expert_sets.append(expert_set)
-            else:
-                print(f"Skipping {group}/{concept} due to missing expertise")
-    
     else:
         print("Error: Must provide either expertise_dir OR (root_dir, model_name, concepts_requested)")
         return
