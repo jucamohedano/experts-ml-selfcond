@@ -1,3 +1,4 @@
 name: Qwen3-30B-A3B-Instruct-2507_gpt2
 generation: Qwen3-30B-A3B-Instruct-2507
 processing: gpt2
+generation_type: _predict

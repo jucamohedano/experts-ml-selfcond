@@ -3,8 +3,8 @@ csv_path: null
 output_dir: null
 run_tag: viz-${task.visualization.layout_mode}
 visualization:
-  low_threshold: 0.2
-  layout_mode: mds
+  low_threshold: 0.05
+  layout_mode: hybrid
   topk: 10
   min_edge_width: 0.2
   max_edge_width: 15.0

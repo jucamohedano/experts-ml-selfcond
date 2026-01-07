@@ -8,7 +8,7 @@ defaults:
 output_root: results
 
 # Paths (can be overridden)
-responses_base_dir: ${model.generation}_custom_60_responses
+responses_base_dir: responses/${model.generation}_custom_60_responses${model.generation_type}
 
 hydra:
   job:
