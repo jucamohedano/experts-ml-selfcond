@@ -5,10 +5,9 @@ Replaces find_unique_experts.sh and find_unique_experts_parallel.sh.
 """
 
 import hydra
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import DictConfig
 import pathlib
 import logging
-import sys
 
 # Import analysis scripts directly
 from scripts.compute_neuron_correlations import run_correlation_analysis
@@ -19,6 +18,8 @@ from scripts.visualize_expert_overlap import run_overlap_visualization
 from scripts.compute_responses import run_response_computation
 from scripts.compute_expertise import run_expertise_computation
 from scripts.compute_shared_experts_stats import run_shared_experts_stats
+from scripts.subspace_gaze import run_subspace_gaze
+from scripts.steering_validation import run_steering_validation
 
 log = logging.getLogger(__name__)
 
@@ -49,28 +50,6 @@ def main(cfg: DictConfig):
             
         # Data path is relative to original CWD
         data_path = original_cwd / "assets" / cfg.concept_group.name.split('_')[1] # Assuming structure: assets/custom_60
-        # A better way might be to define data path in config, but for now lets infer or use a fixed path if not provided
-        # The user command example showed: assets/Qwen3-30B-A3B-Instruct-2507_custom_60
-        # Let's try to construct it or allow config override
-        
-        # Actually, looking at user command:
-        # --data-path assets/Qwen3-30B-A3B-Instruct-2507_custom_60
-        # This seems model specific in the example? Or just the folder name?
-        # Let's assume standard asset structure: assets/{group_name}
-        # Or maybe assets/{model}_{group} based on the example.
-        # Let's use a config value for asset_dir if possible, or default to what was likely intended.
-        # Given the previous context, let's assume assets are in `assets/{cfg.concept_group.name}` or similar.
-        # The user example: assets/Qwen3-30B-A3B-Instruct-2507_custom_60
-        # matches {model.generation}_{concept_group.group_dir_name}_{len(concepts)} potentially?
-        # simpler: let's just assume it is `assets/{cfg.concept_group.name}` but the user example was specific.
-        # Let's blindly pass the data_path if configured, or construct it.
-        
-        # Re-reading user request 1: --data-path assets/Qwen3-30B-A3B-Instruct-2507_custom_60
-        # This matches the concept group name? 
-        # In conf/concept_group/standard_60.yaml: name: openai_custom_60
-        # In conf/model/qwen3_gpt2.yaml: generation: Qwen3-8B-FP8
-        # The user example used a different model: Qwen3-30B... 
-        # Let's assume data_path is `assets/{cfg.concept_group.name}` relative to original_cwd.
         
         data_path = original_cwd / "assets" / cfg.concept_group.name
         if not data_path.exists():
@@ -86,7 +65,7 @@ def main(cfg: DictConfig):
         log.info(f"Using data path: {data_path}")
         
         run_response_computation(
-            model_name_or_path=cfg.model.generation, # "gpt2" or path
+            model_name_or_path=cfg.model.processing, # "gpt2" or path
             data_path=data_path,
             responses_path=responses_base, # Output to responses_base
             # concepts=, # If we want to filter, we could join cfg.concept_group.concepts
@@ -104,10 +83,6 @@ def main(cfg: DictConfig):
         if not responses_base.exists():
             log.error(f"Responses base directory not found: {responses_base}")
             return
-
-        # In the user command: --root-dir .../Qwen3-30B-A3B-Instruct-2507_custom_60_responses/
-        # --model-name gpt2
-        # --concepts assets/.../concept_list.csv
         
         # We need to pass the concept list CSV. 
         # Similar logic for data_path as above to find concept_list.csv
@@ -294,14 +269,6 @@ def main(cfg: DictConfig):
                 csv_path = original_cwd / csv_path
             log.info(f"Using explicit CSV path: {csv_path}")
         else:
-            # Default location logic matching 'expert_overlap' task default output
-            # Assuming standard structure: results/expert_overlap/.../expert_similarity/similarity_matrix_...
-            # But this is hard to guess without AP threshold.
-            # Better to require csv_path OR try to find one in expected output location if run in same pipeline flow?
-            # For decoupled task, user should likely provide it, OR we can default to searching in default response location?
-            # Actually, similarity matrix is an OUTPUT of expert_overlap.
-            # Let's error if not provided for now, or check a likely default if we knew the AP threshold.
-            # Since AP threshold is not in this task config, we can't guess easily.
             # User must provide csv_path.
             log.error("csv_path must be provided for visualize_overlap task.")
             return
@@ -342,6 +309,42 @@ def main(cfg: DictConfig):
             log.info("Expert overlap visualization completed successfully.")
         except Exception as e:
             log.error(f"Expert overlap visualization failed: {e}", exc_info=True)
+
+    elif cfg.task.name == "subspace_gaze":
+        activations_path = pathlib.Path(cfg.task.activations_path)
+        if not activations_path.is_absolute():
+            activations_path = original_cwd / cfg.task.activations_path
+
+        expertise_path = pathlib.Path(cfg.task.expertise_path)
+        if not expertise_path.is_absolute():
+            expertise_path = original_cwd / cfg.task.expertise_path
+
+        run_subspace_gaze(
+            activations_path=activations_path,
+            expertise_path=expertise_path,
+            ap_threshold=cfg.task.ap_threshold,
+            layer=cfg.task.layer,
+            method=cfg.task.method,
+        )
+
+    elif cfg.task.name == "steering_validation":
+        vector_path = pathlib.Path(cfg.task.vector_path)
+        if not vector_path.is_absolute():
+            vector_path = original_cwd / cfg.task.vector_path
+
+        run_steering_validation(
+            vector_path=vector_path,
+            concept=cfg.task.get("concept", None),
+            layer_name=cfg.task.layer,
+            prompt_template=cfg.task.prompt,
+            coeff_start=cfg.task.get("coeff_start", -5.0),
+            coeff_end=cfg.task.get("coeff_end", 5.0),
+            coeff_steps=cfg.task.get("coeff_steps", 21),
+            max_new_tokens=cfg.task.max_new_tokens,
+            num_samples=cfg.task.get("num_samples", 5),
+            seed=cfg.task.get("seed", 42),
+            output_dir=output_base
+        )
 
     else:
         log.error(f"Unknown task: {cfg.task.name}")

@@ -1,0 +1,14 @@
+# @package _global_
+task:
+  name: steering_validation
+  run_tag: default
+  vector_path: ??? # Path to the .pkl file containing the concept vector
+  concept: ??? # Concept name (e.g. dog)
+  layer: ??? # Target layer name - MUST match the layer used to compute vectors (e.g. transformer.h.6.attn.c_proj)
+  coeff_start: -5.0
+  coeff_end: 80.0
+  coeff_steps: 30
+  prompt: "I work on"
+  max_new_tokens: 32
+  num_samples: 4 # Number of samples per coefficient for scoring0
+  seed: 42

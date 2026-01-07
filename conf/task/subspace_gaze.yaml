@@ -1,0 +1,10 @@
+# @package _global_
+
+task:
+  name: subspace_gaze
+  run_tag: default # cot
+  activations_path: responses/Qwen3-8B-FP8_custom_60_responses/gpt2/custom
+  expertise_path: responses/Qwen3-8B-FP8_custom_60_responses/gpt2/custom
+  ap_threshold: 0.5
+  layer: all
+  method: diff_mean # Options: diff_mean, pca, lat (Linear Artificial Tomography)
