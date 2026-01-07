@@ -209,6 +209,13 @@ def plot_graph(
         init_pos = {node: (coords[idx_map[node], 0], coords[idx_map[node], 1]) for node in kept_nodes}
         pos = nx.spring_layout(G, weight='weight', seed=seed, k=spring_k, pos=init_pos, iterations=hybrid_iterations)
         layout_title = f'Hybrid (MDS init + spring {hybrid_iterations} it)'
+    elif layout_mode == 'umap':
+        import umap
+        # UMAP with precomputed distance
+        reducer = umap.UMAP(metric='precomputed', random_state=seed)
+        coords = reducer.fit_transform(dist)
+        pos = {node: (coords[idx_map[node], 0], coords[idx_map[node], 1]) for node in kept_nodes}
+        layout_title = 'UMAP'
     else:  # 'spring'
         pos = nx.spring_layout(G, weight='weight', seed=seed, k=spring_k)
         layout_title = 'Spring'
@@ -317,7 +324,7 @@ def main():
     parser.add_argument("--csv", type=str, required=True, help="Path to the CSV file containing the similarity matrix")
     parser.add_argument("--output-dir", type=str, required=True, help="Path to the output directory")
     parser.add_argument("--low-threshold", type=float, default=0.2, help="Low threshold for edge inclusion")
-    parser.add_argument("--layout-mode", type=str, default="mds", choices=["spring","mds","hybrid"], help="Layout mode")
+    parser.add_argument("--layout-mode", type=str, default="mds", choices=["spring","mds","hybrid","umap"], help="Layout mode")
     parser.add_argument("--topk", type=int, default=10, help="Save JSON with top-K most similar pairs")
     
     args = parser.parse_args()
