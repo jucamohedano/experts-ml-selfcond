@@ -24,6 +24,7 @@ except Exception:
     wn = None
     nltk = None
 
+from nltk.corpus.reader.wordnet import Synset
 
 @dataclasses.dataclass
 class GenerationConfig:
@@ -79,15 +80,49 @@ def ensure_nltk_wordnet() -> None:
             pass
 
 
+# Define the high-level categories (Synsets) that represent the concrete objects
+# in your list (Tools, Vehicles, Furniture, Animals, Plants, Buildings).
+TARGET_HYPERNYMS = {
+    # Artifacts (man-made things: tools, furniture, vehicles, buildings)
+    wn.synset('artifact.n.01'), 
+    # Living Things (animals, insects, plants)
+    wn.synset('living_thing.n.01'),
+    # Body Parts (for arm, eye, foot, hand, leg)
+    wn.synset('body_part.n.01')
+}
+
+def is_relevant_concept(synset: Synset) -> bool:
+    """
+    Checks if a synset belongs to a desired concrete, physical category 
+    by traversing its hypernym (superclass) hierarchy.
+    """
+    # Use closure to traverse all hypernyms up the tree
+    for hypernym in synset.closure(lambda s: s.hypernyms()):
+        if hypernym in TARGET_HYPERNYMS:
+            return True
+    return False
+
 def fetch_wordnet_gloss(concept: str) -> str:
-    ensure_nltk_wordnet()
-    assert wn is not None
+    """
+    Fetches the definition for a concept, prioritizing senses that are concrete
+    objects or natural kinds over abstract, informal, or verbal senses.
+    """
     synsets = wn.synsets(concept, pos=wn.NOUN)
-    if not synsets:
-        synsets = wn.synsets(concept)
-    if not synsets:
-        return f"{concept} (definition unavailable)"
-    return synsets[0].definition()
+    
+    # 1. Check for relevant senses based on hypernyms
+    relevant_synsets = [s for s in synsets if is_relevant_concept(s)]
+    
+    if relevant_synsets:
+        # Prioritize the lowest index (most frequent) among the relevant senses
+        best_synset = relevant_synsets[0]
+        return best_synset.definition()
+
+    # 2. Fallback: If no relevant hypernym is found, use the first available sense
+    # This handles words where the concrete sense IS the first sense, or obscure words.
+    if synsets:
+        return synsets[0].definition()
+        
+    return f"{concept} (definition unavailable)"
 
 
 def pick_article(word: str) -> str:
@@ -160,10 +195,14 @@ class GenerateStories(dspy.Signature):
 class ConceptGenerator(dspy.Module):
     """Generate positive examples for a concept using facts and stories."""
     
-    def __init__(self, fact_count: int = 200, story_count: int = 200):
+    def __init__(self, fact_count: int = 200, story_count: int = 200, generator: str = "predict"):
         super().__init__()
-        self.fact_generator = dspy.ChainOfThought(GenerateFacts)
-        self.story_generator = dspy.ChainOfThought(GenerateStories)
+        if generator == "predict":
+            self.fact_generator = dspy.Predict(GenerateFacts)
+            self.story_generator = dspy.Predict(GenerateStories)
+        else:
+            self.fact_generator = dspy.ChainOfThought(GenerateFacts)
+            self.story_generator = dspy.ChainOfThought(GenerateStories)
         self.fact_count = fact_count
         self.story_count = story_count
     
@@ -483,6 +522,7 @@ def load_env_file_if_present(env_path: pathlib.Path) -> None:
 async def generate_positives(
     *,
     cfg: GenerationConfig,
+    generator_type: str,
     concepts: t.List[str],
     intermediate_dir: pathlib.Path,
     max_concurrent_concepts: int,
@@ -493,7 +533,8 @@ async def generate_positives(
     # Initialize DSPy generator
     generator = ConceptGenerator(
         fact_count=cfg.positive_fact,
-        story_count=cfg.positive_story
+        story_count=cfg.positive_story,
+        generator=generator_type
     )
     
     # Process in batches using DSPy's native async support
@@ -626,6 +667,13 @@ async def async_main() -> None:
         type=str,
         help="API key for LM provider (overrides config/env)",
     )
+    parser.add_argument(
+        "--generator-type",
+        type=str,
+        default="predict",
+        choices=["predict", "cot"],
+        help="Generator to use for DSPy",
+    )
     args = parser.parse_args()
 
     # Load config
@@ -682,6 +730,7 @@ async def async_main() -> None:
         else:
             await generate_positives(
                 cfg=cfg,
+                generator_type=args.generator_type,
                 concepts=concepts_to_generate,
                 intermediate_dir=intermediate_dir,
                 max_concurrent_concepts=args.max_concurrent_concepts,
