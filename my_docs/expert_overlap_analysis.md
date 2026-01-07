@@ -1,8 +1,3 @@
-Checking the renamed scripts to summarize what each does:
-
-
-[4 tools called]
-
 Summary of each script:
 
 ## Script Summaries
