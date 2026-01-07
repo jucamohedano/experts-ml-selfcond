@@ -9,6 +9,7 @@ import typing as t
 
 import numpy as np
 import torch
+from joblib import Parallel, delayed
 from torch.utils.data import Dataset, DataLoader
 from tqdm import tqdm
 
@@ -71,12 +72,18 @@ def cache_responses(
         save_batch(batch=response_batch, batch_index=i, save_path=save_path)
 
 
+def _load_single_file(file_path: pathlib.Path) -> dict:
+    """Load a single pickle file."""
+    with file_path.open("rb") as fp:
+        return pickle.load(fp)
+
+
 def read_responses_from_cached(
-    cached_dir: pathlib.Path, concept: str, verbose: bool = False
+    cached_dir: pathlib.Path, concept: str, verbose: bool = False, n_jobs: int = -1
 ) -> t.Tuple[t.Dict[str, np.ndarray], t.Optional[np.ndarray], t.Set[str]]:
     """
-    Reads model responses stored in disk. The responses are stored pickled, one file per batch,
-    as structure as follows:
+    Reads model responses stored in disk using parallel loading with joblib.
+    The responses are stored pickled, one file per batch, as structure as follows:
     * Responses accessible as a dictionary `{layer: responses}`. For example `responses['layer_1']` is a
     multidimensional array of floats.
 
@@ -84,6 +91,7 @@ def read_responses_from_cached(
         cached_dir: Directory with *.pkl files.
         concept: Concept for which the labels will be read.
         verbose: Verbosity flag.
+        n_jobs: Number of parallel jobs for loading files. -1 uses all available cores.
 
     Returns:
         data: dict of {layer_name: np.ndarray} with the responses of all the batches TRANSPOSED. A layer response is of
@@ -91,35 +99,35 @@ def read_responses_from_cached(
         labels: np.ndarray with the labels of all the data points.
         response_names: The names of the layers that have produced the responses.
     """
-    # Read responses from the selected layers
-    data: t.Dict[str, np.ndarray] = {}
-    labels: t.List[float] = []
-    response_names: t.Set[str] = set()
-    labels_name = LABELS_FIELD
     all_files = sorted(list(cached_dir.glob("*.pkl")))
     if not all_files:
         raise RuntimeError("No responses found")
 
-    data_as_lists: t.Dict[str, t.List[np.ndarray]] = {}
-    for file_name in tqdm(all_files, total=len(all_files), desc=f"Loading {concept}"):
-        with file_name.open("rb") as fp:
-            response_batch = pickle.load(fp)
-            if not response_names:
-                response_names = set(response_batch.keys()) - set(labels_name)
-            for l_name in response_names:
-                if l_name not in data_as_lists:
-                    data_as_lists[l_name] = []
-                data_as_lists[l_name].append(response_batch[l_name].tolist())
-            if LABELS_FIELD in response_batch:
-                labels.extend(response_batch[LABELS_FIELD])
-    # Re-shaping the data
-    for l_name in data_as_lists.keys():
-        if l_name in ["labels"]:
-            continue
-        # Concatenate and transpose to return a tensor of shape [units,sentences].
-        data[l_name] = np.concatenate(data_as_lists[l_name], axis=0).transpose()
+    # Load all files in parallel using joblib
+    if verbose:
+        print(f"Loading {len(all_files)} files for {concept} using {n_jobs} jobs...")
+    
+    response_batches = Parallel(n_jobs=n_jobs, verbose=1 if verbose else 0)(
+        delayed(_load_single_file)(f) for f in all_files
+    )
+
+    # Extract response names from the first batch
+    response_names: t.Set[str] = set(response_batches[0].keys()) - {LABELS_FIELD}
+
+    # Collect and concatenate arrays for each layer
+    data: t.Dict[str, np.ndarray] = {}
+    for l_name in response_names:
+        arrays = [batch[l_name] for batch in response_batches]
+        # Concatenate and transpose to return a tensor of shape [units, sentences]
+        data[l_name] = np.concatenate(arrays, axis=0).transpose()
         assert len(data[l_name].shape) == 2, "Wrong dimensionality of responses"
         if verbose:
             print(l_name, data[l_name].shape)
+
+    # Collect labels
+    labels: t.List[float] = []
+    for batch in response_batches:
+        if LABELS_FIELD in batch:
+            labels.extend(batch[LABELS_FIELD])
 
     return data, np.array(labels) if labels else None, response_names
