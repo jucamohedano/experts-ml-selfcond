@@ -44,6 +44,7 @@ ml-selfcond/
 │   ├── compute_rsa.py      # Run RSA comparison
 │   ├── compute_brain_rdm.py# Process fMRI data to RDMs
 │   └── steering_validation.py # Causal validation of experts
+│   └── ...                 # Additional utility/preprocessing scripts
 ├── selfcond/               # Shared library code
 │   ├── brain_data.py       # fMRI loading & processing
 │   └── stats.py            # Permutation testing & FDR stats
@@ -53,6 +54,8 @@ ml-selfcond/
 │   └── rsa_experiment.md     # Experiment logs & results
 └── run_pipeline.py         # Main entry point CLI
 ```
+
+> **Note:** The `scripts/` and `selfcond/` directories contain many additional files (e.g., for dataset generation, preprocessing, or legacy experiments) not listed here. The core analysis is driven by the files above via `run_pipeline.py`.
 
 ## 🛠️ Getting Started
 
