@@ -1,0 +1,13 @@
+# Add directories or file patterns to ignore during indexing (e.g. foo/ or *.csv)
+#*.json
+*.npy
+*.pkl
+*.csv
+results/*.csv
+results/*.pkl
+MEN/*
+assets/*
+*_responses/*
+*_expert_sim/*
+*_unique_expert_similarity_*
+*.pyc
