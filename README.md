@@ -59,8 +59,24 @@ ml-selfcond/
 ### Prerequisites
 
 - Python 3.10+
-- PyTorch (with CUDA support recommended)
-- Standard scientific stack (`numpy`, `pandas`, `scipy`, `scikit-learn`, `nibabel`)
+- [uv](https://github.com/astral-sh/uv) (recommended for reproducibility)
+
+### Installation
+
+Clone the repository and sync dependencies using `uv`:
+
+```bash
+git clone https://github.com/jucamohedano/ml-selfcond.git
+cd ml-selfcond
+
+# Create venv and install dependencies from lockfile
+uv sync
+```
+
+Alternatively, use pip (may not guarantee exact versions):
+```bash
+pip install -r requirements.txt
+```
 
 ### Running the Analysis
 
