@@ -1,0 +1,20 @@
+# @package _global_
+
+task:
+  name: rsa
+  brain_rdms_path: null       # Path to brain_rdms.pkl
+  expert_rdms_path: null      # Path to expert RDMs directory
+  full_rdms_path: null        # Path to full RDMs directory
+  apply_fdr: true             # Apply FDR correction (default: true)
+  alpha: 0.05                 # Significance threshold
+  run_tag: default
+  
+  # Layer filter: patterns to match layer names (uses substring matching)
+  # Examples:
+  #   null                      -> All 48 layers (averaged)
+  #   [attn_c_proj]             -> 12 attention output projections
+  #   [mlp_c_fc]                -> 12 MLP first layers
+  #   [mlp_c_proj]              -> 12 MLP second layers
+  #   [attn_c_proj, mlp_c_fc]   -> 24 layers (attn + mlp_c_fc)
+  #   [mlp]                     -> 24 layers (all MLP)
+  layers: null
