@@ -26,7 +26,10 @@ ml-selfcond/
 │       ├── expert_overlap.yaml
 │       ├── compute_responses.yaml
 │       ├── compute_expertise.yaml
-│       └── visualize_overlap.yaml
+│       ├── visualize_overlap.yaml
+│       ├── brain_rdm.yaml
+│       ├── word_feature_extraction.yaml
+│       └── rsa.yaml
 ├── run_pipeline.py             # Main entry point
 └── results/                    # Experiment outputs
     └── [task_name]/
@@ -107,6 +110,31 @@ python run_pipeline.py task=visualize_overlap \
     task.visualization.low_threshold=0.2 \
     task.visualization.layout_mode=hybrid
 ```
+
+#### 6. Word Feature Extraction (`word_feature_extraction`)
+Extracts expert-based activations for the 60 target words and computes Model RDMs.
+
+```bash
+python run_pipeline.py task=word_feature_extraction task.ap_threshold=0.6
+```
+
+#### 7. Brain RDM Computation (`brain_rdm`)
+Loads fMRI data, tessellates the brain, and computes RDMs for each region.
+
+```bash
+python run_pipeline.py task=brain_rdm
+```
+
+#### 8. Representational Similarity Analysis (`rsa`)
+Compares Model RDMs with Brain RDMs using Spearman correlation and permutation testing.
+
+```bash
+python run_pipeline.py task=rsa
+```
+**Key Parameters:**
+- `task.run_permutation_test`: Enable significance testing (default: false)
+- `task.n_permutations`: Number of permutations (default: 1000)
+- `task.layers`: List of layers to analyze (default: all)
 
 ### Overriding Parameters
 
