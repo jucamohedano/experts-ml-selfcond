@@ -2,13 +2,37 @@
 task:
   name: steering_validation
   run_tag: default
-  vector_path: ??? # Path to the .pkl file containing the concept vector
+  
+  # Base directory containing "cot_lat", "cot_pca", etc. subfolders
+  # e.g. results/subspace_gaze/Qwen3-30B-A3B-Instruct-2507_custom_60/Qwen3-30B-A3B-Instruct-2507_gpt2
+  vector_base_dir: ??? 
+  
   concept: ??? # Concept name (e.g. dog)
-  layer: ??? # Target layer name - MUST match the layer used to compute vectors (e.g. transformer.h.6.attn.c_proj)
+  
+  # List of concept types to test
+  concept_types: 
+    - cot_lat
+    - cot_diff_mean
+    - cot_pca
+    
+  # List of layer indices to test (e.g. [0, 1, ..., 11])
+  layer_indices: [6]
+  
+  # List of layer component types
+  layer_types: 
+    - attn.c_proj
+    - mlp.c_proj
+  
+  # Vector varieties to test
+  vector_suffixes:
+    - masked
+    - global
+    - killed
+    
   coeff_start: -5.0
-  coeff_end: 80.0
-  coeff_steps: 30
-  prompt: "I work on"
-  max_new_tokens: 32
-  num_samples: 4 # Number of samples per coefficient for scoring0
+  coeff_end: 20.0
+  coeff_steps: 20
+  
+  max_new_tokens: 40
+  num_samples: 3 # Number of samples per prompt per coefficient
   seed: 42
