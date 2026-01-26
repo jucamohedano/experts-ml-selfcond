@@ -20,6 +20,9 @@ from scripts.compute_expertise import run_expertise_computation
 from scripts.compute_shared_experts_stats import run_shared_experts_stats
 from scripts.subspace_gaze import run_subspace_gaze
 from scripts.steering_validation import run_steering_validation
+from scripts.word_features import extract_word_features
+from scripts.compute_brain_rdm import run_brain_rdm
+from scripts.compute_rsa import run_rsa
 
 log = logging.getLogger(__name__)
 
@@ -328,15 +331,17 @@ def main(cfg: DictConfig):
         )
 
     elif cfg.task.name == "steering_validation":
-        vector_path = pathlib.Path(cfg.task.vector_path)
-        if not vector_path.is_absolute():
-            vector_path = original_cwd / cfg.task.vector_path
+        vector_base_dir = pathlib.Path(cfg.task.vector_base_dir)
+        if not vector_base_dir.is_absolute():
+            vector_base_dir = original_cwd / cfg.task.vector_base_dir
 
         run_steering_validation(
-            vector_path=vector_path,
+            vector_base_dir=vector_base_dir,
             concept=cfg.task.get("concept", None),
-            layer_name=cfg.task.layer,
-            prompt_template=cfg.task.prompt,
+            concept_types=cfg.task.concept_types,
+            layer_indices=cfg.task.layer_indices,
+            layer_types=cfg.task.layer_types,
+            vector_suffixes=cfg.task.vector_suffixes,
             coeff_start=cfg.task.get("coeff_start", -5.0),
             coeff_end=cfg.task.get("coeff_end", 5.0),
             coeff_steps=cfg.task.get("coeff_steps", 21),
@@ -344,6 +349,95 @@ def main(cfg: DictConfig):
             num_samples=cfg.task.get("num_samples", 5),
             seed=cfg.task.get("seed", 42),
             output_dir=output_base
+        )
+
+    elif cfg.task.name == "word_feature_extraction":
+        log.info("Running word feature extraction...")
+        
+        activations_path = pathlib.Path(cfg.task.activations_path)
+        if not activations_path.is_absolute():
+            activations_path = original_cwd / cfg.task.activations_path
+
+        use_all_neurons = cfg.task.get("use_all_neurons", False)
+        
+        # Optional unique experts path
+        unique_experts_path = None
+        if cfg.task.get("unique_experts_path"):
+            unique_experts_path = pathlib.Path(cfg.task.unique_experts_path)
+            if not unique_experts_path.is_absolute():
+                unique_experts_path = original_cwd / unique_experts_path
+        
+        # expertise_path is optional when use_all_neurons=True OR unique_experts_path is set
+        expertise_path = None
+        if cfg.task.expertise_path:
+            expertise_path = pathlib.Path(cfg.task.expertise_path)
+            if not expertise_path.is_absolute():
+                expertise_path = original_cwd / cfg.task.expertise_path
+        elif not use_all_neurons and not unique_experts_path:
+            log.error("expertise_path is required when use_all_neurons=False and unique_experts_path is not set")
+            return
+
+        extract_word_features(
+            activations_path=activations_path,
+            expertise_path=expertise_path,
+            ap_threshold=cfg.task.ap_threshold,
+            layer=cfg.task.layer,
+            use_all_neurons=use_all_neurons,
+            unique_experts_path=unique_experts_path,
+        )
+
+    elif cfg.task.name == "brain_rdm":
+        log.info("Running brain RDM computation (tessellation)...")
+
+        # Handle flexible input: can be string, list, or Path
+        brain_data_path = cfg.task.brain_data_path
+        # Path resolution will be handled in run_brain_rdm via collect_mat_files
+
+        run_brain_rdm(
+            brain_data_path=brain_data_path,
+            grid_shape=tuple(cfg.task.grid_shape),
+            min_voxels=cfg.task.min_voxels,
+            output_dir=output_base,
+        )
+
+    elif cfg.task.name == "rsa":
+        log.info("Running RSA analysis...")
+        
+        # Build condition dict
+        condition_rdms = {}
+        
+        if cfg.task.expert_rdms_path:
+            expert_path = pathlib.Path(cfg.task.expert_rdms_path)
+            if not expert_path.is_absolute():
+                expert_path = original_cwd / expert_path
+            condition_rdms["expert"] = expert_path
+        
+        if cfg.task.full_rdms_path:
+            full_path = pathlib.Path(cfg.task.full_rdms_path)
+            if not full_path.is_absolute():
+                full_path = original_cwd / full_path
+            condition_rdms["full"] = full_path
+        
+        if len(condition_rdms) < 2:
+            log.error("At least 2 conditions required")
+            return
+        
+        brain_rdms_path = pathlib.Path(cfg.task.brain_rdms_path)
+        if not brain_rdms_path.is_absolute():
+            brain_rdms_path = original_cwd / brain_rdms_path
+        
+        # Handle layers config (can be null, string, or list)
+        layer_filter = cfg.task.get("layers", None)
+        if layer_filter is not None and isinstance(layer_filter, str):
+            layer_filter = [layer_filter]
+        
+        run_rsa(
+            brain_rdms_path=brain_rdms_path,
+            condition_rdms=condition_rdms,
+            output_dir=output_base,
+            layer_filter=layer_filter,
+            apply_fdr=cfg.task.get("apply_fdr", True),
+            alpha=cfg.task.get("alpha", 0.05),
         )
 
     else:
