@@ -1,0 +1,12 @@
+# @package _global_
+
+task:
+  name: brain_rdm
+  run_tag: default
+  # brain_data_path can be:
+  #   - A single file: "brain_data/data-science-P1.mat"
+  #   - A directory: "brain_data/" (will find all .mat files)
+  brain_data_path: brain_data/
+  grid_shape: [11, 11, 9]
+  min_voxels: 5
+
