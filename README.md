@@ -11,6 +11,14 @@ This project investigates whether **expert neurons** in Large Language Models (L
 
 Recent mechanistic interpretability work suggests that models encode concepts using sparse, specialized "expert" neurons. We test whether these sparse representations are more **brain-like** than standard dense layer embeddings by comparing them to fMRI data using **Representational Similarity Analysis (RSA)**.
 
+### Scientific Context & Attribution
+
+This work is scientifically grounded in the **ExpertLens** framework introduced by **Fedzechkina et al.**, which demonstrated that expert neurons capture human-like semantic structure.
+
+> **Key Difference:** While Fedzechkina et al. validated experts against *behavioral* similarity judgments (e.g., MEN dataset), we extend their methodology to validate against **biological neural activity** (fMRI data from Mitchell et al., 2008).
+
+*See:* [Fedzechkina et al. (2025)](https://arxiv.org/abs/2502.12328) "ExpertLens: Activation Steering Features are Highly Interpretable"
+
 ### Key Research Question
 > *Does filtering language model representations to include only concept-specific expert neurons improve alignment with human neural responses, compared to using dense layer embeddings?*
 
