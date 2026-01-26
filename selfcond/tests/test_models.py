@@ -23,7 +23,7 @@ from selfcond.tests.common_tests import TESTS_TMP_DIR, create_tokenizer
 
 SEQ_LEN = 10
 DEVICE_CPU = "cpu"
-MODEL_LIST = ["gpt2"]
+MODEL_LIST = ["gpt2", "EleutherAI/pythia-70m", "EleutherAI/gpt-neox-20b"]
 
 
 def load_model(model_name: str, device: str):
@@ -44,7 +44,13 @@ def test_transformers_class_from_name():
 
 @pytest.mark.parametrize("model_name", MODEL_LIST)
 def test_transformers_model_name_to_family(model_name):
-    assert transformers_model_name_to_family(model_name) == model_name.split("-")[0]
+    family = transformers_model_name_to_family(model_name)
+    if "pythia" in model_name.lower():
+        assert family == "pythia"
+    elif "gpt-neox" in model_name.lower():
+        assert family == "gpt-neox"
+    else:
+        assert family == model_name.split("-")[0]
     with pytest.raises(NotImplementedError):
         transformers_model_name_to_family("not-a-model")
 
@@ -61,6 +67,34 @@ def test_collect_responses_info_gpt2():
     assert sum([".mlp.c_proj" in name for name in ri_names]) == 12
     num_neurons = np.sum([ri.shape[-1] for ri in response_infos])
     assert num_neurons == 82944
+
+
+@pytest.mark.slow
+def test_collect_responses_info_pythia():
+    model = load_model("EleutherAI/pythia-70m", device=DEVICE_CPU)
+    response_infos = collect_responses_info(model_name="EleutherAI/pythia-70m", model=model)
+    ri_names = [ri.name for ri in response_infos]
+    # Basic checks - just ensure we get some responses and they have expected layer types
+    assert len(ri_names) > 0
+    # Pythia models should have Linear and LayerNorm layers
+    assert any(["Linear" in ri.layer.kind for ri in response_infos])
+    assert any(["LayerNorm" in ri.layer.kind for ri in response_infos])
+    # Ensure no lm_head layers are included
+    assert not any(["lm_head" in ri.name for ri in response_infos])
+
+
+@pytest.mark.slow
+def test_collect_responses_info_gpt_neox():
+    model = load_model("EleutherAI/gpt-neox-20b", device=DEVICE_CPU)
+    response_infos = collect_responses_info(model_name="EleutherAI/gpt-neox-20b", model=model)
+    ri_names = [ri.name for ri in response_infos]
+    # Basic checks - just ensure we get some responses and they have expected layer types
+    assert len(ri_names) > 0
+    # GPT-NeoX models should have Linear and LayerNorm layers
+    assert any(["Linear" in ri.layer.kind for ri in response_infos])
+    assert any(["LayerNorm" in ri.layer.kind for ri in response_infos])
+    # Ensure no lm_head layers are included
+    assert not any(["lm_head" in ri.name for ri in response_infos])
 
 
 def test_generate_responses_gpt2():

@@ -1,0 +1,7 @@
+name: compute_responses
+seq_len: 1024
+inf_batch_size: 8
+device: cuda
+num_per_concept: 1000
+run_tag: responses-${task.seq_len}
+

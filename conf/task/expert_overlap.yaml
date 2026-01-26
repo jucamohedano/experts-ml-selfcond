@@ -1,0 +1,19 @@
+name: expert_overlap
+ap_threshold: 0.5
+# expert_suffix: set to "_unique_experts_corr-X.X" when using unique experts pattern
+# Example: task.expert_suffix=_unique_experts_corr-0.9
+expert_suffix: ""
+run_tag: overlap-tau-${task.ap_threshold}${task.expert_suffix}
+input_dir: null
+pattern: "**/expertise.csv"
+visualization:
+  low_threshold: 0.1
+  layout_mode: hybrid
+  topk: 20
+  min_edge_width: 0.2
+  max_edge_width: 15.0
+  dpi: 200
+  fontsize: 9
+  spring_k: 0.5
+  hybrid_iterations: 100
+  seed: 0

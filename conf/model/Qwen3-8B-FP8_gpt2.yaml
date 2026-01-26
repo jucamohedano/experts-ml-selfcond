@@ -1,0 +1,4 @@
+name: Qwen3-8B-FP8_gpt2
+generation: Qwen3-8B-FP8
+processing: gpt2
+generation_type: null

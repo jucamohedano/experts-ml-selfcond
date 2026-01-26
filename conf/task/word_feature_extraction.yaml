@@ -1,0 +1,13 @@
+# @package _global_
+
+task:
+  name: word_feature_extraction
+  ap_threshold: 0.5
+  generation_type: cot
+  run_tag: ap-${task.ap_threshold}
+  activations_path: null
+  expertise_path: null
+  layer: all
+  word_features_path: word_features/
+  use_all_neurons: false  # Set to true for Full RDM computation (no expert filtering)
+  unique_experts_path: null  # Path to unique experts results (for unique RDM computation)

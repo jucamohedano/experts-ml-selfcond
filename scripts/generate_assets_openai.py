@@ -327,23 +327,87 @@ def build_negatives(
     target_negatives: int,
     seed: int,
 ) -> t.Dict[str, t.List[str]]:
-    concepts = list(positives_by_concept.keys())
+    """
+    Build negatives stratified uniformly by source concept.
+
+    For each target concept c, we:
+      - Split the quota evenly across all other concepts.
+      - Distribute any remainder round-robin.
+      - Sample without replacement where possible.
+      - If a source pool is too small, borrow the deficit from the global pool
+        (first without duplicates, then with replacement as a last resort).
+    """
     rng = random.Random(seed)
+    concepts = list(positives_by_concept.keys())
     negatives: t.Dict[str, t.List[str]] = {}
+
     for c in concepts:
-        pool: t.List[str] = []
-        for other in concepts:
-            if other == c:
-                continue
-            pool.extend(positives_by_concept.get(other, []))
-        if not pool:
+        # Build source pools from all other concepts
+        sources = [s for s in concepts if s != c]
+        if not sources:
             negatives[c] = []
             continue
-        if len(pool) >= target_negatives:
-            negatives[c] = rng.sample(pool, target_negatives)
-        else:
-            # Sample with replacement if pool too small
-            negatives[c] = [rng.choice(pool) for _ in range(target_negatives)]
+
+        k = len(sources)
+        base_quota = target_negatives // k
+        remainder = target_negatives % k
+
+        # Shuffle a round-robin order to distribute the remainder fairly
+        rr = sources[:]
+        rng.shuffle(rr)
+
+        # Initial per-source quotas
+        quota = {s: base_quota for s in sources}
+        for s in rr[:remainder]:
+            quota[s] += 1
+
+        # Select from each source
+        selected: t.List[str] = []
+        deficits = 0
+        for s in sources:
+            pool = positives_by_concept.get(s, [])
+            q = quota[s]
+
+            if q <= 0:
+                continue
+
+            # Sample without replacement if we can
+            if len(pool) >= q:
+                picks = rng.sample(pool, q)
+                selected.extend(picks)
+            else:
+                # Take what we can from this source
+                if len(pool) > 0:
+                    picks = rng.sample(pool, len(pool))
+                    selected.extend(picks)
+                deficits += max(0, q - len(pool))
+
+        # Borrow for any deficits: prefer unique, then allow replacement
+        if deficits > 0:
+            # Build a global pool excluding already selected and the target concept’s positives
+            global_pool = []
+            selected_set = set(selected)
+            for s in sources:
+                for sent in positives_by_concept.get(s, []):
+                    if sent not in selected_set:
+                        global_pool.append(sent)
+
+            if len(global_pool) >= deficits:
+                selected.extend(rng.sample(global_pool, deficits))
+            else:
+                # Take all unique leftovers, then allow replacement if still short
+                selected.extend(global_pool)
+                still_need = deficits - len(global_pool)
+                all_other = [sent for s in sources for sent in positives_by_concept.get(s, [])]
+                if still_need > 0 and all_other:
+                    selected.extend(rng.choices(all_other, k=still_need))
+
+        # If we somehow overshot due to borrowing logic, trim deterministically
+        if len(selected) > target_negatives:
+            selected = selected[:target_negatives]
+
+        negatives[c] = selected
+
     return negatives
 
 

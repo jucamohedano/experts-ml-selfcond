@@ -8,8 +8,8 @@ transformers
 torch
 pyprg==0.1.1b7
 mypy==0.901
-pytest-mypy==0.8.1
-pytest==6.2.4
-pytest-mypy==0.8.1
+pytest>=7.4.0
+pytest-mypy>=0.10.0
 nltk
+hydra-core
 .

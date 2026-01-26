@@ -1,0 +1,20 @@
+defaults:
+  - _self_
+  - model: Qwen3-8B-FP8_gpt2
+  - concept_group: standard_60
+  - task: unique_experts
+
+# Output Structure
+output_root: results
+
+# Paths (can be overridden)
+responses_base_dir: responses/${model.generation}_custom_60_responses${model.generation_type}
+
+hydra:
+  job:
+    chdir: true
+  run:
+    dir: ${output_root}/${task.name}/${concept_group.name}/${model.name}/${task.run_tag}/${now:%Y-%m-%d_%H-%M-%S}
+  sweep:
+    dir: ${output_root}/${task.name}/${concept_group.name}/${model.name}/${task.run_tag}/multirun_${now:%Y-%m-%d_%H-%M-%S}
+    subdir: ${hydra.job.num}

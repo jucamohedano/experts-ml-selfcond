@@ -53,8 +53,8 @@ dependencies = [
 [project.optional-dependencies]
 # Packages required for testing
 test = [
-    "pytest >= 6.0",
-    "pytest-mypy",
+    "pytest >= 7.4.0",
+    "pytest-mypy >= 0.10.0",
 ]
 
 [project.urls]

@@ -146,6 +146,57 @@ def build_result_figures(
         )
 
 
+def run_expertise_computation(
+    root_dir: pathlib.Path,
+    model_name: str,
+    concepts: str = None,
+    k: int = 10,
+    show: bool = False,
+    skip: bool = False,
+    black: bool = False,
+):
+    """
+    Run the expertise computation pipeline.
+    """
+    plot_in_dark_mode(black)
+
+    # Load concepts from file or list
+    if not concepts:
+        assert (root_dir / "concept_list.csv").exists()
+        concepts_requested = root_dir / "concept_list.csv"
+    else:
+        if "," in concepts:
+            concepts_requested = concepts.split(",")
+        else:
+            concepts_requested = pathlib.Path(concepts)
+
+    print(concepts_requested)
+    concept_df = concept_list_to_df(concepts_requested)
+
+    for row_index, row in concept_df.iterrows():
+        concept_dir = root_dir / model_name / row["group"] / row["concept"]
+        analyze_expertise_for_concept(
+            concept_dir=concept_dir,
+            concept=row["concept"],
+            concept_group=row["group"],
+        )
+
+        # Load results and plot
+        expertise_dir = concept_dir / "expertise"
+        if not ExpertiseResult.exists_in_disk(expertise_dir):
+            print(f"[skip] No expertise results in {expertise_dir}")
+            continue
+        expertise_result = ExpertiseResult()
+        expertise_result.load(expertise_dir)
+        layer_types_regex = get_layer_regex(model_name=model_name)
+        build_result_figures(
+            expertise_result=expertise_result,
+            results_dir=expertise_dir,
+            layer_types_regex=layer_types_regex,
+            show_figures=show,
+        )
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         prog="compute_expertise.py",
@@ -177,42 +228,12 @@ if __name__ == "__main__":
     parser.add_argument("--black", action="store_true", help="Figures in black mode")
     args = parser.parse_args()
 
-    plot_in_dark_mode(args.black)
-
-    root_dir = args.root_dir
-
-    # Load concepts from file or list
-    if not args.concepts:
-        assert (root_dir / "concept_list.csv").exists()
-        concepts_requested = root_dir / "concept_list.csv"
-    else:
-        if "," in args.concepts:
-            concepts_requested = args.concepts.split(",")
-        else:
-            concepts_requested = pathlib.Path(args.concepts)
-
-    print(concepts_requested)
-    concept_df = concept_list_to_df(concepts_requested)
-
-    for row_index, row in concept_df.iterrows():
-        concept_dir = root_dir / args.model_name / row["group"] / row["concept"]
-        analyze_expertise_for_concept(
-            concept_dir=concept_dir,
-            concept=row["concept"],
-            concept_group=row["group"],
-        )
-
-        # Load results and plot
-        expertise_dir = concept_dir / "expertise"
-        if not ExpertiseResult.exists_in_disk(expertise_dir):
-            print(f"[skip] No expertise results in {expertise_dir}")
-            continue
-        expertise_result = ExpertiseResult()
-        expertise_result.load(expertise_dir)
-        layer_types_regex = get_layer_regex(model_name=args.model_name)
-        build_result_figures(
-            expertise_result=expertise_result,
-            results_dir=expertise_dir,
-            layer_types_regex=layer_types_regex,
-            show_figures=args.show,
-        )
+    run_expertise_computation(
+        root_dir=args.root_dir,
+        model_name=args.model_name,
+        concepts=args.concepts,
+        k=args.k,
+        show=args.show,
+        skip=args.skip,
+        black=args.black,
+    )
