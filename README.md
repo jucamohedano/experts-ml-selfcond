@@ -1,7 +1,6 @@
 # Brain-Aligned Expert Neurons in GPT-2
 
-> **Note:** This repository builds upon the codebase from **Suau et al. (2022)**, "Self-Conditioning Pre-Trained Language Models". We extend their framework for expert neuron extraction to investigate the biological plausibility of sparse model representations.
-> *Original Work:* [Suau et al. (ICML 2022)](https://arxiv.org/abs/2201.12239) | [GitHub](https://github.com/xavisuau/selfcond)
+> **Note:** This repository is a fork of the [selfcond](https://github.com/xavisuau/selfcond) codebase by [Suau et al. (ICML 2022)](https://arxiv.org/abs/2201.12239). I've extended their original work to include fMRI alignment and RSA experiments.
 
 ---
 
@@ -32,10 +31,22 @@ Our pipeline connects mechanistic interpretability (Expert Neurons) with cogniti
 4.  **Brain RDMs**: We process fMRI data from 9 subjects, tessellating the brain into 3D grid regions to compute corresponding neural RDMs.
 5.  **RSA & Statistics**: We compare Model and Brain RDMs using Spearman correlation, assessing significance with permutation testing and FDR correction.
 
+## 🗄️ Dataset
+The generated dataset of Chain-of-Thought sentences used for expert neuron extraction in this project is publicly available on Hugging Face:
+[jucamohedano/Qwen3-30B-A3B-Instruct-2507_custom_60_cot](https://huggingface.co/datasets/jucamohedano/Qwen3-30B-A3B-Instruct-2507_custom_60_cot)
+
+To use it locally with this codebase, clone the dataset directly into the `assets/` directory (ensure you have `git-lfs` installed to fetch the actual large files):
+
+```bash
+mkdir -p assets
+git clone https://huggingface.co/datasets/jucamohedano/Qwen3-30B-A3B-Instruct-2507_custom_60_cot assets/Qwen3-30B-A3B-Instruct-2507_custom_60_cot
+```
+
 ## 📂 Repository Structure
 
 ```
-ml-selfcond/
+experts-ml-selfcond/
+├── assets/                 # Dedicated storage for HuggingFace datasets and large assets
 ├── conf/                   # Hydra configuration files
 │   ├── task/               # Tasks (rsa, brain_rdm, steering, etc.)
 │   └── model/              # Model configs (gpt2, pythia)
@@ -66,13 +77,24 @@ ml-selfcond/
 
 ### Installation
 
-Clone the repository and sync dependencies using `uv`:
+First, install `uv` (the recommended, blazing-fast Python package manager):
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+Clone the repository and set it up:
 
 ```bash
-git clone https://github.com/jucamohedano/ml-selfcond.git
-cd ml-selfcond
+git clone https://github.com/jucamohedano/experts-ml-selfcond.git
+cd experts-ml-selfcond
 
-# Create venv and install dependencies from lockfile
+# Create a virtual environment
+uv venv
+
+# Activate it (Linux/macOS)
+source .venv/bin/activate 
+
+# Sync dependencies from the lockfile
 uv sync
 ```
 

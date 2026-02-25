@@ -19,3 +19,4 @@ results/*
 *_expert_sim/*
 *_unique_expert_similarity_*
 *.pyc
+*.cursor
