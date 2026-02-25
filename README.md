@@ -137,7 +137,7 @@ python run_pipeline.py task=steering_validation
 *   **Sparsity improves Alignment**: Filtering for experts (AP $\geq$ 0.6) significantly improves alignment compared to using all neurons.
 *   **Component Specificity**: MLP layers generally align better than attention layers, which require stricter filtering.
 
-For full details, see the paper draft in `my_docs/expert_neurons_paper/`.
+For full details, see the final project report: [JuanCamachoMohedano-257536-Project-Experts.pdf](my_docs/JuanCamachoMohedano-257536-Project-Experts.pdf).
 
 ## 📜 Attribution & License
 
