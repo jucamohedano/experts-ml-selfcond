@@ -9,3 +9,4 @@ results/*
 *_responses/*
 *.pyc
 prototypes/*
+!dataset_config_Qwen3-30B-A3B-Instruct-2507-abstractiveness.json

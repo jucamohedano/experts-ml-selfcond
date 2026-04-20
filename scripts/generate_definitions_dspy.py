@@ -454,7 +454,7 @@ def write_concept_json(
     }
     out_path = dataset_dir / group / f"{concept}.json"
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    with out_path.open("w") as fp:
+    with out_path.open("w", encoding="utf-8") as fp:
         json.dump(out, fp, ensure_ascii=False, separators=(',', ':'))
 
 
@@ -463,7 +463,7 @@ def write_concept_list_csv(
 ) -> None:
     csv_path = dataset_root / "concept_list.csv"
     csv_path.parent.mkdir(parents=True, exist_ok=True)
-    with csv_path.open("w") as fp:
+    with csv_path.open("w", encoding="utf-8") as fp:
         fp.write("group,concept\n")
         for c in concepts:
             fp.write(f"{group},{c}\n")
@@ -474,7 +474,7 @@ def write_intermediate_positives(
 ) -> None:
     intermediate_dir.mkdir(parents=True, exist_ok=True)
     out = {"concept": concept, "positives": positives}
-    with (intermediate_dir / f"{concept}.json").open("w") as fp:
+    with (intermediate_dir / f"{concept}.json").open("w", encoding="utf-8") as fp:
         json.dump(out, fp, ensure_ascii=False)
 
 
@@ -619,7 +619,7 @@ async def async_main() -> None:
     parser.add_argument(
         "--config",
         type=pathlib.Path,
-        default=pathlib.Path("dataset_config.json"),
+        default=pathlib.Path("../dataset_config_Qwen3-30B-A3B-Instruct-2507-abstractiveness.json"),
         help="Path to dataset configuration JSON file",
     )
     parser.add_argument(
@@ -684,11 +684,11 @@ async def async_main() -> None:
     load_env_file_if_present(pathlib.Path(".env"))
 
     # Get API key
-    api_key = args.api_key or os.environ.get("GEMINI_API_KEY")
+    api_key = args.api_key or os.environ.get("VLLM_API_KEY", "placeholder")
     
     # Configure DSPy
     # Format: "provider/model" e.g., "openai/gpt-4" or "gemini/gemini-2.5-flash"
-    lm = dspy.LM(cfg.model, api_key=api_key, api_base=cfg.base_url, temperature=cfg.temperature, max_tokens=cfg.max_tokens)
+    lm = dspy.LM(cfg.model, api_key=api_key, api_base=cfg.base_url, temperature=cfg.temperature, max_tokens=cfg.max_tokens, timeout=1200)
     dspy.configure(lm=lm)
     
     print(f"Configured DSPy with model: {cfg.model}")

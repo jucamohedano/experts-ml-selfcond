@@ -1,0 +1,40 @@
+name: Qwen3-30B-A3B-Instruct-2507_abstractiveness_20
+# Each category contains a list of sub-categories, and the concepts in each sub-category are disjoint with those in other categories.
+categories:
+  animal:
+    mammal:
+      - dog
+      - elephant
+      - tiger
+    insect:
+      - bee
+      - ant
+    bird:
+      - eagle
+      - penguin
+    reptile:
+      - snake
+    fish:
+      - salmon
+  plant:
+    fruit:
+      - apple
+      - banana
+    vegetable:
+      - carrot
+    tree:
+      - oak
+    flower:
+      - rose
+  object:
+    vehicle:
+      - car
+      - airplane
+    furniture:
+      - chair
+      - bed
+    clothing:
+      - shirt
+    musical instrument:
+      - guitar
+    
