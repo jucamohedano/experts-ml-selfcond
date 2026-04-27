@@ -214,18 +214,26 @@ if __name__ == "__main__":
             "Root directory with responses. Should contain responses_"
             "`dir/model/concept_group/concept/responses`"
         ),
-        required=True,
+        default=pathlib.Path("responses/GPT2_abstractiveness_20_responses"),
+        #required=True,
     )
-    parser.add_argument("--model-name", type=str, help="The model name", required=True)
-    parser.add_argument("--concepts", type=str, help="concepts to analyze")
+    parser.add_argument(
+        "--model-name",
+        type=str,
+        help="The model name",
+        default="gpt2",
+        # required=True,
+    )
+    parser.add_argument("--concepts", type=str, help="concepts to analyze", default=str(pathlib.Path("assets/Qwen3-30B-A3B-Instruct-2507_abstractiveness_20_cot/concept_list.csv")))
     parser.add_argument("--k", type=int, help="Top K neurons to plot", default=10)
-    parser.add_argument("--show", action="store_true", help="Show images or just save")
+    parser.add_argument("--show", action="store_true", help="Show images or just save", default=False)
     parser.add_argument(
         "--skip",
         action="store_true",
         help="Force skip for concepts with existing expertise results.",
+        default=False,
     )
-    parser.add_argument("--black", action="store_true", help="Figures in black mode")
+    parser.add_argument("--black", action="store_true", help="Figures in black mode", default=False)
     args = parser.parse_args()
 
     run_expertise_computation(

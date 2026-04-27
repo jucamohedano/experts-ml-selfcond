@@ -171,7 +171,8 @@ if __name__ == "__main__":
         "--model-name-or-path",
         type=str,
         help="Model name (from pytorch-transformers module)",
-        required=True,
+        default="gpt2",
+        #required=True,
     )
     parser.add_argument(
         "--model-cache",
@@ -200,7 +201,8 @@ if __name__ == "__main__":
             "Path to a duly formatted dataset. If --concepts not set, "
             "assumes a concept_list.csv file inside the data path."
         ),
-        required=True,
+        default=pathlib.Path("assets/Qwen3-30B-A3B-Instruct-2507_abstractiveness_20_cot"),
+        #required=True,
     )
     parser.add_argument(
         "--concepts",
@@ -215,13 +217,14 @@ if __name__ == "__main__":
         "--responses-path",
         type=pathlib.Path,
         help="Path where to save the responses.",
-        required=True,
+        default=pathlib.Path("responses/GPT2_abstractiveness_20_responses"),
+        #required=True,
     )
     parser.add_argument(
         "--seq-len",
         type=int,
         help="Max sequence length allowed in tokens.",
-        default=128,
+        default=1024,
     )
     parser.add_argument(
         "--num-per-concept",
@@ -229,8 +232,8 @@ if __name__ == "__main__":
         help="Max number of sentences per concept, per label",
         default=1000,
     )
-    parser.add_argument("--inf-batch-size", type=int, help="Inference batch size", default=30)
-    parser.add_argument("--device", type=str, help="Device to use")
+    parser.add_argument("--inf-batch-size", type=int, help="Inference batch size", default=8)
+    parser.add_argument("--device", type=str, help="Device to use", default="cuda")
 
     args = parser.parse_args()
 
