@@ -26,7 +26,7 @@ gpt2_image = (
 @app.function(
     image=gpt2_image,
     gpu="A100-80GB",  # Use NVIDIA A100 80GB GPU for large model inference
-    timeout=36000,  # 10 hour timeout for long-running tasks
+    timeout=72000,  # 20 hour timeout for long-running tasks
     volumes={
         "/root/assets": dataset_volume,  # Dataset files
         "/root/responses": output_volume,  # Generated responses output

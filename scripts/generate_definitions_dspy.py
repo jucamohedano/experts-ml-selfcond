@@ -619,13 +619,13 @@ async def async_main() -> None:
     parser.add_argument(
         "--config",
         type=pathlib.Path,
-        default=pathlib.Path("../dataset_config_Qwen3-30B-A3B-Instruct-2507-abstractiveness.json"),
+        default=pathlib.Path("../dataset_config_Qwen3-30B-A3B-Instruct-2507-abstractiveness_150.json"),
         help="Path to dataset configuration JSON file",
     )
     parser.add_argument(
         "--dataset-root",
         type=pathlib.Path,
-        default=pathlib.Path("assets"),
+        default=pathlib.Path("../assets"),
         help="Root directory for generated dataset",
     )
     parser.add_argument(

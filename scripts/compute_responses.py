@@ -201,7 +201,7 @@ if __name__ == "__main__":
             "Path to a duly formatted dataset. If --concepts not set, "
             "assumes a concept_list.csv file inside the data path."
         ),
-        default=pathlib.Path("assets/Qwen3-30B-A3B-Instruct-2507_abstractiveness_20_cot"),
+        default=pathlib.Path("assets/Qwen3-30B-A3B-Instruct-2507_abstractiveness_150_cot"),
         #required=True,
     )
     parser.add_argument(
@@ -217,7 +217,7 @@ if __name__ == "__main__":
         "--responses-path",
         type=pathlib.Path,
         help="Path where to save the responses.",
-        default=pathlib.Path("responses/GPT2_abstractiveness_20_responses"),
+        default=pathlib.Path("responses/GPT2_abstractiveness_150_responses"),
         #required=True,
     )
     parser.add_argument(

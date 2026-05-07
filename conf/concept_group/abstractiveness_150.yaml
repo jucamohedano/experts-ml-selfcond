@@ -1,0 +1,169 @@
+name: Qwen3-30B-A3B-Instruct-2507_abstractiveness_150
+# Categories act as Level 1 Abstraction.
+# Concepts are listed below their respective categories (Level 2 Abstraction).
+# Concepts present a wide spread of both typicality and Wikipedia frequency.
+categories:
+  animal:
+    - alligator
+    - frog
+    - goldfish
+    - iguana
+    - leech
+    - lizard
+    - maggot
+    - snake
+    - spider
+    - worm
+  clothing:
+    - bathrobe
+    - costume
+    - jeans
+    - pants
+    - shirt
+    - straightjacket
+    - suit
+    - sweater
+    - tuxedo
+    - uniform
+  container:
+    - bag
+    - bank
+    - bin
+    - bottle
+    - box
+    - briefcase
+    - cup
+    - footbath
+    - jar
+    - mailbox
+    - pan
+  drink:
+    - beer
+    - champagne
+    - cocktail
+    - coffee
+    - eggnog
+    - lemonade
+    - milk
+    - soda
+    - tea
+  fastener:
+    - clothespin
+    - knot
+    - strap
+    - velcro
+    - zipper
+  food:
+    - bean
+    - burrito
+    - cheeseburger
+    - clove
+    - grain
+    - hotdog
+    - meat
+    - piecrust
+    - pizza
+    - pretzel
+    - rice
+    - soup
+  furniture:
+    - bed
+    - bench
+    - bookshelf
+    - chair
+    - couch
+    - desk
+    - hammock
+    - shelf
+    - table
+    - throne
+  game:
+    - checkers
+    - chessboard
+    - dice
+    - domino
+    - hopscotch
+    - scrabble
+    - shuffleboard
+    - videogame
+  hardware:
+    - bracket
+    - charger
+    - doorknob
+    - gear
+    - handle
+    - hinge
+    - key
+    - plug
+    - switch
+  headwear:
+    - hairnet
+    - hood
+    - wig
+  jewelry:
+    - anklet
+    - locket
+    - necklace
+    - ring
+  lighting:
+    - flashbulb
+    - flashlight
+    - headlamp
+    - lantern
+    - streetlight
+    - torch
+  plant:
+    - bamboo
+    - cactus
+    - fern
+    - flower
+    - ivy
+    - moss
+    - tree
+    - tulip
+    - tumbleweed
+    - weed
+  tool:
+    - anvil
+    - broom
+    - brush
+    - chopsticks
+    - flyswatter
+    - fork
+    - gavel
+    - jack
+    - mop
+    - quill
+  toy:
+    - doll
+    - dollhouse
+    - kaleidoscope
+    - kite
+    - lego
+    - rattle
+    - robot
+    - stilt
+  vehicle:
+    - airplane
+    - bus
+    - camper
+    - car
+    - jeep
+    - minivan
+    - rocket
+    - stroller
+    - tractor
+    - train
+    - truck
+    - unicycle
+  weapon:
+    - bomb
+    - bullet
+    - catapult
+    - crossbow
+    - grenade
+    - gun
+    - revolver
+    - rifle
+    - sword
+    - whip

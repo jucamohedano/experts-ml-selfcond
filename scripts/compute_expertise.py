@@ -214,7 +214,7 @@ if __name__ == "__main__":
             "Root directory with responses. Should contain responses_"
             "`dir/model/concept_group/concept/responses`"
         ),
-        default=pathlib.Path("responses/GPT2_abstractiveness_20_responses"),
+        default=pathlib.Path("responses/GPT2_abstractiveness_150_responses"),
         #required=True,
     )
     parser.add_argument(
@@ -224,7 +224,7 @@ if __name__ == "__main__":
         default="gpt2",
         # required=True,
     )
-    parser.add_argument("--concepts", type=str, help="concepts to analyze", default=str(pathlib.Path("assets/Qwen3-30B-A3B-Instruct-2507_abstractiveness_20_cot/concept_list.csv")))
+    parser.add_argument("--concepts", type=str, help="concepts to analyze", default=str(pathlib.Path("assets/Qwen3-30B-A3B-Instruct-2507_abstractiveness_150_cot/concept_list.csv")))
     parser.add_argument("--k", type=int, help="Top K neurons to plot", default=10)
     parser.add_argument("--show", action="store_true", help="Show images or just save", default=False)
     parser.add_argument(

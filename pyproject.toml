@@ -52,6 +52,7 @@ dependencies = [
     "dspy>=0.1.4",
     "nltk>=3.9.1",
     "seaborn>=0.13.2",
+    "osfclient>=0.0.5",
 ]
 
 [project.optional-dependencies]
