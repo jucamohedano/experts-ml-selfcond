@@ -6,7 +6,7 @@ import seaborn as sns
 from scipy.stats import pearsonr
 from sklearn.metrics.pairwise import cosine_similarity
 from utils.helpers import save_dataframe
-from utils.plot_helpers import _plot_bar_chart
+from utils.plot_helpers import _plot_bar_with_leaders
 
 log = logging.getLogger(__name__)
 
@@ -105,7 +105,7 @@ def generate_category_typicality_reports(global_typicality_df: pd.DataFrame, lay
                 'global_cosine_typicality': 'Cosine Typicality'
             })
 
-            _plot_bar_chart(
+            _plot_bar_with_leaders(
                 plot_dataframe=melted_typicality_df, x_col='concept', y_col='Score',
                 title=f"'{category.title()}' Human Typicality vs. Cosine Typicality",
                 x_label="Concepts (Ordered by Human Typicality)", y_label="Typicality Score (0 to 1)", legend_title="Metric",

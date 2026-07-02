@@ -3,17 +3,23 @@ import seaborn as sns
 
 sns.set_theme(style="whitegrid")
 
-def _plot_bar_chart(
+def _plot_bar_with_leaders(
     plot_dataframe, x_col, y_col,
     title, x_label=None, y_label=None, legend_title=None,
     color=None, hue=None, palette=None, orient='v', custom_tick_labels=None,
-    out_path=None, figsize=(40.56, 10.14), ax=None, save=True, **kwargs
+    out_path=None, figsize=(40.56, 10.14), ax=None, save=True,
+    show_x_ticks=False, show_y_ticks=False, **kwargs
 ) -> plt.Axes:
     """
-    Create a bar chart with category labels on the relevant axis.
+    Create a bar chart with category labels on the relevant axis, optionally with leader-line
+    tick marks connecting each (often rotated) label down to its bar.
     Supports both vertical and horizontal orientations, optional hue-based grouping, and color customization.
     Returns the matplotlib Axes object, and optionally saves to file if out_path is provided.
-    
+
+    Note: sns.set_theme(style="whitegrid") suppresses axis tick marks by default, so the
+    show_x_ticks/show_y_ticks flags below explicitly re-enable them (via tick_params'
+    bottom=/left=) rather than relying on the theme's defaults.
+
     Args:
         plot_dataframe: DataFrame containing the data to plot.
         x_col: Column name for x-axis (vertical) or bars (horizontal).
@@ -30,6 +36,11 @@ def _plot_bar_chart(
         figsize: Figure size as (width, height).
         ax: Existing axes object to plot on; creates new figure if None.
         save: If True and ax is None, saves figure; always displays if ax is not None.
+        show_x_ticks: If True (orient='v'), draws leader-line tick marks under the x-axis
+            category labels. Most useful when there are many categories (e.g. 48 model layers),
+            where the tick mark is what visually ties a rotated label to its bar.
+        show_y_ticks: If True (orient='h'), draws the equivalent leader-line tick marks to the
+            left of the y-axis category labels.
     """
     if ax is None:
         plt.figure(figsize=figsize)
@@ -63,7 +74,7 @@ def _plot_bar_chart(
             
         ax_current.set_xticks(ax_current.get_xticks())
         ax_current.set_xticklabels(labels, rotation=45, ha='right', fontsize=10 if save else 9)
-        ax_current.tick_params(axis='x', length=10, width=1, direction='out', color='black')
+        ax_current.tick_params(axis='x', length=10, width=1, direction='out', color='black', bottom=show_x_ticks)
         
         if x_label: ax_current.set_xlabel(x_label, fontsize=14 if save else 11)
         else: ax_current.set_xlabel("")
@@ -80,7 +91,7 @@ def _plot_bar_chart(
             
         ax_current.set_yticks(ax_current.get_yticks())
         ax_current.set_yticklabels(labels, fontsize=12)
-        ax_current.tick_params(axis='y', length=10, width=1, direction='out', color='black')
+        ax_current.tick_params(axis='y', length=10, width=1, direction='out', color='black', left=show_y_ticks)
 
         if x_label: ax_current.set_xlabel(x_label, fontsize=14 if save else 11)
         else: ax_current.set_xlabel("")

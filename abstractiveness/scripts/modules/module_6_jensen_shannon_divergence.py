@@ -108,8 +108,8 @@ def plot_jsd_vs_diversity_scatter(jsd_results_df: pd.DataFrame, jsd_dir) -> None
             horizontalalignment='left', size='small', color='black', alpha=0.8
         )
         
-    plt.title(f"Label-Centroid JSD vs. Internal Category Diversity {title_suffix}", fontsize=15, pad=15)
-    plt.xlabel("Label vs. Averaged Members Divergence (JSD)\n← High Overlap (Exemplar strategy) | Low Overlap (Prototype strategy) →", fontsize=12)
+    plt.title(f"Jensen-Shannon Divergence vs. Internal Category Diversity {title_suffix}", fontsize=15, pad=15)
+    plt.xlabel("Jensen-Shannon Divergence: Label vs. Member-Average (Bits)\n← High Overlap (Exemplar strategy) | Low Overlap (Prototype strategy) →", fontsize=12)
     plt.ylabel("Average Pairwise Member Divergence (JSD)\n← High Cohesion | High Internal Diversity →", fontsize=12)
     
     plt.grid(True, linestyle='--', alpha=0.6)
@@ -170,38 +170,38 @@ def plot_jsd_micro_distributions(jsd_results_df: pd.DataFrame, layer_labels: lis
 def plot_jsd_vs_entropy_scatter(jsd_results_df: pd.DataFrame, jsd_dir) -> None:
     """Visualization 3: Scatter plot checking if concentrated concepts diverge more."""
     divergence_entropy_data = jsd_results_df.dropna(subset=['jensen_shannon_divergence', 'shannon_entropy_label']).copy()
-    
+
     plt.figure(figsize=(10, 8))
-    
+
     # Calculate correlation for the title
     if len(divergence_entropy_data) > 2:
-        r, p = stats.pearsonr(divergence_entropy_data['shannon_entropy_label'], divergence_entropy_data['jensen_shannon_divergence'])
+        r, p = stats.pearsonr(divergence_entropy_data['jensen_shannon_divergence'], divergence_entropy_data['shannon_entropy_label'])
         title_suffix = f"(r={r:.2f}, p={p:.2e})"
     else:
         title_suffix = ""
 
     # regplot automatically adds a line of best fit and confidence intervals
     sns.regplot(
-        data=divergence_entropy_data, 
-        x="shannon_entropy_label", 
-        y="jensen_shannon_divergence", 
-        scatter_kws={'color': '#2ca02c', 's': 70, 'edgecolor': 'black', 'alpha': 0.8}, 
+        data=divergence_entropy_data,
+        x="jensen_shannon_divergence",
+        y="shannon_entropy_label",
+        scatter_kws={'color': '#2ca02c', 's': 70, 'edgecolor': 'black', 'alpha': 0.8},
         line_kws={'color':'#d62728', 'linewidth': 2}
     )
-    
+
     # Add category text labels to the points so you know who is who
     for i in range(divergence_entropy_data.shape[0]):
         plt.text(
-            divergence_entropy_data['shannon_entropy_label'].iloc[i] + 0.02, 
-            divergence_entropy_data['jensen_shannon_divergence'].iloc[i], 
-            divergence_entropy_data['category'].iloc[i], 
+            divergence_entropy_data['jensen_shannon_divergence'].iloc[i] + 0.005,
+            divergence_entropy_data['shannon_entropy_label'].iloc[i],
+            divergence_entropy_data['category'].iloc[i].title(),
             horizontalalignment='left', size='small', color='black', alpha=0.7
         )
-        
-    plt.title(f"Label Entropy vs. Prototype/Exemplar Divergence {title_suffix}", fontsize=15, pad=15)
-    plt.xlabel("Shannon Entropy of Category Label (Bits)\n← Concentrated | Uniform →", fontsize=12)
-    plt.ylabel("Jensen-Shannon Divergence (Bits)\n← Aligned with Members | Diverged from Members →", fontsize=12)
-    
+
+    plt.title(f"Jensen-Shannon Divergence vs. Label Entropy {title_suffix}", fontsize=15, pad=15)
+    plt.xlabel("Jensen-Shannon Divergence: Label vs. Member-Average (Bits)\n← High Overlap (Exemplar strategy) | Low Overlap (Prototype strategy) →", fontsize=12)
+    plt.ylabel("Shannon Entropy of Category Label (Bits)\n← Concentrated | Uniform →", fontsize=12)
+
     plt.tight_layout()
     plt.savefig(jsd_dir / "scatter_jsd_vs_entropy.png", dpi=300)
     plt.close()

@@ -6,7 +6,7 @@ import seaborn as sns
 from scipy import stats
 from scipy.stats import entropy
 from utils.helpers import save_dataframe, build_layer_probability_matrix
-from utils.plot_helpers import _plot_bar_chart
+from utils.plot_helpers import _plot_bar_with_leaders
 
 log = logging.getLogger(__name__)
 
@@ -143,12 +143,12 @@ def plot_peak_average_distributions(expert_allocation_df: pd.DataFrame, concept_
     group_counts['percentage'] = group_counts.apply(
         lambda row: (row['count'] / totals[row['group_type']]) * 100, axis=1
     )
-    _plot_bar_chart(
+    _plot_bar_with_leaders(
         plot_dataframe=group_counts, x_col='peak_layer_idx', y_col='percentage',
         title="Distribution of Peak Expert Layers vs. Average Layer Allocation",
         x_label="Model Layer", y_label="% of Group Peaking in this Layer (Bars)", legend_title="Concept Grouping",
         hue='group_type', palette=palette, custom_tick_labels=layer_labels, ax=ax1, save=False,
-        linewidth=0.8, alpha=0.9, order=range(len(layer_labels))
+        linewidth=0.8, alpha=0.9, order=range(len(layer_labels)), show_x_ticks=True
     )
     ax1.set_xlim(-0.5, len(layer_labels) - 0.5)
     ax2 = ax1.twinx() 
@@ -234,9 +234,9 @@ def plot_category_entropies_bar(category_entropy_df: pd.DataFrame, shan_dir) -> 
     entropy_data = entropy_data.sort_values(by='shannon_entropy', ascending=False).reset_index(drop=True)
     entropy_data['category_display'] = entropy_data['category'].str.title()
     out_path = shan_dir / "category_shannon_entropies_bar.png"
-    _plot_bar_chart(
+    _plot_bar_with_leaders(
         plot_dataframe=entropy_data, x_col="shannon_entropy", y_col="category_display",
-        title="Shannon Entropy of Expert Allocations by Category", x_label="Shannon Entropy (Bits)", 
+        title="Shannon Entropy of Expert Allocations by Category", x_label="Shannon Entropy (Bits)",
         color="#4B5A6A", orient='h', out_path=out_path, figsize=(12, 14)
     )
 

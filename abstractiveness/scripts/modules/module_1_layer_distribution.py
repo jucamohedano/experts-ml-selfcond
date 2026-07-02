@@ -2,7 +2,7 @@ import logging
 import pandas as pd
 import numpy as np
 from utils.helpers import save_dataframe
-from utils.plot_helpers import _plot_bar_chart
+from utils.plot_helpers import _plot_bar_with_leaders
 
 log = logging.getLogger(__name__)
 
@@ -63,11 +63,11 @@ def plot_global_distribution(global_layer_distribution_df: pd.DataFrame, dist_di
     """Save global layer distribution CSV and generate bar chart showing mean expert allocation across abstraction levels."""
     save_dataframe(global_layer_distribution_df, dist_dir / "mean_expert_layer_distribution.csv")
 
-    _plot_bar_chart(
+    _plot_bar_with_leaders(
         plot_dataframe=global_layer_distribution_df, x_col="layer_name", y_col="mean_expert_allocation_pct",
         title="Mean Expert Distribution across model layers", x_label="Model Layer", y_label="Average % of Experts",
-        hue="abstraction_level", palette=ABSTRACTION_COLORS, out_path=dist_dir / "mean_expert_layer_distribution.png", 
-        figsize=(31.2, 10.4), linewidth=0.5
+        hue="abstraction_level", palette=ABSTRACTION_COLORS, out_path=dist_dir / "mean_expert_layer_distribution.png",
+        figsize=(31.2, 10.4), linewidth=0.5, show_x_ticks=True
     )
 
 def plot_per_concept_distributions(concept_distribution_matrix: pd.DataFrame, expert_counts: pd.Series, dist_dir) -> None:
@@ -84,11 +84,11 @@ def plot_per_concept_distributions(concept_distribution_matrix: pd.DataFrame, ex
         
         save_dataframe(concept_layer_distribution_df, specific_concept_dir / f"{concept}_data.csv")
 
-        _plot_bar_chart(
+        _plot_bar_with_leaders(
             plot_dataframe=concept_layer_distribution_df, x_col="layer_name", y_col="expert_allocation_pct",
             title=f"Concept: {concept.upper()} | Abstraction Level {abs_lvl} | Total Experts: {total_experts}",
-            x_label="Model Layer", y_label="% of Experts", color=ABSTRACTION_COLORS[abs_lvl], 
-            out_path=specific_concept_dir / f"{concept}_distribution.png", figsize=(28.6, 7.8)
+            x_label="Model Layer", y_label="% of Experts", color=ABSTRACTION_COLORS[abs_lvl],
+            out_path=specific_concept_dir / f"{concept}_distribution.png", figsize=(28.6, 7.8), show_x_ticks=True
         )
 
 def execute_module_1_layer_expert_distribution(formatted_expert_allocation_df: pd.DataFrame, concept_metadata: pd.DataFrame, dist_dir) -> pd.DataFrame:

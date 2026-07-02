@@ -40,6 +40,51 @@ def _run_regression_panel(
     plt.tight_layout(); plt.savefig(png_out_path, dpi=300); plt.close()
     return summary_row
 
+def _residualize(values: pd.Series, control: pd.Series) -> pd.Series:
+    """
+    Regress `values` on `control` with simple linear regression and return the residuals,
+    i.e. the part of `values` left over once whatever it shares with `control` is removed.
+    """
+    slope, intercept, _, _, _ = stats.linregress(control, values)
+    return values - (slope * control + intercept)
+
+def plot_partial_correlation_jaccard_typicality(corr_data: pd.DataFrame, corr_dir) -> dict | None:
+    """
+    Partial correlation between Jaccard similarity and Human Typicality, controlling for
+    Wikipedia frequency. Both jaccard_pct and human_typicality are residualized against
+    log_frequency (removing whatever each variable shares with frequency), then the two
+    residual vectors are correlated directly, isolating whatever relationship between
+    Jaccard similarity and typicality frequency alone cannot explain.
+    """
+    clean_data = corr_data.dropna(subset=["jaccard_pct", "human_typicality", "log_frequency"]).copy()
+    if len(clean_data) <= 2:
+        return None
+
+    clean_data["jaccard_resid"] = _residualize(clean_data["jaccard_pct"], clean_data["log_frequency"])
+    clean_data["typicality_resid"] = _residualize(clean_data["human_typicality"], clean_data["log_frequency"])
+    save_dataframe(
+        clean_data[["concept", "category", "log_frequency", "jaccard_pct", "human_typicality", "jaccard_resid", "typicality_resid"]],
+        corr_dir / "partial_correlation_jaccard_typicality.csv"
+    )
+
+    r, p = stats.pearsonr(clean_data["jaccard_resid"], clean_data["typicality_resid"])
+    summary_row = {
+        "plot_name": "partial_correlation_jaccard_typicality", "x_variable": "jaccard_resid",
+        "y_variable": "typicality_resid", "pearson_r": r, "pearson_p": p,
+        "n_points": len(clean_data), "controlling_for": "log_frequency",
+    }
+
+    plt.figure(figsize=(10.4, 9.1))
+    sns.regplot(data=clean_data, x="typicality_resid", y="jaccard_resid",
+                scatter_kws={'color': '#6a3d9a'}, line_kws={'color': 'red'})
+    plt.title(f"Jaccard vs. Human Typicality, controlling for Frequency (partial r={r:.2f}, p={p:.2e})", fontsize=16)
+    plt.xlabel("Human Typicality (residual after removing Frequency)")
+    plt.ylabel("Jaccard Similarity Index % (residual after removing Frequency)")
+    plt.tight_layout()
+    plt.savefig(corr_dir / "partial_correlation_jaccard_typicality.png", dpi=300)
+    plt.close()
+    return summary_row
+
 def plot_correlations(merged_metadata_df: pd.DataFrame, similarity_metrics_df: pd.DataFrame, corr_dir) -> None:
     """
     Generate scatter plots with regression lines for multiple correlation analyses.
@@ -88,7 +133,36 @@ def plot_correlations(merged_metadata_df: pd.DataFrame, similarity_metrics_df: p
             corr_dir / "frequency_vs_jaccard.csv", corr_dir / "frequency_vs_jaccard.png")
         if row: summary_rows.append(row)
 
+        row = plot_partial_correlation_jaccard_typicality(corr_data, corr_dir)
+        if row: summary_rows.append(row)
+
     save_dataframe(pd.DataFrame(summary_rows), corr_dir / "correlation_summary.csv")
+
+def execute_module_4b_jaccard_vs_cosine_typicality(similarity_metrics_df: pd.DataFrame, global_typicality_df: pd.DataFrame, corr_dir) -> None:
+    """
+    Second pass of module 4, run after module 7 so global_cosine_typicality is available.
+    Compares Jaccard similarity against Cosine Typicality (module 7's model-derived score) to
+    test whether it tracks a concept's similarity to its category about as well as Human
+    Typicality already does (see typicality_vs_jaccard in correlation_summary.csv). Appends
+    its result to the same correlation_summary.csv module 4 already wrote, so both rows can be
+    compared directly.
+    """
+    if similarity_metrics_df is None or similarity_metrics_df.empty or global_typicality_df is None or global_typicality_df.empty:
+        log.warning("  Skipping Jaccard vs. Cosine Typicality: similarity or typicality data unavailable.")
+        return
+
+    merged = similarity_metrics_df.merge(global_typicality_df, on=["concept", "category"], how="inner")
+    row = _run_regression_panel(
+        merged, "global_cosine_typicality", "jaccard_pct",
+        "Cosine Typicality", "Jaccard Similarity Index %",
+        "Cosine Typicality vs Jaccard Similarity % (r={r:.2f}, p={p:.2e})", '#17becf',
+        corr_dir / "jaccard_vs_cosine_typicality.csv", corr_dir / "jaccard_vs_cosine_typicality.png")
+    if row is None:
+        return
+
+    summary_path = corr_dir / "correlation_summary.csv"
+    existing_summary = pd.read_csv(summary_path) if summary_path.exists() else pd.DataFrame()
+    save_dataframe(pd.concat([existing_summary, pd.DataFrame([row])], ignore_index=True), summary_path)
 
 def execute_module_4_correlations(merged_metadata_df: pd.DataFrame, similarity_metrics_df: pd.DataFrame, corr_dir) -> None:
     """Execute Module 4: Correlations.

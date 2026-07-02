@@ -1,7 +1,7 @@
 import logging
 import pandas as pd
 from utils.helpers import save_dataframe
-from utils.plot_helpers import _plot_bar_chart
+from utils.plot_helpers import _plot_bar_with_leaders
 
 log = logging.getLogger(__name__)
 
@@ -44,7 +44,7 @@ def plot_hierarchy_similarities(expert_allocation_df: pd.DataFrame, concept_meta
     ]
     
     for col, title, color in metrics:
-        _plot_bar_chart(
+        _plot_bar_with_leaders(
             plot_dataframe=similarity_metrics_df, x_col="hierarchy", y_col=col,
             title=title, y_label="Percentage %", color=color, 
             out_path=sim_dir / f"{col.replace('_pct', '')}_hierarchy.png"

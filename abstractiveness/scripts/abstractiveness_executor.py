@@ -7,7 +7,7 @@ from utils.helpers import set_folder_log, load_experts_data, init_global_layer_m
 from modules.module_1_layer_distribution import execute_module_1_layer_expert_distribution
 from modules.module_2_shannon_entropy import execute_module_2_shannon_entropy
 from modules.module_3_similarities import execute_module_3_category_concept_similarities
-from modules.module_4_correlations import execute_module_4_correlations
+from modules.module_4_correlations import execute_module_4_correlations, execute_module_4b_jaccard_vs_cosine_typicality
 from modules.module_5_heatmaps import execute_module_5_heatmaps
 from modules.module_6_jensen_shannon_divergence import execute_module_6_dual_category_jsd
 from modules.module_7_cosine_typicality import execute_module_7_empirical_cosine_typicality
@@ -28,7 +28,7 @@ if __name__ == "__main__":
     REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
     RESPONSES_DIR = REPO_ROOT / "responses" / "GPT2_abstractiveness_150_responses"
     MODEL = "gpt2"
-    OUTPUT_ROOT = REPO_ROOT / "results" / "research_plots_150_revised_executor"
+    OUTPUT_ROOT = REPO_ROOT / "results" / "research_plots_150_revised_executor_again"
     METADATA_PATH = REPO_ROOT / "assets" / "metadata_150.json"
     LAYER_MAPPING_PATH = REPO_ROOT / "assets" / "layer_mapping.csv"
     
@@ -81,7 +81,10 @@ if __name__ == "__main__":
             
             # Module 7: Empirical Cosine Typicality
             global_typicality_df, layer_typicality_df = execute_module_7_empirical_cosine_typicality(formatted_expert_allocation_df, concept_metadata, typicality_dir)
-                
+
+            # Module 4b: Jaccard vs. Cosine Typicality (needs module 7's output, so it runs here)
+            execute_module_4b_jaccard_vs_cosine_typicality(similarity_metrics_df, global_typicality_df, correlations_dir)
+
             log.info(f"  All analysis outputs cleanly structured in {out_path}")
         else:
             log.warning(f"No experts found for threshold {ap}. Skipping folder.")
