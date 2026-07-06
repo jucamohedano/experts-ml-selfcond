@@ -12,28 +12,26 @@ Prerequisites on the remote machine:
     export HF_TOKEN=<your huggingface token>  # only needed for gated models
 """
 import pathlib
+import runpy
 import sys
 
 SCRIPTS_DIR = pathlib.Path(__file__).resolve().parent
 REPO_ROOT = SCRIPTS_DIR.parent
 
-# Make selfcond (repo root) and the compute_* scripts importable from anywhere.
+# Make selfcond importable from anywhere.
 sys.path.insert(0, str(SCRIPTS_DIR))
 sys.path.insert(0, str(REPO_ROOT))
-
-from compute_responses import run_response_computation
-from compute_expertise import run_expertise_computation
 
 
 if __name__ == "__main__":
     print(f"\n{'='*60}")
     print(">>> Step 1/2 — compute_responses")
     print(f"{'='*60}")
-    run_response_computation()
+    runpy.run_path(str(SCRIPTS_DIR / "compute_responses.py"), run_name="__main__")
 
     print(f"\n{'='*60}")
     print(">>> Step 2/2 — compute_expertise")
     print(f"{'='*60}")
-    run_expertise_computation()
+    runpy.run_path(str(SCRIPTS_DIR / "compute_expertise.py"), run_name="__main__")
 
     print("\n--- PIPELINE COMPLETED ---")
