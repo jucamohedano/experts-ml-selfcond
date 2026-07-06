@@ -42,7 +42,7 @@ def run_pipeline():
         "--model-name-or-path", "gpt2",
         "--data-path", "assets/Qwen3-30B-A3B-Instruct-2507_abstractiveness_Richie_HSJ_cot",
         "--responses-path", "responses/GPT2_abstractiveness_Richie_HSJ_responses",
-        "--inf-batch-size", "32",
+
     ], check=True)
 
     # Then compute expertise metrics from the generated responses

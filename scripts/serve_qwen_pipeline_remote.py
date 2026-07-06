@@ -37,7 +37,7 @@ if __name__ == "__main__":
         "--model-name-or-path", MODEL,
         "--data-path",          DATA_PATH,
         "--responses-path",     RESPONSES_PATH,
-        "--inf-batch-size",     "32",
+
     ]
     runpy.run_path(str(SCRIPTS_DIR / "compute_responses.py"), run_name="__main__")
 
