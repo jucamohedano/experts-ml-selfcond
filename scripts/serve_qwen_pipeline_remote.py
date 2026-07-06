@@ -23,15 +23,32 @@ sys.path.insert(0, str(SCRIPTS_DIR))
 sys.path.insert(0, str(REPO_ROOT))
 
 
+DATA_PATH      = str(REPO_ROOT / "assets"    / "Qwen3-30B-A3B-Instruct-2507_abstractiveness_Richie_HSJ_cot")
+RESPONSES_PATH = str(REPO_ROOT / "responses" / "Qwen3_1.7B_abstractiveness_Richie_HSJ_responses")
+CONCEPTS_PATH  = str(REPO_ROOT / "assets"    / "Qwen3-30B-A3B-Instruct-2507_abstractiveness_Richie_HSJ_cot" / "concept_list.csv")
+MODEL          = "Qwen/Qwen3-1.7B"
+
 if __name__ == "__main__":
     print(f"\n{'='*60}")
     print(">>> Step 1/2 — compute_responses")
     print(f"{'='*60}")
+    sys.argv = [
+        "compute_responses.py",
+        "--model-name-or-path", MODEL,
+        "--data-path",          DATA_PATH,
+        "--responses-path",     RESPONSES_PATH,
+    ]
     runpy.run_path(str(SCRIPTS_DIR / "compute_responses.py"), run_name="__main__")
 
     print(f"\n{'='*60}")
     print(">>> Step 2/2 — compute_expertise")
     print(f"{'='*60}")
+    sys.argv = [
+        "compute_expertise.py",
+        "--model-name", MODEL,
+        "--root-dir",   RESPONSES_PATH,
+        "--concepts",   CONCEPTS_PATH,
+    ]
     runpy.run_path(str(SCRIPTS_DIR / "compute_expertise.py"), run_name="__main__")
 
     print("\n--- PIPELINE COMPLETED ---")
