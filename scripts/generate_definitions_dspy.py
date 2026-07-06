@@ -44,7 +44,7 @@ class GenerationConfig:
 
 
 def load_config(path: pathlib.Path) -> GenerationConfig:
-    with path.open("r") as fp:
+    with path.open("r", encoding="utf-8") as fp:
         cfg = json.load(fp)
     return GenerationConfig(
         base_url=cfg.get("base_url", ""),
@@ -102,16 +102,45 @@ def is_relevant_concept(synset: Synset) -> bool:
             return True
     return False
 
-def fetch_wordnet_gloss(concept: str) -> str:
+# Crude category -> WordNet lexicographer-domain hint, used only to pick between
+# multiple senses of a word that means different things in different categories
+# (e.g. "squash" the vegetable vs. "squash" the sport). Not exhaustive -- it only
+# needs to disambiguate the specific ambiguous words in a given word list.
+CATEGORY_LEXNAME_HINTS: t.Dict[str, t.Set[str]] = {
+    "sports": {"noun.act", "noun.event"},
+    "vegetables": {"noun.plant", "noun.food"},
+    "fruit": {"noun.plant", "noun.food"},
+    "birds": {"noun.animal"},
+    "clothing": {"noun.artifact"},
+    "furniture": {"noun.artifact"},
+    "vehicles": {"noun.artifact"},
+    "professions": {"noun.person"},
+}
+
+
+def fetch_wordnet_gloss(concept: str, category: t.Optional[str] = None) -> str:
     """
     Fetches the definition for a concept, prioritizing senses that are concrete
     objects or natural kinds over abstract, informal, or verbal senses.
+
+    If `category` is given and matches CATEGORY_LEXNAME_HINTS, a sense whose
+    WordNet lexicographer domain matches is preferred over that default heuristic --
+    this is what correctly separates e.g. "squash" the vegetable from "squash" the
+    sport, which the generic concreteness heuristic below can't tell apart (both
+    exist as valid noun senses; the concreteness heuristic always prefers the plant).
     """
     synsets = wn.synsets(concept, pos=wn.NOUN)
-    
+
+    if category:
+        hints = CATEGORY_LEXNAME_HINTS.get(category.lower())
+        if hints:
+            for s in synsets:
+                if s.lexname() in hints:
+                    return s.definition()
+
     # 1. Check for relevant senses based on hypernyms
     relevant_synsets = [s for s in synsets if is_relevant_concept(s)]
-    
+
     if relevant_synsets:
         # Prioritize the lowest index (most frequent) among the relevant senses
         best_synset = relevant_synsets[0]
@@ -121,7 +150,7 @@ def fetch_wordnet_gloss(concept: str) -> str:
     # This handles words where the concrete sense IS the first sense, or obscure words.
     if synsets:
         return synsets[0].definition()
-        
+
     return f"{concept} (definition unavailable)"
 
 
@@ -153,17 +182,23 @@ def unique_preserve_order(items: t.Iterable[str]) -> t.List[str]:
 
 class GenerateFacts(dspy.Signature):
     """Generate 10 diverse, factual sentences about the given concept.
-    
+
     Output exactly 10 sentences, one per line, with no numbering or bullets.
     Refer to the concept only by its name without specific classes, types, or names.
+    If the concept name could refer to more than one thing, use the category and
+    definition to write about the intended one only.
     Make sure the sentences are diverse and do not repeat.
     """
-    
+
     concept: str = dspy.InputField(desc="The concept name to describe.")
+    category: str = dspy.InputField(desc="The broader category this concept belongs to; "
+                                          "disambiguates concept names with multiple meanings "
+                                          "(e.g. 'squash' the vegetable vs. 'squash' the sport). "
+                                          "May be blank for top-level category concepts.")
     article: str = dspy.InputField(desc="The article to use ('a' or 'an').")
     definition: str = dspy.InputField(desc="The WordNet definition of the concept.")
     random_seed: str = dspy.InputField(desc="Random seed to ensure diversity.")
-    
+
     sentences: t.List[str] = dspy.OutputField(
         desc="10 factual sentences about the concept, one per line, no numbering."
     )
@@ -171,18 +206,24 @@ class GenerateFacts(dspy.Signature):
 
 class GenerateStories(dspy.Signature):
     """Generate 10 diverse, story-based sentences about the given concept.
-    
+
     Output exactly 10 sentences, one per line, with no numbering or bullets.
     Each sentence should be a short story about the concept.
     Refer to the concept only by its name without specific classes, types, or names.
+    If the concept name could refer to more than one thing, use the category and
+    definition to write about the intended one only.
     Make sure the sentences are diverse and do not repeat.
     """
-    
+
     concept: str = dspy.InputField(desc="The concept name to describe.")
+    category: str = dspy.InputField(desc="The broader category this concept belongs to; "
+                                          "disambiguates concept names with multiple meanings "
+                                          "(e.g. 'squash' the vegetable vs. 'squash' the sport). "
+                                          "May be blank for top-level category concepts.")
     article: str = dspy.InputField(desc="The article to use ('a' or 'an').")
     definition: str = dspy.InputField(desc="The WordNet definition of the concept.")
     random_seed: str = dspy.InputField(desc="Random seed to ensure diversity.")
-    
+
     sentences: t.List[str] = dspy.OutputField(
         desc="10 story sentences about the concept, one per line, no numbering."
     )
@@ -206,29 +247,31 @@ class ConceptGenerator(dspy.Module):
         self.fact_count = fact_count
         self.story_count = story_count
     
-    def forward(self, concept: str, definition: str, article: str):
+    def forward(self, concept: str, definition: str, article: str, category: str = ""):
         """Generate sentences for a concept (synchronous)."""
         positives = []
-        
+
         # Generate facts
         fact_batches_needed = (self.fact_count + 9) // 10  # Ceiling division
         for _ in range(fact_batches_needed):
             try:
                 result = self.fact_generator(
                     concept=concept,
+                    category=category,
                     article=article,
                     definition=definition
                 )
                 positives.extend([sentence for sentence in result.sentences if sentence])
             except Exception as e:
                 print(f"    Warning: Fact generation batch failed for {concept}: {e}")
-        
+
         # Generate stories
         story_batches_needed = (self.story_count + 9) // 10  # Ceiling division
         for _ in range(story_batches_needed):
             try:
                 result = self.story_generator(
                     concept=concept,
+                    category=category,
                     article=article,
                     definition=definition
                 )
@@ -246,21 +289,22 @@ class ConceptGenerator(dspy.Module):
             story_count=min(self.story_count, len(positives) - self.fact_count) if len(positives) > self.fact_count else 0
         )
     
-    async def aforward(self, concept: str, definition: str, article: str):
+    async def aforward(self, concept: str, definition: str, article: str, category: str = ""):
         """Generate sentences for a concept (asynchronous)."""
         positives = []
-        
+
         # Generate facts
         # --- Generate Facts ---
         facts_collected = []
         attempts = 0
         max_attempts = self.fact_count * 2  # Safety limit
-        
+
         while len(facts_collected) < self.fact_count and attempts < max_attempts:
             attempts += 1
             try:
                 result = await self.fact_generator.acall(
                     concept=concept,
+                    category=category,
                     article=article,
                     definition=definition,
                     random_seed=str(random.random())
@@ -291,6 +335,7 @@ class ConceptGenerator(dspy.Module):
             try:
                 result = await self.story_generator.acall(
                     concept=concept,
+                    category=category,
                     article=article,
                     definition=definition,
                     random_seed=str(random.random())
@@ -326,21 +371,23 @@ class ConceptGenerator(dspy.Module):
 
 async def generate_concept_positives_async(
     concept: str,
+    storage_key: str,
+    category: t.Optional[str],
     generator: ConceptGenerator,
-) -> t.Tuple[str, t.List[str]]:
+) -> t.Tuple[str, str, t.Optional[str], t.List[str]]:
     """Generate positives for a single concept asynchronously using DSPy's native async support."""
-    definition = fetch_wordnet_gloss(concept)
+    definition = fetch_wordnet_gloss(concept, category)
     article = pick_article(concept)
-    
+
     # Use acall() to ensure DSPy async wrappers (callbacks, context, usage tracking) are applied.
-    result = await generator.acall(concept=concept, definition=definition, article=article)
-    
+    result = await generator.acall(concept=concept, definition=definition, article=article, category=category or "")
+
     # Verify counts
     total_target = generator.fact_count + generator.story_count
     if len(result.positives) < total_target:
         print(f"    WARNING: {concept} only generated {len(result.positives)}/{total_target} positives!")
-    
-    return concept, result.positives
+
+    return concept, storage_key, category, result.positives
 
 
 # ============================================================================
@@ -434,10 +481,43 @@ def build_negatives_stratified(
 # File I/O
 # ============================================================================
 
+def storage_key_for(concept: str, category: t.Optional[str], all_concepts: t.List[str]) -> str:
+    """A bare concept name is ambiguous when the same word is used for two different
+    senses in the same word list (e.g. "squash" the vegetable vs. "squash" the sport --
+    both appear in the Richie & Bhatia HSJ table). When a name repeats, disambiguate the
+    on-disk storage key (filename / intermediate dict key) with its category, so the two
+    senses don't silently overwrite each other. The "concept" field written into every
+    JSON file's content, and the value sent to the LM, stays the plain word, unchanged.
+    """
+    if category and all_concepts.count(concept) > 1:
+        return f"{concept}__{category}"
+    return concept
+
+
+def load_categories_for_concepts(
+    metadata_path: pathlib.Path, concepts: t.List[str]
+) -> t.List[t.Optional[str]]:
+    """Loads (concept, category) pairs from a metadata JSON (same format as
+    metadata_Richie_HSJ.json), aligned by position with `concepts` -- both are built by
+    flattening the same source list in the same order. Falls back to all-None (no
+    disambiguation) if the metadata doesn't line up, rather than risk mismatched pairing.
+    """
+    with metadata_path.open("r", encoding="utf-8") as fp:
+        entries = json.load(fp)
+    meta_concepts = [e["concept"] for e in entries]
+    if meta_concepts != concepts:
+        print(f"Warning: {metadata_path} concepts don't match config concepts 1:1; "
+              f"category-based disambiguation disabled.")
+        return [None] * len(concepts)
+    return [e.get("category") for e in entries]
+
+
 def write_concept_json(
     *,
     dataset_dir: pathlib.Path,
     concept: str,
+    storage_key: str,
+    category: t.Optional[str],
     group: str,
     source: str,
     positives: t.List[str],
@@ -445,6 +525,7 @@ def write_concept_json(
 ) -> None:
     out = {
         "concept": concept,
+        "category": category,
         "group": group,
         "source": source,
         "sentences": {
@@ -452,56 +533,70 @@ def write_concept_json(
             "negative": negatives,
         },
     }
-    out_path = dataset_dir / group / f"{concept}.json"
+    out_path = dataset_dir / group / f"{storage_key}.json"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with out_path.open("w", encoding="utf-8") as fp:
         json.dump(out, fp, ensure_ascii=False, separators=(',', ':'))
 
 
 def write_concept_list_csv(
-    *, dataset_root: pathlib.Path, group: str, concepts: t.List[str]
+    *, dataset_root: pathlib.Path, group: str, entries: t.List[t.Tuple[str, str, t.Optional[str]]]
 ) -> None:
     csv_path = dataset_root / "concept_list.csv"
     csv_path.parent.mkdir(parents=True, exist_ok=True)
     with csv_path.open("w", encoding="utf-8") as fp:
-        fp.write("group,concept\n")
-        for c in concepts:
-            fp.write(f"{group},{c}\n")
+        fp.write("group,concept,storage_key,category\n")
+        for concept, storage_key, category in entries:
+            fp.write(f"{group},{concept},{storage_key},{category or ''}\n")
 
 
 def write_intermediate_positives(
-    *, intermediate_dir: pathlib.Path, concept: str, positives: t.List[str]
+    *,
+    intermediate_dir: pathlib.Path,
+    concept: str,
+    storage_key: str,
+    category: t.Optional[str],
+    positives: t.List[str],
 ) -> None:
     intermediate_dir.mkdir(parents=True, exist_ok=True)
-    out = {"concept": concept, "positives": positives}
-    with (intermediate_dir / f"{concept}.json").open("w", encoding="utf-8") as fp:
+    out = {"concept": concept, "storage_key": storage_key, "category": category, "positives": positives}
+    with (intermediate_dir / f"{storage_key}.json").open("w", encoding="utf-8") as fp:
         json.dump(out, fp, ensure_ascii=False)
 
 
-def load_all_intermediate_positives(
+def load_all_intermediate_records(
     intermediate_dir: pathlib.Path,
-) -> t.Dict[str, t.List[str]]:
-    positives_by_concept: t.Dict[str, t.List[str]] = {}
+) -> t.Dict[str, dict]:
+    """Returns the full record (concept, category, storage_key, positives) for every
+    intermediate file, keyed by storage_key (falling back to concept for older files
+    written before storage_key existed, so other datasets' existing .intermediate
+    directories keep working unchanged)."""
+    records: t.Dict[str, dict] = {}
     if not intermediate_dir.exists():
-        return positives_by_concept
-    
+        return records
+
     for json_file in intermediate_dir.glob("*.json"):
         try:
-            with json_file.open("r") as fp:
+            with json_file.open("r", encoding="utf-8") as fp:
                 data = json.load(fp)
-            concept = data["concept"]
-            positives = data["positives"]
-            positives_by_concept[concept] = positives
-        except Exception:
+            key = data.get("storage_key") or data["concept"]
+            records[key] = data
+        except Exception as e:
+            # Surfaced rather than silently swallowed: a file that fails to load looks
+            # identical to "doesn't exist yet" to every caller, which previously caused
+            # affected concepts to regenerate forever under --resume without ever being
+            # recognized as complete (root cause: reading without encoding="utf-8" broke
+            # on Windows' default cp1252 locale for any non-ASCII generated text).
+            print(f"    WARNING: failed to load intermediate file {json_file.name}: {e}")
             continue
-    return positives_by_concept
+    return records
 
 
 def load_env_file_if_present(env_path: pathlib.Path) -> None:
     if not env_path.exists():
         return
     try:
-        for line in env_path.read_text().splitlines():
+        for line in env_path.read_text(encoding="utf-8").splitlines():
             line = line.strip()
             if not line or line.startswith("#"):
                 continue
@@ -523,67 +618,89 @@ async def generate_positives(
     *,
     cfg: GenerationConfig,
     generator_type: str,
-    concepts: t.List[str],
+    entries: t.List[t.Tuple[str, str, t.Optional[str]]],
     intermediate_dir: pathlib.Path,
     max_concurrent_concepts: int,
-) -> None:
-    """Phase 1: Generate positives for all concepts with high concurrency using DSPy's native async."""
-    print(f"Phase 1: Generating positives for {len(concepts)} concepts...")
-    
+) -> t.List[str]:
+    """Phase 1: Generate positives for all concepts with high concurrency using DSPy's native async.
+
+    `entries` is a list of (concept, storage_key, category) tuples -- storage_key is what
+    the on-disk file gets named, so that concepts sharing a name across categories (e.g.
+    "squash" as both a vegetable and a sport) don't overwrite each other. Returns the list
+    of storage_keys that failed outright (raised an exception), for a visible end-of-run summary.
+    """
+    print(f"Phase 1: Generating positives for {len(entries)} concepts...")
+
     # Initialize DSPy generator
     generator = ConceptGenerator(
         fact_count=cfg.positive_fact,
         story_count=cfg.positive_story,
         generator=generator_type
     )
-    
+
+    failed_storage_keys: t.List[str] = []
+
     # Process in batches using DSPy's native async support
-    for i in range(0, len(concepts), max_concurrent_concepts):
-        batch_concepts = concepts[i:i + max_concurrent_concepts]
-        
-        print(f"  Processing batch {i//max_concurrent_concepts + 1}: {len(batch_concepts)} concepts...")
-        
+    for i in range(0, len(entries), max_concurrent_concepts):
+        batch = entries[i:i + max_concurrent_concepts]
+
+        print(f"  Processing batch {i//max_concurrent_concepts + 1}: {len(batch)} concepts...")
+
         # Create async tasks using DSPy's acall()
         tasks = [
-            generate_concept_positives_async(concept, generator)
-            for concept in batch_concepts
+            generate_concept_positives_async(concept, storage_key, category, generator)
+            for concept, storage_key, category in batch
         ]
-        
+
         # Execute concurrently
         results = await asyncio.gather(*tasks, return_exceptions=True)
-        
+
         # Save results
-        for result in results:
-            if isinstance(result, Exception):
-                print(f"    ERROR: {result}")
+        for result, (concept, storage_key, category) in zip(results, batch):
+            if isinstance(result, BaseException):
+                print(f"    ERROR generating {storage_key}: {result}")
+                failed_storage_keys.append(storage_key)
                 continue
-            
-            concept, positives = result
+
+            _, _, _, positives = result
             write_intermediate_positives(
                 intermediate_dir=intermediate_dir,
                 concept=concept,
+                storage_key=storage_key,
+                category=category,
                 positives=positives,
             )
-            print(f"    Generated {len(positives)} positives for {concept}")
+            print(f"    Generated {len(positives)} positives for {storage_key}")
+
+    if failed_storage_keys:
+        print(f"\nPhase 1 finished with {len(failed_storage_keys)} concept(s) that raised an "
+              f"error and were NOT written to .intermediate: {failed_storage_keys}")
+        print("Re-run with --resume to retry just these.")
+
+    return failed_storage_keys
 
 
 def gather_negatives(
     *,
     cfg: GenerationConfig,
-    concepts: t.List[str],
+    entries: t.List[t.Tuple[str, str, t.Optional[str]]],
     dataset_root: pathlib.Path,
     intermediate_dir: pathlib.Path,
 ) -> None:
-    """Phase 2: Build stratified negatives and write final JSON files."""
+    """Phase 2: Build stratified negatives and write final JSON files.
+
+    `entries` is a list of (concept, storage_key, category) tuples, same as generate_positives.
+    """
     print("Phase 2: Loading intermediate positives...")
-    positives_by_concept = load_all_intermediate_positives(intermediate_dir)
-    
-    if not positives_by_concept:
+    records = load_all_intermediate_records(intermediate_dir)
+    positives_by_key = {key: r["positives"] for key, r in records.items()}
+
+    if not positives_by_key:
         raise RuntimeError("No intermediate positives found. Run phase 1 first.")
-    
-    print(f"Phase 2: Building stratified negatives for {len(concepts)} concepts...")
-    negatives_by_concept = build_negatives_stratified(
-        positives_by_concept=positives_by_concept,
+
+    print(f"Phase 2: Building stratified negatives for {len(entries)} concepts...")
+    negatives_by_key = build_negatives_stratified(
+        positives_by_concept=positives_by_key,
         target_negatives=cfg.negatives_per_concept,
         seed=cfg.seed,
     )
@@ -591,24 +708,32 @@ def gather_negatives(
     # Write final JSON files
     group = "custom"
     source_name = f"dspy_{cfg.model.replace('/', '_')}"
-    
-    for concept in tqdm(concepts, desc="Writing concept files"):
-        positives = positives_by_concept.get(concept, [])
-        negatives = negatives_by_concept.get(concept, [])
+
+    missing = []
+    for concept, storage_key, category in tqdm(entries, desc="Writing concept files"):
+        positives = positives_by_key.get(storage_key, [])
+        negatives = negatives_by_key.get(storage_key, [])
+        if not positives:
+            missing.append(storage_key)
         write_concept_json(
             dataset_dir=dataset_root,
             concept=concept,
+            storage_key=storage_key,
+            category=category,
             group=group,
             source=source_name,
             positives=positives,
             negatives=negatives,
         )
-    
-    print(f"  Wrote datasets for {len(concepts)} concepts")
+
+    print(f"  Wrote datasets for {len(entries)} concepts")
+    if missing:
+        print(f"  WARNING: {len(missing)} concept(s) had no intermediate positives and were "
+              f"written with empty sentences: {missing}")
 
     # Write concept list CSV
-    write_concept_list_csv(dataset_root=dataset_root, group=group, concepts=concepts)
-    
+    write_concept_list_csv(dataset_root=dataset_root, group=group, entries=entries)
+
     print(f"Phase 2: Complete. Dataset written to: {dataset_root}")
 
 
@@ -627,6 +752,14 @@ async def async_main() -> None:
         type=pathlib.Path,
         default=pathlib.Path("../abstractiveness/assets"),
         help="Root directory for generated dataset",
+    )
+    parser.add_argument(
+        "--metadata",
+        type=pathlib.Path,
+        default=pathlib.Path("../abstractiveness/assets/metadata_Richie_HSJ.json"),
+        help="Metadata JSON (concept+category pairs, same format as metadata_Richie_HSJ.json) "
+             "used to disambiguate concept names reused across categories (e.g. \"squash\" as "
+             "both a vegetable and a sport). Pass a nonexistent path to disable.",
     )
     parser.add_argument(
         "--only-concepts",
@@ -697,49 +830,85 @@ async def async_main() -> None:
     dataset_root = args.dataset_root / cfg.dataset_name
     intermediate_dir = dataset_root / "custom" / ".intermediate"
 
-    # Apply filters
-    concepts = cfg.concepts
+    # Build (concept, storage_key, category) entries. storage_key only differs from
+    # concept when the same concept name is reused across categories (e.g. "squash").
+    all_concepts = cfg.concepts
+    if args.metadata and args.metadata.exists():
+        categories = load_categories_for_concepts(args.metadata, all_concepts)
+    else:
+        categories = [None] * len(all_concepts)
+    storage_keys = [storage_key_for(c, cat, all_concepts) for c, cat in zip(all_concepts, categories)]
+    entries = list(zip(all_concepts, storage_keys, categories))
+
+    dupes = {sk for sk in storage_keys if storage_keys.count(sk) > 1}
+    if dupes:
+        print(f"Warning: these storage keys are STILL ambiguous after category "
+              f"disambiguation (no --metadata, or missing category): {sorted(dupes)}")
+
+    # Apply filters (match against either the bare concept or its storage_key)
     if args.only_concepts:
-        requested = [c.strip() for c in args.only_concepts.split(",") if c.strip()]
-        concepts = [c for c in concepts if c in requested]
+        requested = {c.strip() for c in args.only_concepts.split(",") if c.strip()}
+        entries = [(c, sk, cat) for c, sk, cat in entries if c in requested or sk in requested]
     if args.limit_concepts and args.limit_concepts > 0:
-        concepts = concepts[:args.limit_concepts]
-    
+        entries = entries[:args.limit_concepts]
+
     # Handle --fix-intermediate: Force use of all intermediate concepts
     if args.fix_intermediate:
         print("Mode: Fix/Rebuild from intermediate files. Ignoring config/filter concepts.")
-        existing_data = load_all_intermediate_positives(intermediate_dir)
-        concepts = unique_preserve_order(existing_data.keys())
-        print(f"Found {len(concepts)} concepts in .intermediate")
+        records = load_all_intermediate_records(intermediate_dir)
+        entries = [
+            (r["concept"], key, r.get("category"))
+            for key, r in records.items()
+        ]
+        print(f"Found {len(entries)} concepts in .intermediate")
         args.phase = "negatives"  # Force phase to negatives/processing only
 
-    # Resume support: skip concepts already present in .intermediate for positives phase
-    concepts_to_generate = list(concepts)
-    if args.phase in ["both", "positives"] and args.resume and not args.fix_intermediate:
-        existing = set(load_all_intermediate_positives(intermediate_dir).keys())
-        if existing:
-            concepts_to_generate = [c for c in concepts if c not in existing]
-            print(f"Resume: Skipping {len(concepts) - len(concepts_to_generate)} existing concepts.")
+    target_positives = cfg.positive_fact + cfg.positive_story
 
-    print(f"Processing {len(concepts)} concepts (Generation queue: {len(concepts_to_generate)})")
+    # Resume support: skip concepts already present in .intermediate for positives phase,
+    # but only if they actually reached the target count -- a partial file (e.g. from a
+    # run that hit the retry cap due to repetitive model output) is treated as NOT done,
+    # so it gets regenerated rather than being silently stuck forever.
+    entries_to_generate = list(entries)
+    if args.phase in ["both", "positives"] and args.resume and not args.fix_intermediate:
+        records = load_all_intermediate_records(intermediate_dir)
+        complete = {
+            key for key, r in records.items()
+            if len(r.get("positives", [])) >= target_positives
+        }
+        if complete:
+            entries_to_generate = [(c, sk, cat) for c, sk, cat in entries if sk not in complete]
+            print(f"Resume: Skipping {len(entries) - len(entries_to_generate)} concepts already "
+                  f"at {target_positives}/{target_positives} positives.")
+
+    print(f"Processing {len(entries)} concepts (Generation queue: {len(entries_to_generate)})")
 
     # Execute phases
+    generated_something = False
     if args.phase in ["both", "positives"]:
-        if not concepts_to_generate:
+        if not entries_to_generate:
              print("No concepts to generate (all exist or empty list).")
         else:
             await generate_positives(
                 cfg=cfg,
                 generator_type=args.generator_type,
-                concepts=concepts_to_generate,
+                entries=entries_to_generate,
                 intermediate_dir=intermediate_dir,
                 max_concurrent_concepts=args.max_concurrent_concepts,
             )
-    
-    if args.phase in ["both", "negatives"]:
+            generated_something = True
+
+    # --resume's whole point is to end up with a complete, consistent dataset -- not just
+    # topped-up .intermediate files -- so always rebuild the final output afterward, even
+    # if --phase was only "positives".
+    run_negatives = args.phase in ["both", "negatives"] or (args.resume and generated_something)
+    if run_negatives:
+        if args.resume and args.phase == "positives" and generated_something:
+            print("Resume also rebuilding final output (Phase 2) so it reflects the newly "
+                  "completed concepts, since --phase was 'positives' alone.")
         gather_negatives(
             cfg=cfg,
-            concepts=concepts,
+            entries=entries,
             dataset_root=dataset_root,
             intermediate_dir=intermediate_dir,
         )

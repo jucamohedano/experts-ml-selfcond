@@ -6,13 +6,20 @@ Run this directly on the remote GPU machine (over SSH, inside tmux/screen, or as
 systemd unit) -- it is a plain foreground process, not a cloud function.
 
 Prerequisites on the remote machine:
-    pip install "vllm>=0.6.0" hf-transfer huggingface_hub pydantic
+    pip install "vllm>=0.6.0" huggingface_hub pydantic
     export HF_TOKEN=<your huggingface token>          # gated/rate-limited models
-    export HF_HUB_ENABLE_HF_TRANSFER=1                # optional, faster downloads
 
 Usage:
-    python serve_qwen_remote.py                       # binds 0.0.0.0:8000
+    python serve_qwen_remote.py                       # binds 0.0.0.0:8000, full bf16 weights
     python serve_qwen_remote.py --port 8001 --gpu-memory-utilization 0.9
+
+    # GPU too small for full bf16 (needs ~60GB)? Use a quantized checkpoint instead,
+    # keeping the API-facing model name unchanged so dataset_config*.json files don't
+    # need to change:
+    python serve_qwen_remote.py \
+        --model stelterlab/Qwen3-30B-A3B-Instruct-2507-AWQ \
+        --quantization awq \
+        --served-model-name Qwen/Qwen3-30B-A3B-Instruct-2507
 
 Then point a dataset_config_*.json's "base_url" at this machine, e.g.:
     - Same network / port opened in the firewall: "http://<remote-ip>:8000/v1"
@@ -46,6 +53,15 @@ def parse_args():
     parser.add_argument("--gpu-memory-utilization", type=float, default=0.95)
     parser.add_argument("--max-num-batched-tokens", type=int, default=8192)
     parser.add_argument("--max-num-seqs", type=int, default=256)
+    parser.add_argument("--quantization", default=None,
+                         help="e.g. 'awq' when --model points at a pre-quantized checkpoint "
+                              "(vLLM often auto-detects this from the checkpoint's config, "
+                              "but passing it explicitly is safer)")
+    parser.add_argument("--served-model-name", default=None,
+                         help="API-facing model name clients must send. Set this to the "
+                              "original repo id (e.g. Qwen/Qwen3-30B-A3B-Instruct-2507) when "
+                              "--model points at a different (e.g. quantized) repo, so existing "
+                              "dataset_config*.json files don't need to change.")
     parser.add_argument("--api-key", default=None, help="Require this key via Authorization header")
     parser.add_argument("--hf-home", default=os.path.expanduser("~/.cache/huggingface"),
                          help="Where to cache downloaded model weights")
@@ -63,7 +79,7 @@ def main():
     os.makedirs(args.vllm_cache_root, exist_ok=True)
 
     env = os.environ.copy()
-    env.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "1")
+    env.setdefault("HF_XET_HIGH_PERFORMANCE", "1")  # faster downloads (HF_HUB_ENABLE_HF_TRANSFER is deprecated)
     env["HF_HOME"] = args.hf_home
     env["VLLM_CACHE_ROOT"] = args.vllm_cache_root
     env.setdefault("VLLM_SKIP_P2P_CHECK", "1")
@@ -83,6 +99,10 @@ def main():
         "--trust-remote-code",
         "--no-enable-log-requests",
     ]
+    if args.quantization:
+        cmd += ["--quantization", args.quantization]
+    if args.served_model_name:
+        cmd += ["--served-model-name", args.served_model_name]
     if args.api_key:
         cmd += ["--api-key", args.api_key]
 

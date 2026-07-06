@@ -37,12 +37,22 @@ gpt2_image = (
 def run_pipeline():
     # Execute the response generation script first
     print(">>> Starting compute_responses.py...")
-    subprocess.run(["python", "/root/compute_responses.py"], check=True)
-    
+    subprocess.run([
+        "python", "/root/compute_responses.py",
+        "--model-name-or-path", "gpt2",
+        "--data-path", "assets/Qwen3-30B-A3B-Instruct-2507_abstractiveness_Richie_HSJ_cot",
+        "--responses-path", "responses/GPT2_abstractiveness_Richie_HSJ_responses",
+    ], check=True)
+
     # Then compute expertise metrics from the generated responses
     print("\n>>> Starting compute_expertise.py...")
-    subprocess.run(["python", "/root/compute_expertise.py"], check=True)
-    
+    subprocess.run([
+        "python", "/root/compute_expertise.py",
+        "--root-dir", "responses/GPT2_abstractiveness_Richie_HSJ_responses",
+        "--model-name", "gpt2",
+        "--concepts", "assets/Qwen3-30B-A3B-Instruct-2507_abstractiveness_Richie_HSJ_cot/concept_list.csv",
+    ], check=True)
+
     print("\n--- PIPELINE COMPLETED ---")
 
 # Local entry point to trigger remote execution

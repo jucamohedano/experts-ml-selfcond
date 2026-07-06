@@ -42,6 +42,9 @@ vllm_cache_volume = modal.Volume.from_name(
     },
     secrets=[modal.Secret.from_name("hf-secret")],  # HuggingFace authentication
     max_containers=1,  # Ensure single instance for consistent state
+    scaledown_window=1200,  # Stay warm for 20min (the max allowed) after the last
+                            # request, so back-to-back generate_definitions_dspy.py
+                            # runs a few minutes apart don't each pay a ~2min cold start.
 )
 @modal.concurrent(max_inputs=100)  # Handle up to 100 concurrent requests
 @modal.web_server(port=8000, startup_timeout=1200)  # Expose as web service

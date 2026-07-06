@@ -72,7 +72,7 @@ class GenerationConfig:
 
 
 def load_config(path: pathlib.Path) -> GenerationConfig:
-    with path.open("r") as fp:
+    with path.open("r", encoding="utf-8") as fp:
         cfg = json.load(fp)
     return GenerationConfig(
         base_url=cfg["base_url"],
@@ -431,7 +431,7 @@ def write_concept_json(
     }
     out_path = dataset_dir / group / f"{concept}.json"
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    with out_path.open("w") as fp:
+    with out_path.open("w", encoding="utf-8") as fp:
         # Single-line compact JSON to match existing format
         json.dump(out, fp, ensure_ascii=False, separators=(',', ':'))
 
@@ -439,7 +439,7 @@ def write_concept_json(
 def write_concept_list_csv(*, dataset_root: pathlib.Path, group: str, concepts: t.List[str]) -> None:
     csv_path = dataset_root / "concept_list.csv"
     csv_path.parent.mkdir(parents=True, exist_ok=True)
-    with csv_path.open("w") as fp:
+    with csv_path.open("w", encoding="utf-8") as fp:
         fp.write("group,concept\n")
         for c in concepts:
             fp.write(f"{group},{c}\n")
@@ -449,7 +449,7 @@ def load_env_file_if_present(env_path: pathlib.Path) -> None:
     if not env_path.exists():
         return
     try:
-        for line in env_path.read_text().splitlines():
+        for line in env_path.read_text(encoding="utf-8").splitlines():
             line = line.strip()
             if not line or line.startswith("#"):
                 continue
@@ -472,7 +472,7 @@ def write_intermediate_positives(
     """Write intermediate positives for phase 1."""
     intermediate_dir.mkdir(parents=True, exist_ok=True)
     out = {"concept": concept, "positives": positives}
-    with (intermediate_dir / f"{concept}.json").open("w") as fp:
+    with (intermediate_dir / f"{concept}.json").open("w", encoding="utf-8") as fp:
         json.dump(out, fp, ensure_ascii=False)
 
 
@@ -483,15 +483,16 @@ def load_all_intermediate_positives(
     positives_by_concept: t.Dict[str, t.List[str]] = {}
     if not intermediate_dir.exists():
         return positives_by_concept
-    
+
     for json_file in intermediate_dir.glob("*.json"):
         try:
-            with json_file.open("r") as fp:
+            with json_file.open("r", encoding="utf-8") as fp:
                 data = json.load(fp)
             concept = data["concept"]
             positives = data["positives"]
             positives_by_concept[concept] = positives
-        except Exception:
+        except Exception as e:
+            print(f"    WARNING: failed to load intermediate file {json_file.name}: {e}")
             continue
     return positives_by_concept
 

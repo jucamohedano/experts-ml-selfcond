@@ -214,14 +214,14 @@ if __name__ == "__main__":
             "Root directory with responses. Should contain responses_"
             "`dir/model/concept_group/concept/responses`"
         ),
-        default=pathlib.Path("responses/GPT2_abstractiveness_150_responses"),
+        default=pathlib.Path("responses/Qwen3_1.7B_abstractiveness_Richie_HSJ_responses"),
         #required=True,
     )
     parser.add_argument(
         "--model-name",
         type=str,
         help="The model name",
-        default="gpt2",
+        default="Qwen/Qwen3-1.7B",
         # required=True,
     )
     parser.add_argument("--concepts", type=str, help="concepts to analyze", default=str(pathlib.Path("assets/Qwen3-30B-A3B-Instruct-2507_abstractiveness_150_cot/concept_list.csv")))

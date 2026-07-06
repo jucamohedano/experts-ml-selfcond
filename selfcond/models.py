@@ -340,6 +340,8 @@ def transformers_model_name_to_family(model_name: str) -> str:
         return "pythia"
     elif "gpt-neox" in model_name.lower():
         return "gpt-neox"
+    elif "qwen" in model_name.lower():
+        return "qwen"
     else:
         raise NotImplementedError(f"Model name to type not considered: {model_name}")
 
@@ -356,7 +358,7 @@ def transformers_class_from_name(
     """
     try:
         # Determine which AutoModel class to use
-        if any(x in model_name.lower() for x in ["pythia", "gpt-neox", "gpt2", "llama", "mistral", "falcon"]):
+        if any(x in model_name.lower() for x in ["pythia", "gpt-neox", "gpt2", "llama", "mistral", "falcon", "qwen"]):
             AutoModelClass = AutoModelForCausalLM
         else:
             AutoModelClass = AutoModelForPreTraining
@@ -407,6 +409,18 @@ def get_layer_regex(model_name: str) -> t.Optional[t.List[str]]:
             r"gpt_neox\.layers\.[0-9]+\.mlp\.dense_h_to_4h",
             r"gpt_neox\.layers\.[0-9]+\.mlp\.dense_4h_to_h",
         ]
+    elif family == "qwen":
+        # Qwen3 uses SwiGLU MLP (gate/up/down projections) and standard attention projections.
+        # Layer names follow model.layers.N.{mlp,self_attn}.{proj} from Qwen3ForCausalLM.
+        layer_types = [
+            r"model\.layers\.[0-9]+\.self_attn\.q_proj",
+            r"model\.layers\.[0-9]+\.self_attn\.k_proj",
+            r"model\.layers\.[0-9]+\.self_attn\.v_proj",
+            r"model\.layers\.[0-9]+\.self_attn\.o_proj",
+            r"model\.layers\.[0-9]+\.mlp\.gate_proj",
+            r"model\.layers\.[0-9]+\.mlp\.up_proj",
+            r"model\.layers\.[0-9]+\.mlp\.down_proj",
+        ]
     # Extend to other model families here if needed
     return layer_types
 
@@ -440,6 +454,16 @@ def _collect_responses_info_for_model(model: TorchModel, model_family: str) -> t
             if ri.layer.kind in ["Linear", "LayerNorm"]
             and len(ri.shape) in [2, 3]
             and "lm_head" not in ri.name
+        ],
+        "qwen": [
+            # Qwen3 MLP and attention projections are all standard nn.Linear modules.
+            # Exclude lm_head and embed_tokens (vocabulary-sized, not hidden-sized).
+            ri
+            for ri in model.get_response_infos()
+            if ri.layer.kind == "Linear"
+            and len(ri.shape) == 2
+            and "lm_head" not in ri.name
+            and "embed" not in ri.name
         ],
         # Extend to other models here
     }

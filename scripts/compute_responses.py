@@ -171,7 +171,7 @@ if __name__ == "__main__":
         "--model-name-or-path",
         type=str,
         help="Model name (from pytorch-transformers module)",
-        default="gpt2",
+        default="Qwen/Qwen3-1.7B",
         #required=True,
     )
     parser.add_argument(
@@ -217,7 +217,7 @@ if __name__ == "__main__":
         "--responses-path",
         type=pathlib.Path,
         help="Path where to save the responses.",
-        default=pathlib.Path("responses/GPT2_abstractiveness_150_responses"),
+        default=pathlib.Path("responses/Qwen3_1.7B_abstractiveness_Richie_HSJ_responses"),
         #required=True,
     )
     parser.add_argument(
