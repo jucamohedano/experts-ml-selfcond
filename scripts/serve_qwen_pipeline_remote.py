@@ -23,9 +23,9 @@ sys.path.insert(0, str(SCRIPTS_DIR))
 sys.path.insert(0, str(REPO_ROOT))
 
 
-DATA_PATH      = str(REPO_ROOT / "assets"    / "Qwen3-30B-A3B-Instruct-2507_abstractiveness_Richie_HSJ_cot")
-RESPONSES_PATH = str(REPO_ROOT / "responses" / "Qwen3_1.7B_abstractiveness_Richie_HSJ_responses")
-CONCEPTS_PATH  = str(REPO_ROOT / "assets"    / "Qwen3-30B-A3B-Instruct-2507_abstractiveness_Richie_HSJ_cot" / "concept_list.csv")
+DATA_PATH      = str(REPO_ROOT / "abstractiveness" / "assets" / "Qwen3-30B-A3B-Instruct-2507_abstractiveness_Richie_HSJ_cot")
+RESPONSES_PATH = str(REPO_ROOT / "abstractiveness" /  "responses" / "Qwen3_1.7B_abstractiveness_Richie_HSJ_responses")
+CONCEPTS_PATH  = str(REPO_ROOT / "abstractiveness" / "assets"    / "Qwen3-30B-A3B-Instruct-2507_abstractiveness_Richie_HSJ_cot" / "concept_list.csv")
 MODEL          = "Qwen/Qwen3-1.7B"
 
 if __name__ == "__main__":
@@ -37,6 +37,7 @@ if __name__ == "__main__":
         "--model-name-or-path", MODEL,
         "--data-path",          DATA_PATH,
         "--responses-path",     RESPONSES_PATH,
+        "--inf-batch-size",     "32",
     ]
     runpy.run_path(str(SCRIPTS_DIR / "compute_responses.py"), run_name="__main__")
 
