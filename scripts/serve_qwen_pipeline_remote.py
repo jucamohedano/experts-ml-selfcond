@@ -27,9 +27,9 @@ SCRIPTS_DIR = pathlib.Path(__file__).resolve().parent
 REPO_ROOT = SCRIPTS_DIR.parent
 
 DEFAULT_MODEL = "Qwen/Qwen3-1.7B"
-DEFAULT_DATA_PATH = str(REPO_ROOT / "assets" / "Qwen3-30B-A3B-Instruct-2507_abstractiveness_150_cot")
-DEFAULT_RESPONSES_PATH = str(REPO_ROOT / "responses" / "Qwen3_1.7B_abstractiveness_150_responses")
-DEFAULT_CONCEPTS = str(REPO_ROOT / "assets" / "Qwen3-30B-A3B-Instruct-2507_abstractiveness_150_cot" / "concept_list.csv")
+DEFAULT_DATA_PATH = str(REPO_ROOT / "assets" / "Qwen3-30B-A3B-Instruct-2507_abstractiveness_Richie_HSJ_cot")
+DEFAULT_RESPONSES_PATH = str(REPO_ROOT / "responses" / "Qwen3_1.7B_abstractiveness_Richie_HSJ_responses")
+DEFAULT_CONCEPTS = str(REPO_ROOT / "assets" / "Qwen3-30B-A3B-Instruct-2507_abstractiveness_Richie_HSJ_cot" / "concept_list.csv")
 
 
 def parse_args():
