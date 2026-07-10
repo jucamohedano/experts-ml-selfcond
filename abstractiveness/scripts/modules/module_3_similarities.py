@@ -10,7 +10,13 @@ def plot_hierarchy_similarities(expert_allocation_df: pd.DataFrame, concept_meta
     Calculate Jaccard and Overlap similarity metrics between concepts and categories.
     Generates bar charts for both metrics and returns results DataFrame.
     """
-    unit_sets = expert_allocation_df.groupby("concept")["unit"].apply(set).to_dict()
+    # Key expert sets on (layer_idx, unit) pairs: the raw `unit` column is only the neuron
+    # index *within* a layer, so identical indices from different layers would otherwise be
+    # collapsed into one element, inflating intersections between unrelated experts.
+    pair_keyed_df = expert_allocation_df.assign(
+        layer_unit=list(zip(expert_allocation_df["layer_idx"], expert_allocation_df["unit"]))
+    )
+    unit_sets = pair_keyed_df.groupby("concept")["layer_unit"].apply(set).to_dict()
     
     results = []
     for _, row in concept_metadata.dropna(subset=["category"]).iterrows():

@@ -13,7 +13,10 @@ def plot_all_heatmaps(expert_allocation_df: pd.DataFrame, concept_metadata: pd.D
     """
     concepts = concept_metadata['concept'].unique()
     
-    presence_matrix = expert_allocation_df.assign(present=1).pivot_table(index='concept', columns='unit', values='present', fill_value=0)
+    # Columns are (layer_idx, unit) pairs: the raw `unit` column is only the neuron index
+    # *within* a layer, so pivoting on it alone would merge identical indices from different
+    # layers into one column, inflating pairwise intersections between unrelated experts.
+    presence_matrix = expert_allocation_df.assign(present=1).pivot_table(index='concept', columns=['layer_idx', 'unit'], values='present', fill_value=0)
     presence_matrix = presence_matrix.reindex(concepts, fill_value=0)
     A = presence_matrix.values  
     
