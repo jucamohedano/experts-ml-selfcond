@@ -1,9 +1,12 @@
 """
-Run the Qwen3-1.7B expertise pipeline (compute_responses → compute_expertise) directly
-on a remote GPU server — no Modal, no cloud function boilerplate.
+Run the expertise pipeline (compute_responses → compute_expertise) for the selected
+model directly on a remote GPU server — no Modal, no cloud function boilerplate.
 
-All parameters are taken from the defaults set in compute_responses.py and
-compute_expertise.py. Run from anywhere on the server:
+Select the model by commenting/uncommenting exactly one MODEL block below; the
+dataset is the same Richie-HSJ set for every model. Only the essential path/model
+arguments are passed, so everything else (batch size, device, sequence length, ...)
+comes from the defaults set in compute_responses.py and compute_expertise.py.
+Run from anywhere on the server:
 
     python scripts/serve_qwen_pipeline_remote.py
 
@@ -23,10 +26,19 @@ sys.path.insert(0, str(SCRIPTS_DIR))
 sys.path.insert(0, str(REPO_ROOT))
 
 
-DATA_PATH      = str(REPO_ROOT / "abstractiveness" / "assets" / "Qwen3-30B-A3B-Instruct-2507_abstractiveness_Richie_HSJ_cot")
-RESPONSES_PATH = str(REPO_ROOT / "abstractiveness" /  "responses" / "Qwen3_1.7B_abstractiveness_Richie_HSJ_responses")
-CONCEPTS_PATH  = str(REPO_ROOT / "abstractiveness" / "assets"    / "Qwen3-30B-A3B-Instruct-2507_abstractiveness_Richie_HSJ_cot" / "concept_list.csv")
+# --- Model selection: keep exactly one block uncommented. -------------------
+
+# Qwen3-1.7B
 MODEL          = "Qwen/Qwen3-1.7B"
+RESPONSES_PATH = str(REPO_ROOT / "abstractiveness" / "responses" / "Qwen3_1.7B_abstractiveness_Richie_HSJ_responses")
+
+# GPT-2
+# MODEL          = "gpt2"
+# RESPONSES_PATH = str(REPO_ROOT / "abstractiveness" / "responses" / "GPT2_abstractiveness_Richie_HSJ_responses")
+
+# --- Dataset (shared by all models). -----------------------------------------
+DATA_PATH      = str(REPO_ROOT / "abstractiveness" / "assets" / "Qwen3-30B-A3B-Instruct-2507_abstractiveness_Richie_HSJ_cot")
+CONCEPTS_PATH  = str(pathlib.Path(DATA_PATH) / "concept_list.csv")
 
 if __name__ == "__main__":
     print(f"\n{'='*60}")

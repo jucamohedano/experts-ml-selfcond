@@ -49,10 +49,71 @@ def load_experts_data(root, model, threshold) -> pd.DataFrame:
         all_rows.append(experts)
     return pd.concat(all_rows, ignore_index=True) if all_rows else pd.DataFrame()
 
-def init_global_layer_mapping(responses_dir, model, mapping_path: pathlib.Path) -> pd.DataFrame:
+# Per-architecture rules for turning raw layer strings (e.g. "model.layers.0.mlp.down_proj:0")
+# into sequential 1..N layer indices. `sublayers` is listed in forward-pass order within one
+# transformer block; that ordering defines how layer_idx increments inside a block. To support
+# a new model, add an entry here rather than editing the mapping logic below.
+LAYER_ARCHITECTURES = {
+    # GPT-2: 12 blocks x 4 sublayers = 48 layers. Layer strings look like
+    # "transformer.h.0.attn.c_attn:0".
+    "gpt2": {
+        "block_regex": r"h\.(\d+)",
+        "sublayer_regex": r"h\.\d+\.(.*?):0",
+        "sublayers": ["attn.c_attn", "attn.c_proj", "mlp.c_fc", "mlp.c_proj"],
+    },
+    # Qwen3: 28 blocks x 7 sublayers = 196 layers. Layer strings look like
+    # "model.layers.0.mlp.down_proj:0".
+    "qwen3": {
+        "block_regex": r"layers\.(\d+)",
+        "sublayer_regex": r"layers\.\d+\.(.*?):0",
+        "sublayers": [
+            "self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj", "self_attn.o_proj",
+            "mlp.gate_proj", "mlp.up_proj", "mlp.down_proj",
+        ],
+    },
+}
+
+def build_layer_mapping_from_layers(unique_layers: pd.DataFrame, architecture: str) -> pd.DataFrame:
     """
-    Initialize a mapping that translates original model layer strings to sequential 1-48 layer indices and formatted layer names.
-    If mapping already exists, load from file; otherwise compute from the first expertise.csv and cache for reuse.
+    Turn a DataFrame with a single 'layer' column of raw layer strings into the standard
+    (layer, layer_idx, layer_name) mapping for the given architecture. layer_idx is a
+    contiguous 1..N index ordered by (block number, sublayer position within the block),
+    where the within-block order is LAYER_ARCHITECTURES[architecture]['sublayers'].
+    Raises ValueError if any layer string carries a sublayer missing from that spec.
+    """
+    spec = LAYER_ARCHITECTURES[architecture]
+    n_sub = len(spec["sublayers"])
+    block_nums = unique_layers['layer'].str.extract(spec["block_regex"]).astype(int)[0]
+    sub_layer_strs = unique_layers['layer'].str.extract(spec["sublayer_regex"])[0]
+    sub_idx = sub_layer_strs.map({sub: i for i, sub in enumerate(spec["sublayers"])})
+
+    unmapped = sorted(sub_layer_strs[sub_idx.isna()].dropna().unique())
+    if unmapped:
+        raise ValueError(
+            f"Architecture '{architecture}' has layer strings with sublayers not in its spec: "
+            f"{unmapped}. Add them (in forward-pass order) to "
+            f"LAYER_ARCHITECTURES['{architecture}']['sublayers']."
+        )
+
+    unique_layers = unique_layers.copy()
+    unique_layers['layer_idx'] = (block_nums * n_sub) + sub_idx + 1
+    unique_layers['layer_name'] = (
+        unique_layers['layer_idx'].astype(str) + ".L." +
+        block_nums.astype(str) + "." +
+        sub_layer_strs
+    )
+
+    mapping_df = unique_layers.sort_values('layer_idx').reset_index(drop=True)
+    ordered_names = mapping_df['layer_name']
+    mapping_df['layer_name'] = pd.Categorical(mapping_df['layer_name'], categories=ordered_names, ordered=True)
+    return mapping_df
+
+def init_global_layer_mapping(responses_dir, model, mapping_path: pathlib.Path, architecture: str = "gpt2") -> pd.DataFrame:
+    """
+    Initialize a mapping that translates original model layer strings to sequential layer
+    indices and formatted layer names for the given architecture (a key of LAYER_ARCHITECTURES,
+    e.g. "gpt2" or "qwen3"). If the mapping file already exists, load from it; otherwise compute
+    it from the first expertise.csv found under responses_dir/model and cache it for reuse.
     Returns a categorical DataFrame with layer, layer_idx, and layer_name columns.
     """
     if mapping_path.exists():
@@ -60,29 +121,15 @@ def init_global_layer_mapping(responses_dir, model, mapping_path: pathlib.Path) 
         ordered_names = mapping_df.sort_values('layer_idx')['layer_name']
         mapping_df['layer_name'] = pd.Categorical(mapping_df['layer_name'], categories=ordered_names, ordered=True)
         return mapping_df
-        
-    log.info("Generating global layer mapping for the first time...")
+
+    log.info(f"Generating global layer mapping ({architecture}) for the first time...")
     # Peek at the first expertise.csv we can find, loading ONLY the layer column for speed
     search_path = pathlib.Path(responses_dir) / model
     first_csv = next(search_path.glob("**/expertise/expertise.csv"))
     unique_layers = pd.read_csv(first_csv, usecols=['layer']).drop_duplicates()
-    
-    SUB_LAYERS = ["attn.c_attn", "attn.c_proj", "mlp.c_fc", "mlp.c_proj"]
-    block_nums = unique_layers['layer'].str.extract(r'h\.(\d+)').astype(int)[0]
-    sub_layer_strs = unique_layers['layer'].str.extract(r'h\.\d+\.(.*?):0')[0]
-    sub_idx = sub_layer_strs.map({sub: i for i, sub in enumerate(SUB_LAYERS)})
 
-    unique_layers['layer_idx'] = (block_nums * 4) + sub_idx + 1
-    unique_layers['layer_name'] = (
-        unique_layers['layer_idx'].astype(str) + ".L." + 
-        block_nums.astype(str) + "." + 
-        sub_layer_strs
-    )
-    
-    mapping_df = unique_layers.sort_values('layer_idx').reset_index(drop=True)
-    ordered_names = mapping_df['layer_name']
-    mapping_df['layer_name'] = pd.Categorical(mapping_df['layer_name'], categories=ordered_names, ordered=True)
-    
+    mapping_df = build_layer_mapping_from_layers(unique_layers, architecture)
+
     mapping_path.parent.mkdir(parents=True, exist_ok=True)
     mapping_df.to_csv(mapping_path, index=False)
 

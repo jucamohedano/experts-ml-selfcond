@@ -24,16 +24,72 @@ console_handler = logging.StreamHandler()
 console_handler.setFormatter(formatter)
 root_logger.addHandler(console_handler)
 
+# ---------------------------------------------------------------------------
+# Run configuration.
+#
+# Each entry fully describes one (model x dataset) run. To analyze a different
+# model or metadata set, add/edit an entry and point ACTIVE_CONFIG at it -- no
+# code below this block needs to change. Fields:
+#   responses_subdir   : folder under responses/ holding that model's outputs
+#   model_subdir       : the sub-folder inside responses_subdir to scan for
+#                        expertise.csv (also passed to the layer-mapping loader)
+#   architecture       : key of helpers.LAYER_ARCHITECTURES ("gpt2", "qwen3")
+#   metadata_file      : concept metadata JSON under assets/
+#   layer_mapping_file : cached layer mapping under assets/ (auto-generated if absent)
+#   typicality_column  : metadata column to use as the human typicality score;
+#                        it is renamed to "human_typicality" for all downstream modules
+#   output_subdir      : folder under results/ to write this run's plots/tables
+# ---------------------------------------------------------------------------
+MODEL_CONFIGS = {
+    "gpt2_150": {
+        "responses_subdir": "GPT2_abstractiveness_150_responses",
+        "model_subdir": "gpt2",
+        "architecture": "gpt2",
+        "metadata_file": "metadata_150.json",
+        "layer_mapping_file": "layer_mapping_GPT2.csv",
+        "typicality_column": "typicality",
+        "output_subdir": "research_plots_150_revised_executor_again",
+    },
+    "qwen3_richie_hsj": {
+        "responses_subdir": "Qwen3_1.7B_abstractiveness_Richie_HSJ_responses",
+        "model_subdir": "Qwen",
+        "architecture": "qwen3",
+        "metadata_file": "metadata_Richie_HSJ.json",
+        "layer_mapping_file": "layer_mapping_Richie_HSJ.csv",
+        "typicality_column": "typicality_HSJ_pairwise",
+        "output_subdir": "research_plots_qwen_richie_hsj",
+    },
+    # GPT-2 on the same Richie-HSJ dataset -- the architecture comparison against
+    # qwen3_richie_hsj (same metadata + typicality column, GPT-2's 48-layer mapping).
+    "gpt2_richie_hsj": {
+        "responses_subdir": "GPT2_abstractiveness_Richie_HSJ_responses",
+        "model_subdir": "gpt2",
+        "architecture": "gpt2",
+        "metadata_file": "metadata_Richie_HSJ.json",
+        "layer_mapping_file": "layer_mapping_GPT2_Richie_HSJ.csv",
+        "typicality_column": "typicality_HSJ_pairwise",
+        "output_subdir": "research_plots_gpt2_richie_hsj",
+    },
+}
+
+# Select which configuration to run.
+ACTIVE_CONFIG = "qwen3_richie_hsj"
+
 if __name__ == "__main__":
     REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
-    RESPONSES_DIR = REPO_ROOT / "responses" / "GPT2_abstractiveness_150_responses"
-    MODEL = "gpt2"
-    OUTPUT_ROOT = REPO_ROOT / "results" / "research_plots_150_revised_executor_again"
-    METADATA_PATH = REPO_ROOT / "assets" / "metadata_150.json"
-    LAYER_MAPPING_PATH = REPO_ROOT / "assets" / "layer_mapping.csv"
-    
-    concept_metadata = pd.read_json(METADATA_PATH).rename(columns={"typicality": "human_typicality"})
-    global_layer_mapping = init_global_layer_mapping(RESPONSES_DIR, MODEL, LAYER_MAPPING_PATH)
+    cfg = MODEL_CONFIGS[ACTIVE_CONFIG]
+
+    RESPONSES_DIR = REPO_ROOT / "responses" / cfg["responses_subdir"]
+    MODEL = cfg["model_subdir"]
+    ARCHITECTURE = cfg["architecture"]
+    OUTPUT_ROOT = REPO_ROOT / "results" / cfg["output_subdir"]
+    METADATA_PATH = REPO_ROOT / "assets" / cfg["metadata_file"]
+    LAYER_MAPPING_PATH = REPO_ROOT / "assets" / cfg["layer_mapping_file"]
+    TYPICALITY_COLUMN = cfg["typicality_column"]
+
+    log.info(f"Running analysis with config '{ACTIVE_CONFIG}' (architecture: {ARCHITECTURE})")
+    concept_metadata = pd.read_json(METADATA_PATH).rename(columns={TYPICALITY_COLUMN: "human_typicality"})
+    global_layer_mapping = init_global_layer_mapping(RESPONSES_DIR, MODEL, LAYER_MAPPING_PATH, ARCHITECTURE)
     
     for ap in [0.5, 0.6, 0.7, 0.8, 0.9]:
         out_path = OUTPUT_ROOT / f"AP_{ap}"

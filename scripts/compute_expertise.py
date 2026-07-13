@@ -5,12 +5,19 @@
 
 import argparse
 import pathlib
+import shutil
 
 import numpy as np
 import pandas as pd
 
 from selfcond.data import concept_list_to_df
 from selfcond.expertise import ExpertiseResult
+from selfcond.integrity import (
+    check_expertise_complete,
+    check_responses_complete,
+    expected_sample_count,
+    latest_concept_subdir,
+)
 from selfcond.responses import read_responses_from_cached
 from selfcond.models import get_layer_regex
 from selfcond.visualization import (
@@ -24,6 +31,7 @@ def analyze_expertise_for_concept(
     concept_dir: pathlib.Path,
     concept_group: str,
     concept: str,
+    expected_samples: int = None,
 ):
     """
     Analyze the expertise of a specific concept. It expects a `results_dir` with the following tree:
@@ -39,6 +47,9 @@ def analyze_expertise_for_concept(
         concept_dir: The concept directory, contains a dir `responses` and will contain a dir `expertise`
         concept_group: The concept type
         concept: The concept
+        expected_samples: Total samples the cached responses must hold. When given,
+            incomplete cached responses are deleted (so compute_responses.py can
+            regenerate them) instead of silently producing skewed expertise.
     """
 
     # Build paths
@@ -46,8 +57,27 @@ def analyze_expertise_for_concept(
     concept_exp_dir = concept_dir / "expertise"
 
     if ExpertiseResult.exists_in_disk(concept_exp_dir):
-        print("Results found, skipping building")
-        return
+        complete, reason = check_expertise_complete(concept_exp_dir)
+        if complete:
+            print("Results found, skipping building")
+            return
+        print(
+            f"Incomplete expertise for {concept_group}/{concept} ({reason}): "
+            f"deleting {concept_exp_dir} and recomputing."
+        )
+        shutil.rmtree(concept_exp_dir)
+
+    if expected_samples is not None and cached_responses_dir.exists():
+        complete, reason = check_responses_complete(cached_responses_dir, expected_samples)
+        if not complete:
+            # Expertise built from partial responses is silently wrong (the tail
+            # of the sample order is all positives, so truncation skews AP).
+            print(
+                f"Incomplete responses for {concept_group}/{concept} ({reason}): "
+                f"deleting {concept_dir}. Re-run compute_responses.py to regenerate."
+            )
+            shutil.rmtree(concept_dir)
+            return
 
     # Read all the responses and labels from storage
     try:
@@ -154,6 +184,7 @@ def run_expertise_computation(
     show: bool = False,
     skip: bool = False,
     black: bool = False,
+    num_per_concept: int = 1000,
 ):
     """
     Run the expertise computation pipeline.
@@ -173,12 +204,38 @@ def run_expertise_computation(
     print(concepts_requested)
     concept_df = concept_list_to_df(concepts_requested)
 
+    # The most recently generated expertise is the one a previous interrupted
+    # run may have left half written; give it a deep check (csv row count vs.
+    # total_neurons) and delete it if broken so it gets recomputed below.
+    model_root = root_dir / model_name
+    if model_root.exists():
+        last_expertise = latest_concept_subdir(model_root, "expertise")
+        if last_expertise is not None:
+            complete, reason = check_expertise_complete(last_expertise, check_csv_rows=True)
+            if not complete:
+                print(
+                    f"Last generated expertise {last_expertise} is incomplete "
+                    f"({reason}): deleting it for recomputation."
+                )
+                shutil.rmtree(last_expertise)
+
+    # When concepts come from a concept_list.csv the dataset jsons live next to
+    # it, which lets us verify cached responses hold the full sample count
+    # before building expertise from them.
+    data_root = concepts_requested.parent if isinstance(concepts_requested, pathlib.Path) else None
+
     for row_index, row in concept_df.iterrows():
         concept_dir = root_dir / model_name / row["group"] / row["concept"]
+        expected = None
+        if data_root is not None:
+            data_json = data_root / row["group"] / f"{row['concept']}.json"
+            if data_json.exists():
+                expected = expected_sample_count(data_json, num_per_concept)
         analyze_expertise_for_concept(
             concept_dir=concept_dir,
             concept=row["concept"],
             concept_group=row["group"],
+            expected_samples=expected,
         )
 
         # Load results and plot
@@ -234,6 +291,16 @@ if __name__ == "__main__":
         default=False,
     )
     parser.add_argument("--black", action="store_true", help="Figures in black mode", default=False)
+    parser.add_argument(
+        "--num-per-concept",
+        type=int,
+        help=(
+            "Max sentences per concept per label used when the responses were "
+            "computed (must match compute_responses.py); needed to verify "
+            "cached responses are complete."
+        ),
+        default=1000,
+    )
     args = parser.parse_args()
 
     run_expertise_computation(
@@ -244,4 +311,5 @@ if __name__ == "__main__":
         show=args.show,
         skip=args.skip,
         black=args.black,
+        num_per_concept=args.num_per_concept,
     )

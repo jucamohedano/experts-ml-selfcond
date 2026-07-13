@@ -6,12 +6,14 @@
 import argparse
 import logging
 import pathlib
+import shutil
 
 from selfcond.data import (
     concept_list_to_df,
     PytorchTransformersTokenizer,
     ConceptDataset,
 )
+from selfcond.integrity import check_responses_complete, expected_sample_count
 from selfcond.responses import cache_responses
 from selfcond.models import collect_responses_info, PytorchTransformersModel
 
@@ -55,9 +57,24 @@ def compute_and_save_responses(
         print(f"Skipping {local_data_file}, file not found.")
         return
 
-    if (response_save_path / model_name / concept_group / concept / "responses").exists():
-        print(f"Skipping, already computed responses {local_data_file}")
-        return
+    concept_dir = response_save_path / model_name / concept_group / concept
+    if (concept_dir / "responses").exists():
+        complete, reason = check_responses_complete(
+            concept_dir / "responses",
+            expected_samples=expected_sample_count(local_data_file, num_per_concept),
+            batch_size=batch_size,
+        )
+        if complete:
+            print(f"Skipping, already computed responses {local_data_file}")
+            return
+        # An interrupted run leaves the concept it was working on half written.
+        # Any expertise in this concept dir was derived from the same partial
+        # data, so the whole concept directory is discarded and recomputed.
+        print(
+            f"Incomplete responses for {concept_group}/{concept} ({reason}): "
+            f"deleting {concept_dir} and recomputing."
+        )
+        shutil.rmtree(concept_dir)
 
     random_seed = 1234
 
