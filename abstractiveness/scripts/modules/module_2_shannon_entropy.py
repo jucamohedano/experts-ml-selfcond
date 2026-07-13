@@ -6,7 +6,7 @@ import seaborn as sns
 from scipy import stats
 from scipy.stats import entropy
 from utils.helpers import save_dataframe, build_layer_probability_matrix
-from utils.plot_helpers import _plot_bar_with_leaders
+from utils.plot_helpers import _plot_bar_with_leaders, fig_width_for
 
 log = logging.getLogger(__name__)
 
@@ -130,7 +130,9 @@ def plot_peak_average_distributions(expert_allocation_df: pd.DataFrame, concept_
     plot_df['peak_layer_idx'] = plot_df['peak_layer'] - 1
     plot_df['avg_layer_idx'] = plot_df['avg_layer'] - 1
     
-    fig, ax1 = plt.subplots(figsize=(18, 6))
+    # Width scales with the layer count (matching module 1's layer plots) so the per-layer
+    # x-axis stays legible; the anchored leader labels come from _plot_bar_with_leaders.
+    fig, ax1 = plt.subplots(figsize=(fig_width_for(len(layer_labels), 0.28, min_w=16.0), 6))
     sns.set_theme(style="whitegrid")
     palette = {
         "Specific Concepts": "#D96A5B", 

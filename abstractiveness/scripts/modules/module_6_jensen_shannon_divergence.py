@@ -7,6 +7,7 @@ from scipy import stats
 from scipy.stats import entropy
 from scipy.spatial.distance import jensenshannon, pdist
 from utils.helpers import save_dataframe, build_layer_probability_matrix
+from utils.plot_helpers import fig_width_for, apply_rotated_leader_labels
 
 log = logging.getLogger(__name__)
 
@@ -66,10 +67,11 @@ def compute_dual_category_jsd(expert_allocation_df: pd.DataFrame, concept_metada
     
     if not jsd_results_df.empty:
         jsd_results_df = jsd_results_df.sort_values(by="jensen_shannon_divergence").reset_index(drop=True)
-        
         # Save a clean CSV without the massive array columns
-        clean_csv = jsd_results_df.drop(columns=['P_dist', 'Q_dist'])
-    save_dataframe(clean_csv, jsd_dir / "dual_category_jsd.csv")
+        save_dataframe(jsd_results_df.drop(columns=['P_dist', 'Q_dist']), jsd_dir / "dual_category_jsd.csv")
+    else:
+        log.warning("  No categories qualified for JSD (no category-label concept has experts at this AP); skipping.")
+
     # Return both the dataframe and the layer labels for the X-axis of the micro plot
     return jsd_results_df, layer_labels
 
@@ -125,12 +127,15 @@ def plot_jsd_micro_distributions(jsd_results_df: pd.DataFrame, layer_labels: lis
     allocations behind the smallest and largest JSD values can be inspected directly.
     """
     if len(jsd_results_df) < 2: return
-    
+
     # Find the extremes
     min_cat = jsd_results_df.loc[jsd_results_df['jensen_shannon_divergence'].idxmin()]
     max_cat = jsd_results_df.loc[jsd_results_df['jensen_shannon_divergence'].idxmax()]
-    
-    fig, axes = plt.subplots(2, 1, figsize=(16, 10), sharex=True)
+
+    # Width scales with the layer count (48 for GPT-2, 196 for Qwen3) so the per-layer
+    # x-axis stays legible, matching module 1's layer plots.
+    fig_w = fig_width_for(len(layer_labels), 0.28, min_w=16.0)
+    fig, axes = plt.subplots(2, 1, figsize=(fig_w, 10), sharex=True)
     x = np.arange(len(layer_labels))
     
     targets = [
@@ -156,9 +161,8 @@ def plot_jsd_micro_distributions(jsd_results_df: pd.DataFrame, layer_labels: lis
         ax.set_xlim(0, len(layer_labels) - 1)
         ax.grid(axis='y', linestyle='--', alpha=0.5)
 
-    # Format the shared X-axis
-    axes[1].set_xticks(x)
-    axes[1].set_xticklabels(layer_labels, rotation=45, ha='right', fontsize=9)
+    # Format the shared X-axis with the shared anchored leader-label styling.
+    apply_rotated_leader_labels(axes[1], layer_labels, axis='x', fontsize=9)
     axes[1].set_xlabel("Model Layer", fontsize=12)
     
     plt.suptitle("Micro View: Layer Allocations Behind Jensen-Shannon Divergence", fontsize=18, y=1.02)

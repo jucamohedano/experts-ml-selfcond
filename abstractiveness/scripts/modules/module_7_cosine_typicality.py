@@ -6,7 +6,7 @@ import seaborn as sns
 from scipy.stats import pearsonr
 from sklearn.metrics.pairwise import cosine_similarity
 from utils.helpers import save_dataframe
-from utils.plot_helpers import _plot_bar_with_leaders
+from utils.plot_helpers import _plot_bar_with_leaders, fig_width_for, apply_rotated_leader_labels
 
 log = logging.getLogger(__name__)
 
@@ -109,8 +109,8 @@ def generate_category_typicality_reports(global_typicality_df: pd.DataFrame, lay
                 plot_dataframe=melted_typicality_df, x_col='concept', y_col='Score',
                 title=f"'{category.title()}' Human Typicality vs. Cosine Typicality",
                 x_label="Concepts (Ordered by Human Typicality)", y_label="Typicality Score (0 to 1)", legend_title="Metric",
-                hue='Metric', palette=['#4B5A6A', '#D96A5B'], out_path=cat_dir / f"{category}_typicality_comparison_bar.png", 
-                figsize=(14, 6)
+                hue='Metric', palette=['#4B5A6A', '#D96A5B'], out_path=cat_dir / f"{category}_typicality_comparison_bar.png",
+                figsize=(fig_width_for(cat_global['concept'].nunique(), 0.55, min_w=14.0), 6), show_x_ticks=True
             )
             
             # Catch constant array warnings safely
@@ -160,8 +160,10 @@ def plot_most_typical_concept_per_layer(top_concepts_per_layer_df: pd.DataFrame,
     Plot the evolution of the most typical concept across layers.
     Uses a stem-like visual where the concept label acts as the 'bar'.
     """
-    plt.figure(figsize=(24, 8))
-    plt.vlines(x=range(len(top_concepts_per_layer_df)), ymin=0, ymax=top_concepts_per_layer_df['cosine_similarity_score'], 
+    # Width scales with the layer count so the per-layer x-axis stays legible.
+    fig_w = fig_width_for(len(top_concepts_per_layer_df), 0.28, min_w=16.0)
+    plt.figure(figsize=(fig_w, 8))
+    plt.vlines(x=range(len(top_concepts_per_layer_df)), ymin=0, ymax=top_concepts_per_layer_df['cosine_similarity_score'],
                color='gray', alpha=0.3, linewidth=2)
     for i, row in top_concepts_per_layer_df.reset_index(drop=True).iterrows():
         plt.scatter(i, row['cosine_similarity_score'], color='#4B5A6A', s=20, zorder=3)
@@ -175,7 +177,7 @@ def plot_most_typical_concept_per_layer(top_concepts_per_layer_df: pd.DataFrame,
     plt.title(f"'{category.title()}' Evolution: The Most Typical Concept per Layer", fontsize=18, pad=20)
     plt.xlabel("Model Layer", fontsize=14)
     plt.ylabel("Cosine Typicality (Layer Prototype)", fontsize=14)
-    plt.xticks(ticks=range(len(top_concepts_per_layer_df)), labels=top_concepts_per_layer_df['layer_name'], rotation=45, ha='right', fontsize=9)
+    apply_rotated_leader_labels(plt.gca(), list(top_concepts_per_layer_df['layer_name']), axis='x', fontsize=9)
     
     # Dynamically adjust Y limit to ensure long words don't get cut off at the top
     max_y = top_concepts_per_layer_df['cosine_similarity_score'].max()

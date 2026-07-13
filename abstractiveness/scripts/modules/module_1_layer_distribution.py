@@ -2,7 +2,7 @@ import logging
 import pandas as pd
 import numpy as np
 from utils.helpers import save_dataframe
-from utils.plot_helpers import _plot_bar_with_leaders
+from utils.plot_helpers import _plot_bar_with_leaders, fig_width_for
 
 log = logging.getLogger(__name__)
 
@@ -63,17 +63,23 @@ def plot_global_distribution(global_layer_distribution_df: pd.DataFrame, dist_di
     """Save global layer distribution CSV and generate bar chart showing mean expert allocation across abstraction levels."""
     save_dataframe(global_layer_distribution_df, dist_dir / "mean_expert_layer_distribution.csv")
 
+    # Width grows with the number of model layers (48 for GPT-2, 196 for Qwen3) so the
+    # per-layer bars and their labels stay readable at any architecture size.
+    n_layers = global_layer_distribution_df["layer_name"].nunique()
     _plot_bar_with_leaders(
         plot_dataframe=global_layer_distribution_df, x_col="layer_name", y_col="mean_expert_allocation_pct",
         title="Mean Expert Distribution across model layers", x_label="Model Layer", y_label="Average % of Experts",
         hue="abstraction_level", palette=ABSTRACTION_COLORS, out_path=dist_dir / "mean_expert_layer_distribution.png",
-        figsize=(31.2, 10.4), linewidth=0.5, show_x_ticks=True
+        figsize=(fig_width_for(n_layers, 0.28, min_w=16.0), 10.4), linewidth=0.5, show_x_ticks=True
     )
 
 def plot_per_concept_distributions(concept_distribution_matrix: pd.DataFrame, expert_counts: pd.Series, dist_dir) -> None:
     """Generate individual distribution CSVs and charts for each concept, organized by abstraction level."""
     concept_dir = dist_dir / "per_concept"
-    
+    # One bar per model layer, so the canvas widens with the layer count.
+    n_layers = concept_distribution_matrix.shape[1]
+    per_concept_width = fig_width_for(n_layers, 0.26, min_w=14.0)
+
     for (abs_lvl, concept), row_data in concept_distribution_matrix.iterrows():
         specific_concept_dir = concept_dir / concept
         specific_concept_dir.mkdir(parents=True, exist_ok=True)
@@ -88,7 +94,7 @@ def plot_per_concept_distributions(concept_distribution_matrix: pd.DataFrame, ex
             plot_dataframe=concept_layer_distribution_df, x_col="layer_name", y_col="expert_allocation_pct",
             title=f"Concept: {concept.upper()} | Abstraction Level {abs_lvl} | Total Experts: {total_experts}",
             x_label="Model Layer", y_label="% of Experts", color=ABSTRACTION_COLORS[abs_lvl],
-            out_path=specific_concept_dir / f"{concept}_distribution.png", figsize=(28.6, 7.8), show_x_ticks=True
+            out_path=specific_concept_dir / f"{concept}_distribution.png", figsize=(per_concept_width, 7.8), show_x_ticks=True
         )
 
 def execute_module_1_layer_expert_distribution(formatted_expert_allocation_df: pd.DataFrame, concept_metadata: pd.DataFrame, dist_dir) -> pd.DataFrame:

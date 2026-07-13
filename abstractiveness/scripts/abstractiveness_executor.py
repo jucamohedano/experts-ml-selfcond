@@ -48,14 +48,14 @@ MODEL_CONFIGS = {
         "metadata_file": "metadata_150.json",
         "layer_mapping_file": "layer_mapping_GPT2.csv",
         "typicality_column": "typicality",
-        "output_subdir": "research_plots_150_revised_executor_again",
+        "output_subdir": "research_plots_150_final",
     },
     "qwen3_richie_hsj": {
         "responses_subdir": "Qwen3_1.7B_abstractiveness_Richie_HSJ_responses",
         "model_subdir": "Qwen",
         "architecture": "qwen3",
         "metadata_file": "metadata_Richie_HSJ.json",
-        "layer_mapping_file": "layer_mapping_Richie_HSJ.csv",
+        "layer_mapping_file": "layer_mapping_Qwen3_1-7B.csv",
         "typicality_column": "typicality_HSJ_pairwise",
         "output_subdir": "research_plots_qwen_richie_hsj",
     },
@@ -66,14 +66,14 @@ MODEL_CONFIGS = {
         "model_subdir": "gpt2",
         "architecture": "gpt2",
         "metadata_file": "metadata_Richie_HSJ.json",
-        "layer_mapping_file": "layer_mapping_GPT2_Richie_HSJ.csv",
+        "layer_mapping_file": "layer_mapping_GPT2.csv",
         "typicality_column": "typicality_HSJ_pairwise",
         "output_subdir": "research_plots_gpt2_richie_hsj",
     },
 }
 
 # Select which configuration to run.
-ACTIVE_CONFIG = "qwen3_richie_hsj"
+ACTIVE_CONFIG = "gpt2_richie_hsj"
 
 if __name__ == "__main__":
     REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
