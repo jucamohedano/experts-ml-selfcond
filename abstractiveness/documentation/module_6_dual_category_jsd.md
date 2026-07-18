@@ -10,7 +10,7 @@ Notation. As in module 2, each item $c$ has a layer probability distribution $p_
 
 $$P = p_k \;\; \text{(the label's own distribution, the \emph{prototype})}, \qquad Q = \bar{q}_k, \;\; \bar{q}_{k\ell} = \frac{1}{|M_k|}\sum_{m \in M_k} p_{m\ell} \;\; \text{(the member average, the \emph{exemplars})} .$$
 
-Only categories whose label appears in the matrix *and* that have at least one valid member are processed.
+Only categories whose label appears in the matrix *and* that have at least one valid member are processed. This requirement can fail wholesale at strict AP thresholds: module 1 (Results, "Zero-expert words") shows that entire words, including category labels, retain zero experts at AP ≥ 0.8, which is what shrinks this module's category count across the sweep. The module guards these degenerate cases explicitly. When *no* category qualifies it saves the (empty) CSV and skips all visualizations. The two scatter plots are also skipped when no row has both of their metrics, and the micro-distribution plot requires at least two categories with a valid JSD to contrast. This keeps a full AP sweep runnable end to end instead of crashing at the strict end.
 
 ### 6.1 Prototype vs. exemplar divergence
 

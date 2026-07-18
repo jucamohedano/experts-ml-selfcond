@@ -28,7 +28,7 @@ $$J_{cd} = 100 \cdot \frac{I_{cd}}{U_{cd}} \quad \text{(Jaccard index)}, \qquad 
 
 Both are symmetric with diagonal 100 (each set is identical to itself), and $J_{cd} \le O_{cd}$ everywhere. As in module 3, $J$ demands near-identity of the two sets while $O$ rewards containment of the smaller set in the larger. Computed here for *all* $\binom{|\mathcal{C}|}{2}$ pairs, they answer the clustering question: if categories organize the expert space, same-category pairs $(c, d)$ should show visibly higher $J_{cd}$ or $O_{cd}$ than different-category pairs, appearing as bright blocks along the diagonal when concepts are ordered by category.
 
-**Generated data structures.** Two square CSV matrices and two heatmap images.
+**Generated data structures.** Three square CSV matrices and two heatmap images.
 
 #### 1. jaccard_matrix.csv
 
@@ -68,7 +68,26 @@ Example (head, first 6 columns, of `AP_0.6/5_heatmaps/overlap_matrix.csv` in `re
 | goldfish | 9.52 | 19.05 | 17.90 | 100.0 | 18.25 |
 | iguana | 20.78 | 12.02 | 31.48 | 18.25 | 100.0 |
 
-**Plots.** Two **heatmap** images (`seaborn`-style matrix heatmap rendered via the `_plot_heatmap_with_leaders` helper, `magma` colormap), with concept labels on both axes and similarity encoded by color:
+#### 3. shared_expert_counts_matrix.csv
+
+The intersection (Gram) matrix $I$ itself, saved as integers: the raw shared-expert counts behind both percentage matrices, with the diagonal holding each concept's own expert-set size $I_{cc} = n_c$. It is the scale reference for the percentages (the same caveat as module 1, subchapter 1.3, and module 3): a given Jaccard percentage backed by hundreds of shared experts is a far more stable measurement than the same percentage backed by a handful, so any cell of $J$ or $O$ can be traced back to the integers that produced it.
+
+| Column | Type | Symbol | Description |
+|--------|------|--------|-------------|
+| (index) | string | $c$ | Concept label for the row. |
+| `<concept>` (one column per concept) | int | $I_{cd} = \|E_c \cap E_d\|$ | Raw number of shared (layer, unit) experts, with the diagonal holding the own set size $n_c$. |
+
+Example (head, first 5 columns, of `AP_0.6/5_heatmaps/shared_expert_counts_matrix.csv` in `research_plots_qwen_richie_hsj_with_sublayer_analysis`):
+
+| (index) | furniture | bed | bench | bookcase | cabinet |
+|---|---|---|---|---|---|
+| furniture | 259 | 75 | 22 | 135 | 127 |
+| bed | 75 | 264 | 20 | 64 | 58 |
+| bench | 22 | 20 | 181 | 19 | 12 |
+| bookcase | 135 | 64 | 19 | 1055 | 193 |
+| cabinet | 127 | 58 | 12 | 193 | 419 |
+
+**Plots.** Two **heatmap** images (`seaborn`-style matrix heatmap rendered via the `_plot_heatmap_with_leaders` helper, `magma` colormap), with concept labels on both axes (colored by category) and similarity encoded by color. Concepts are ordered by category, each block led by its root label (which counts as part of its own category), and two layers of white separator lines are drawn on both axes so every cell can be traced back to its row and column concept. A faint grid line (0.3 px, 25% opacity) is drawn at every single concept boundary, and a bold, fully opaque 1 px line is drawn on top of it at every category-block boundary, so the fine per-concept grid and the coarser category structure, along with the expected bright same-category blocks along the diagonal, can both be read directly off the matrix:
 
 - `jaccard_heatmap.png`, encodes the values $J_{cd}$ of `jaccard_matrix.csv`.
 - `overlap_heatmap.png`, encodes the values $O_{cd}$ of `overlap_matrix.csv`.

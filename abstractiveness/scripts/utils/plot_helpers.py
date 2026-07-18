@@ -5,15 +5,16 @@ import seaborn as sns
 
 sns.set_theme(style="whitegrid")
 
-# Validated categorical palette (dataviz skill reference instance, light surface):
-# blue, aqua, yellow, green, violet, red, magenta, orange. Worst adjacent CVD dE is
-# 24.2, well past the >=12 target. Slots are assigned to categories in first-appearance
-# order (see build_category_color_map), which matches the contiguous category blocks
-# along these axes, so chart-adjacent categories get slot-adjacent, maximally separated
-# colors.
+# Validated categorical hues (dataviz skill reference instance, light surface),
+# ordered so consecutive slots strictly alternate cool/warm families:
+# blue, orange, green, magenta, violet, yellow, aqua, red. Slots are assigned to
+# categories in first-appearance order (see build_category_color_map), which matches
+# the contiguous category blocks along these axes -- so axis-adjacent categories
+# always land on a cool/warm pair and never on two similar warm tones (the old tail
+# put salmon, pink and orange side by side).
 _CATEGORY_PALETTE = [
-    "#2a78d6", "#1baf7a", "#eda100", "#008300",
-    "#4a3aa7", "#e34948", "#e87ba4", "#eb6834",
+    "#2a78d6", "#eb6834", "#008300", "#e87ba4",
+    "#4a3aa7", "#eda100", "#1baf7a", "#e34948",
 ]
 # Extra well-separated hues for datasets with >8 categories (the 150-concept set has
 # 17). Beyond 8, color alone is below the CVD floor, so it relies on the spatial
@@ -77,7 +78,8 @@ def _plot_bar_with_leaders(
     title, x_label=None, y_label=None, legend_title=None,
     color=None, hue=None, palette=None, orient='v', custom_tick_labels=None,
     out_path=None, figsize=(40.56, 10.14), ax=None, save=True,
-    show_x_ticks=False, show_y_ticks=False, bar_colors=None, color_legend=None, **kwargs
+    show_x_ticks=False, show_y_ticks=False, bar_colors=None, color_legend=None,
+    tick_label_colors=None, **kwargs
 ) -> plt.Axes:
     """
     Create a bar chart with category labels on the relevant axis, optionally with leader-line
@@ -165,6 +167,10 @@ def _plot_bar_with_leaders(
         # tick, so the leader points at the label end (matches the heatmap look).
         ax_current.set_xticklabels(labels, rotation=45, ha='right', va='top', rotation_mode='anchor',
                                    fontsize=10 if save else 9)
+        # Optional per-label colors (e.g. each concept label in its category's color).
+        if tick_label_colors is not None:
+            for tick_label, label_color in zip(ax_current.get_xticklabels(), tick_label_colors):
+                tick_label.set_color(label_color)
         ax_current.tick_params(axis='x', length=5, width=1, direction='out', color='black', bottom=show_x_ticks, pad=2)
         
         if x_label: ax_current.set_xlabel(x_label, fontsize=14 if save else 11)
@@ -198,7 +204,46 @@ def _plot_bar_with_leaders(
     return ax_current
 
 
-def _plot_heatmap_with_leaders(matrix, concepts, title, out_path, cmap, concept_colors=None, color_legend=None) -> None:
+def plot_comparison_violin(values_by_group: dict, y_label: str, title: str, out_path,
+                           palette: dict = None, x_label: str = "Concept Grouping",
+                           figsize=(10, 7)) -> None:
+    """
+    General violin + strip comparison of a numeric metric across named groups.
+
+    values_by_group: {group_label: iterable of values} in display order; NaNs dropped.
+    Each violin is clipped to the observed data range (cut=0), shows quartile lines
+    with Q1/Median/Q3 text labels, and overlays the raw points so small groups stay
+    honest (a violin over 8 points is otherwise fiction).
+    """
+    plot_df = pd.concat(
+        [pd.DataFrame({"value": pd.Series(v).dropna(), "group": g}) for g, v in values_by_group.items()],
+        ignore_index=True)
+    group_order = list(values_by_group)
+
+    plt.figure(figsize=figsize)
+    ax = sns.violinplot(data=plot_df, x='group', y='value', hue='group', order=group_order,
+                        legend=False, palette=palette, inner='quartile', linewidth=1.5,
+                        alpha=0.8, cut=0)
+    sns.stripplot(data=plot_df, x='group', y='value', order=group_order, color='black',
+                  alpha=0.4, size=4, jitter=True, ax=ax)
+    for i, group in enumerate(group_order):
+        group_values = plot_df[plot_df['group'] == group]['value']
+        if group_values.empty:
+            continue
+        bbox_props = dict(boxstyle="round,pad=0.2", fc="white", ec="none", alpha=0.7)
+        for quantile, label, weight in ((0.25, 'Q1 (25%)', 'normal'), (0.50, 'Median', 'bold'), (0.75, 'Q3 (75%)', 'normal')):
+            ax.text(i + 0.15, group_values.quantile(quantile), label, va='center', ha='left',
+                    fontsize=9, fontweight=weight, color='#333333', bbox=bbox_props)
+    ax.set_xlabel(x_label, fontsize=12, labelpad=10)
+    ax.set_ylabel(y_label, fontsize=12, labelpad=10)
+    plt.title(title, fontsize=14, pad=15)
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=300, bbox_inches='tight')
+    plt.close()
+
+
+def _plot_heatmap_with_leaders(matrix, concepts, title, out_path, cmap, concept_colors=None,
+                               color_legend=None, category_boundaries=None) -> None:
     """
     Generate a heatmap visualization of a similarity/distance matrix with concept labels and leader lines.
     Each column is labeled with a concept name via annotated leader lines from the top edge.
@@ -215,6 +260,9 @@ def _plot_heatmap_with_leaders(matrix, concepts, title, out_path, cmap, concept_
             the x leader lines/labels and the y tick labels, e.g. to color each concept by its
             category. Defaults to black.
         color_legend: Optional {label: color} mapping drawn as a swatch legend below the plot.
+        category_boundaries: Optional cell indices where a new category block starts, drawn as
+            a fully opaque 1 px white line on both axes, bold enough to stand out from the
+            per-concept grid described below.
     """
     n = len(concepts)
     # The heatmap grows in BOTH dimensions with concept count, so pixels scale
@@ -226,6 +274,20 @@ def _plot_heatmap_with_leaders(matrix, concepts, title, out_path, cmap, concept_
 
     ax.set_title(title, fontsize=20)
     ax.set_xlabel("")
+
+    # Faint separator at every concept boundary, so each square is traceable to its own
+    # row/column even away from a category edge, drawn thinner and more transparent than the
+    # bold category-block lines below so the two stay visually distinct.
+    for i in range(1, n):
+        ax.axhline(i, color='white', linewidth=0.3, alpha=0.25)
+        ax.axvline(i, color='white', linewidth=0.3, alpha=0.25)
+
+    # Fully opaque 1 px separators at category-block boundaries, drawn on top of the per-concept
+    # grid so the category structure reads clearly against the finer concept-level grid.
+    if category_boundaries:
+        for boundary in category_boundaries:
+            ax.axhline(boundary, color='white', linewidth=1, alpha=1.0)
+            ax.axvline(boundary, color='white', linewidth=1, alpha=1.0)
 
     # Color the y-axis concept labels by category.
     if concept_colors is not None:

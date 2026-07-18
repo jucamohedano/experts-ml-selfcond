@@ -2,19 +2,19 @@
 
 ## Research question
 
-Are concepts that are more frequent, more typical (per human judgment), or more category-aligned (by Jaccard similarity) also associated with more expert units or stronger category overlap? And where typicality and category alignment are related, does that relationship survive controlling for word frequency, and does the model-derived Cosine Typicality (module 7) track category alignment as well as Human Typicality does?
+Are concepts that are more frequent, more typical (per human judgment), or more category-aligned (by Jaccard or overlap similarity) also associated with more expert units or stronger category overlap? Where typicality and category alignment are related, does that relationship survive controlling for word frequency, and does the model-derived Cosine Typicality (module 7) track category alignment as well as Human Typicality does? And is module 2's Shannon entropy independent of the expert count, as its group comparisons require?
 
 ## Analysis
 
-Notation. For each concept $c$ the module works with the scalar variables assembled by module 1 and module 3: the log-frequency $\tilde{f}_c = \log_{10} f_c$, the Human Typicality score $t_c$, the expert count $n_c$, and the Jaccard similarity to the parent category $J(c,k)$ (written $J_c$ below, since each concept has one parent). The base table is module 1's `expert_counts_with_metadata.csv`, inner-joined with module 3's `category_concept_similarity_metrics.csv` on (`concept`, `category`) for the Jaccard-based panels.
+Notation. For each concept $c$ the module works with the scalar variables assembled by modules 1–3: the log-frequency $\tilde{f}_c = \log_{10} f_c$, the Human Typicality score $t_c$, the expert count $n_c$, the Jaccard similarity to the parent category $J(c,k)$ (written $J_c$ below, since each concept has one parent), the overlap coefficient to the parent category $O_c$, and module 2's Shannon entropy $H(c)$. The base table is module 1's `expert_counts_with_metadata.csv`, inner-joined with module 3's `category_concept_similarity_metrics.csv` on (`concept`, `category`) for the similarity-based panels, and the entropy panel of subchapter 4.4 draws directly on module 2's descriptor tables.
 
 ### 4.1 Bivariate Pearson regression panels
 
-**Mathematical formulation.** Five variable pairs $(x, y)$ are each tested for a linear association. For a pair with $n$ complete observations $(x_i, y_i)$ (rows with a missing value in either variable are dropped per panel), the Pearson correlation coefficient is
+**Mathematical formulation.** Six variable pairs $(x, y)$ are each tested for a linear association. For a pair with $n$ complete observations $(x_i, y_i)$ (rows with a missing value in either variable are dropped per panel), the Pearson correlation coefficient is
 
 $$r_{xy} = \frac{\sum_{i=1}^{n} (x_i - \bar{x})(y_i - \bar{y})}{\sqrt{\sum_{i=1}^{n} (x_i - \bar{x})^2}\;\sqrt{\sum_{i=1}^{n} (y_i - \bar{y})^2}} \in [-1, 1],$$
 
-with the two-sided p-value obtained from the exact null distribution used by `scipy.stats.pearsonr` (equivalently, from the statistic $t = r\sqrt{(n-2)/(1-r^2)}$ under a $t_{n-2}$ reference). $r_{xy}$ measures only the *linear* component of the relationship, while $r_{xy}^2$ is the fraction of variance in $y$ that a linear function of $x$ would explain, which is the effect-size reading used in the Results. Each panel also fits and draws the ordinary-least-squares line $\hat{y} = \beta x + \alpha$ with $\beta = \operatorname{Cov}(x,y)/\operatorname{Var}(x)$, $\alpha = \bar{y} - \beta\bar{x}$ (rendered by `seaborn.regplot` with its confidence band). The five pairs, in terms of the symbols above:
+with the two-sided p-value obtained from the exact null distribution used by `scipy.stats.pearsonr` (equivalently, from the statistic $t = r\sqrt{(n-2)/(1-r^2)}$ under a $t_{n-2}$ reference). $r_{xy}$ measures only the *linear* component of the relationship, while $r_{xy}^2$ is the fraction of variance in $y$ that a linear function of $x$ would explain, which is the effect-size reading used in the Results. Each panel also fits and draws the ordinary-least-squares line $\hat{y} = \beta x + \alpha$ with $\beta = \operatorname{Cov}(x,y)/\operatorname{Var}(x)$, $\alpha = \bar{y} - \beta\bar{x}$ (rendered by `seaborn.regplot` with its confidence band). The six pairs, in terms of the symbols above:
 
 | Panel | $x$ | $y$ | Tests whether… |
 |---|---|---|---|
@@ -22,6 +22,7 @@ with the two-sided p-value obtained from the exact null distribution used by `sc
 | typicality_vs_expert_count | $t_c$ | $n_c$ | more typical concepts recruit more experts |
 | frequency_vs_typicality | $\tilde{f}_c$ | $t_c$ | frequent words are judged more typical (no expert data involved) |
 | typicality_vs_jaccard | $t_c$ | $J_c$ | more typical concepts share more experts with their category |
+| typicality_vs_overlap | $t_c$ | $O_c$ | the typicality–alignment link survives switching to the containment-based similarity (module 3's overlap coefficient), which ignores the category set's larger size |
 | frequency_vs_jaccard | $\tilde{f}_c$ | $J_c$ | more frequent words share more experts with their category |
 
 Every panel runs through a single shared helper (`_run_regression_panel`) that drops missing values for the relevant pair, saves the cleaned subset to CSV, draws the scatter + regression plot with the Pearson $r$/$p$ annotated in the title if more than two points remain, and saves the PNG, all within one call, so every panel's CSV and PNG are always written together.
@@ -76,7 +77,19 @@ Example (head of `AP_0.6/4_correlations/typicality_vs_jaccard.csv`):
 | 0.347 | 0.4454 |
 | 0.696 | 2.2727 |
 
-#### 5. frequency_vs_jaccard.csv, columns `log_frequency` ($\tilde{f}_c$), `jaccard_pct` ($J_c$)
+#### 5. typicality_vs_overlap.csv, columns `human_typicality` ($t_c$), `overlap_pct` ($O_c$)
+
+Example (head of `AP_0.6/4_correlations/typicality_vs_overlap.csv` in `research_plots_qwen_richie_hsj_with_sublayer_analysis`):
+
+| human_typicality | overlap_pct |
+|---|---|
+| 0.427 | 29.5752 |
+| 0.045 | 8.0065 |
+| 0.323 | 45.6869 |
+| 0.852 | 38.75 |
+| 0.979 | 51.6484 |
+
+#### 6. frequency_vs_jaccard.csv, columns `log_frequency` ($\tilde{f}_c$), `jaccard_pct` ($J_c$)
 
 Example (head of `AP_0.6/4_correlations/frequency_vs_jaccard.csv`):
 
@@ -88,9 +101,9 @@ Example (head of `AP_0.6/4_correlations/frequency_vs_jaccard.csv`):
 | 3.4951 | 0.4454 |
 | 4.4427 | 2.2727 |
 
-#### 6. correlation_summary.csv
+#### 7. correlation_summary.csv
 
-One row per panel run in this module (including subchapters 4.2 and 4.3), recording the Pearson statistic computed on the corresponding $(x, y)$ columns.
+One row per panel run in this module (including subchapters 4.2, 4.3, and 4.4), recording the Pearson statistic computed on the corresponding $(x, y)$ columns.
 
 | Column | Type | Symbol | Description |
 |--------|------|--------|-------------|
@@ -118,6 +131,7 @@ Example (head of `AP_0.6/4_correlations/correlation_summary.csv` in `research_pl
 - `typicality_vs_expert_count.png`, x: `human_typicality` ($t_c$), y: `expert_count` ($n_c$).
 - `frequency_vs_typicality.png`, x: `log_frequency` ($\tilde{f}_c$), y: `human_typicality` ($t_c$).
 - `typicality_vs_jaccard.png`, x: `human_typicality` ($t_c$), y: `jaccard_pct` ($J_c$).
+- `typicality_vs_overlap.png`, x: `human_typicality` ($t_c$), y: `overlap_pct` ($O_c$).
 - `frequency_vs_jaccard.png`, x: `log_frequency` ($\tilde{f}_c$), y: `jaccard_pct` ($J_c$).
 
 ### 4.2 Partial correlation: Jaccard vs. typicality, controlling for frequency
@@ -182,6 +196,37 @@ Example (head of `AP_0.6/4_correlations/jaccard_vs_cosine_typicality.csv` in `re
 
 - `jaccard_vs_cosine_typicality.png`, a **scatter plot with a linear regression line**, x: `global_cosine_typicality` ($T^{\cos}_c$, "Cosine Typicality"), y: `jaccard_pct` ($J_c$, "Jaccard Similarity Index %"), with the Pearson $r$/$p$ in the title.
 
+### 4.4 Shannon entropy vs. expert count (both abstraction levels)
+
+**Mathematical formulation.** This panel is the empirical check behind module 2's count-dependence caveat: entropy is bounded by the expert count ($H(c) \le \log_2 \min(n_c, L)$), so if entropy and expert count were strongly correlated in the analyzed range, any entropy comparison between groups with different typical counts (category labels hold systematically fewer experts than concepts) would partly measure set size rather than layer organization. The test is the pooled Pearson correlation of subchapter 4.1's form on the pair
+
+$$x = H(c), \qquad y = n_c,$$
+
+over *every* word in module 2's concepts descriptor table, which contains both abstraction levels, since category labels are words with expert distributions too. The two levels are separated only for display (words are classified by membership in the category list), while $r$ and $p$ are computed on the pooled sample. A near-zero $r$ licenses reading module 2's entropy contrasts as organizational, while a strong positive $r$ would flag them as count artifacts.
+
+**Generated data structures.** One CSV, one PNG, and one row in `correlation_summary.csv`:
+
+- `shannon_entropy_vs_expert_count.csv`, the working table:
+
+| Column | Type | Symbol | Description |
+|--------|------|--------|-------------|
+| concept | string | $c$ | Word identifier. |
+| group | string | | "Specific Concepts" or "Broad Categories" (display split). |
+| shannon_entropy | float | $H(c)$ | Entropy of the word's layer distribution (module 2). |
+| experts_count | int | $n_c$ | Number of expert rows behind the distribution. |
+
+Example (head of `AP_0.6/4_correlations/shannon_entropy_vs_expert_count.csv` in `research_plots_qwen_richie_hsj_with_sublayer_analysis`):
+
+| concept | group | shannon_entropy | experts_count |
+|---|---|---|---|
+| accountant | Specific Concepts | 4.4946 | 3277 |
+| actor | Specific Concepts | 4.5028 | 1489 |
+| airplane | Specific Concepts | 4.1070 | 717 |
+| apple | Specific Concepts | 4.0195 | 160 |
+| apricot | Specific Concepts | 3.9250 | 1975 |
+
+- `shannon_entropy_vs_expert_count.png`, a **scatter plot with a linear regression line** over the pooled sample, x: `shannon_entropy` ($H(c)$), y: `experts_count` ($n_c$), with concepts drawn as small dots and category labels as larger diamonds, and the pooled Pearson $r$/$p$ in the title.
+
 ## Results
 
 At AP=0.6, all five correlations are statistically significant (p<0.001 in four of five, p=0.0016 in the fifth), but "significant" and "strong" are not the same thing here: with 147–164 points, even modest correlations clear the significance bar. Squaring each $r$ to get variance explained tells the more honest story:
@@ -223,3 +268,7 @@ The threshold sweep for the two added panels:
 | 0.9 | 0.07 (p=0.62, n.s., 59) | -0.04 (p=0.75, n.s., 59) |
 
 The **partial correlation tracks the raw typicality-vs-jaccard row closely at every threshold** (significant at AP 0.5 to 0.8, gone at AP=0.9), sitting consistently several points below it, so the frequency-corrected conclusion matches the raw one wherever the raw relationship exists at all, real but modest, and gone once Jaccard variance collapses at the strictest threshold. The **Jaccard-vs-Cosine-Typicality relationship is the module's weakest**, significant only at AP=0.5 (r=0.28) and marginal to null everywhere else. The fully independent Human Typicality is a *better* predictor of a concept's category alignment than the model's own Cosine Typicality at every threshold, an instructive result given module 7's finding that Cosine Typicality does not agree with human judgments pointwise either.
+
+### The two added panels (Qwen3 Richie-HSJ run, AP=0.6)
+
+The overlap and entropy panels currently have reference numbers from `research_plots_qwen_richie_hsj_with_sublayer_analysis` (the tables above come from the earlier 150-concept sweep, which predates these panels). **Typicality vs. overlap** behaves almost identically to typicality vs. Jaccard in the same run (r=0.365, p=1.5e-7 vs. r=0.376, p=5.5e-8, both n=196): the typicality–alignment link is not an artifact of the Jaccard index's sensitivity to the category set's larger size, since it survives unchanged under the containment-based metric. **Shannon entropy vs. expert count is essentially null** (r=0.021, p=0.77, n=204): across three orders of magnitude in expert count (114 to 4,640), entropy does not track set size at this threshold. This is the check module 2 leans on, since its concept-vs-label entropy contrasts at AP=0.6 are measuring layer organization, not expert-set volume. The caveat remains for strict thresholds (AP ≥ 0.8), where module 1 shows counts dropping to single digits and the $\log_2 n_c$ bound must bind.

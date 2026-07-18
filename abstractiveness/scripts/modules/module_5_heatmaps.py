@@ -29,6 +29,18 @@ def plot_all_heatmaps(expert_allocation_df: pd.DataFrame, concept_metadata: pd.D
     present = set(concept_metadata.dropna(subset=["category"])["category"])
     color_legend = {cat: col for cat, col in color_map.items() if cat in present}
 
+    # Category-block boundaries (concepts are ordered by category, each block led by its
+    # root label, which counts as part of its own category).
+    def _effective_category(concept):
+        cat = concept_to_cat.get(concept)
+        if (cat is None or pd.isna(cat)) and concept in color_map:
+            cat = concept
+        return cat
+
+    effective_categories = [_effective_category(c) for c in concepts]
+    category_boundaries = [i for i in range(1, len(concepts))
+                           if effective_categories[i] != effective_categories[i - 1]]
+
 
     # Columns are (layer_idx, unit) pairs: the raw `unit` column is only the neuron index
     # *within* a layer, so pivoting on it alone would merge identical indices from different
@@ -47,6 +59,11 @@ def plot_all_heatmaps(expert_allocation_df: pd.DataFrame, concept_metadata: pd.D
         jaccard_matrix = np.where(union > 0, (intersection / union) * 100, 0.0)    
         overlap_matrix = np.where(min_size > 0, (intersection / min_size) * 100, 0.0)
 
+    # Raw shared-expert counts behind both percentage matrices, for scale. The diagonal
+    # holds each concept's own expert-set size.
+    counts_df = pd.DataFrame(intersection.astype(int), index=concepts, columns=concepts)
+    save_dataframe(counts_df, heat_dir / "shared_expert_counts_matrix.csv", index=True)
+
     # Dictionary of metrics to streamline saving and plotting
     matrices = {
         "jaccard": (jaccard_matrix, "Pairwise Jaccard Similarity Index %", "magma"),
@@ -59,6 +76,7 @@ def plot_all_heatmaps(expert_allocation_df: pd.DataFrame, concept_metadata: pd.D
         _plot_heatmap_with_leaders(
             mtx, concepts, title, heat_dir / f"{name}_heatmap.png", cmap,
             concept_colors=concept_colors, color_legend=color_legend,
+            category_boundaries=category_boundaries,
         )
 
 def execute_module_5_heatmaps(formatted_expert_allocation_df: pd.DataFrame, concept_metadata: pd.DataFrame, heat_dir) -> None:

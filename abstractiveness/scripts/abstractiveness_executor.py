@@ -39,6 +39,10 @@ root_logger.addHandler(console_handler)
 #   typicality_column  : metadata column to use as the human typicality score;
 #                        it is renamed to "human_typicality" for all downstream modules
 #   output_subdir      : folder under results/ to write this run's plots/tables
+#   sublayer_filter    : sublayer type (e.g. "mlp.gate_proj") that modules 2+ are
+#                        restricted to; module 1 still sees everything (whole-model
+#                        plots + the informativeness ranking justifying this choice).
+#                        Set to None to analyze all sublayers as before.
 # ---------------------------------------------------------------------------
 MODEL_CONFIGS = {
     "gpt2_150": {
@@ -49,6 +53,7 @@ MODEL_CONFIGS = {
         "layer_mapping_file": "layer_mapping_GPT2.csv",
         "typicality_column": "typicality",
         "output_subdir": "research_plots_150_final",
+        "sublayer_filter": "mlp.c_fc",
     },
     "qwen3_richie_hsj": {
         "responses_subdir": "Qwen3_1.7B_abstractiveness_Richie_HSJ_responses",
@@ -57,7 +62,8 @@ MODEL_CONFIGS = {
         "metadata_file": "metadata_Richie_HSJ.json",
         "layer_mapping_file": "layer_mapping_Qwen3_1-7B.csv",
         "typicality_column": "typicality_HSJ_pairwise",
-        "output_subdir": "research_plots_qwen_richie_hsj",
+        "output_subdir": "research_plots_qwen_richie_hsj_with_sublayer_analysis",
+        "sublayer_filter": "mlp.gate_proj",
     },
     # GPT-2 on the same Richie-HSJ dataset -- the architecture comparison against
     # qwen3_richie_hsj (same metadata + typicality column, GPT-2's 48-layer mapping).
@@ -68,12 +74,13 @@ MODEL_CONFIGS = {
         "metadata_file": "metadata_Richie_HSJ.json",
         "layer_mapping_file": "layer_mapping_GPT2.csv",
         "typicality_column": "typicality_HSJ_pairwise",
-        "output_subdir": "research_plots_gpt2_richie_hsj",
+        "output_subdir": "research_plots_gpt2_richie_hsj_with_sublayer_analysis",
+        "sublayer_filter": "mlp.c_fc",
     },
 }
 
 # Select which configuration to run.
-ACTIVE_CONFIG = "gpt2_richie_hsj"
+ACTIVE_CONFIG = "qwen3_richie_hsj"
 
 if __name__ == "__main__":
     REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -88,10 +95,17 @@ if __name__ == "__main__":
     TYPICALITY_COLUMN = cfg["typicality_column"]
 
     log.info(f"Running analysis with config '{ACTIVE_CONFIG}' (architecture: {ARCHITECTURE})")
-    concept_metadata = pd.read_json(METADATA_PATH).rename(columns={TYPICALITY_COLUMN: "human_typicality"})
+    # Rows without a concept name (e.g. entries deactivated by renaming their key, which
+    # pd.read_json turns into an all-NaN row plus a stray column) are dropped defensively.
+    concept_metadata = (pd.read_json(METADATA_PATH)
+                        .rename(columns={TYPICALITY_COLUMN: "human_typicality"})
+                        .dropna(subset=["concept"])
+                        .reset_index(drop=True))
+    concept_metadata = concept_metadata.drop(
+        columns=[c for c in concept_metadata.columns if c.startswith("_")], errors="ignore")
     global_layer_mapping = init_global_layer_mapping(RESPONSES_DIR, MODEL, LAYER_MAPPING_PATH, ARCHITECTURE)
     
-    for ap in [0.5, 0.6, 0.7, 0.8, 0.9]:
+    for ap in [0.6]:
         out_path = OUTPUT_ROOT / f"AP_{ap}"
         set_folder_log(out_path)
         
@@ -117,26 +131,30 @@ if __name__ == "__main__":
                 .sort_values('layer_idx')
                 .drop(columns=['layer']))
             
-            # Module 1: Layer Expert Distribution
-            merged_meta = execute_module_1_layer_expert_distribution(formatted_expert_allocation_df, concept_metadata, layer_distribution_dir)
-            
+            # Module 1: Layer Expert Distribution. Sees the FULL expert data (whole-model
+            # plots + sublayer informativeness) and returns the sublayer-filtered frame
+            # that all subsequent modules analyze.
+            merged_meta, sublayer_expert_df = execute_module_1_layer_expert_distribution(
+                formatted_expert_allocation_df, concept_metadata, layer_distribution_dir,
+                sublayer_filter=cfg.get("sublayer_filter"))
+
             # Module 2: Shannon Entropy Analysis and Peak/Average Layer Distributions
-            concept_entropy_df, category_entropy_df = execute_module_2_shannon_entropy(formatted_expert_allocation_df, concept_metadata, entropy_analysis_dir)
-            
+            concept_entropy_df, category_entropy_df = execute_module_2_shannon_entropy(sublayer_expert_df, concept_metadata, entropy_analysis_dir)
+
             # Module 3: Category-Concept Similarities
-            similarity_metrics_df = execute_module_3_category_concept_similarities(formatted_expert_allocation_df, concept_metadata, similarity_dir)
-            
-            # Module 4: Correlations
-            execute_module_4_correlations(merged_meta, similarity_metrics_df, correlations_dir)
-            
+            similarity_metrics_df = execute_module_3_category_concept_similarities(sublayer_expert_df, concept_metadata, similarity_dir)
+
+            # Module 4: Correlations (uses module 2's entropy tables for the entropy panel)
+            execute_module_4_correlations(merged_meta, similarity_metrics_df, concept_entropy_df, category_entropy_df, correlations_dir)
+
             # Module 5: Heatmaps
-            execute_module_5_heatmaps(formatted_expert_allocation_df, concept_metadata, heatmap_dir)
-            
+            execute_module_5_heatmaps(sublayer_expert_df, concept_metadata, heatmap_dir)
+
             # Module 6: Dual Category Definitions (JSD)
-            jsd_results_df, jsd_layer_labels = execute_module_6_dual_category_jsd(formatted_expert_allocation_df, concept_metadata, divergence_dir)
-            
+            jsd_results_df, jsd_layer_labels = execute_module_6_dual_category_jsd(sublayer_expert_df, concept_metadata, divergence_dir)
+
             # Module 7: Empirical Cosine Typicality
-            global_typicality_df, layer_typicality_df = execute_module_7_empirical_cosine_typicality(formatted_expert_allocation_df, concept_metadata, typicality_dir)
+            global_typicality_df, layer_typicality_df = execute_module_7_empirical_cosine_typicality(sublayer_expert_df, concept_metadata, typicality_dir)
 
             # Module 4b: Jaccard vs. Cosine Typicality (needs module 7's output, so it runs here)
             execute_module_4b_jaccard_vs_cosine_typicality(similarity_metrics_df, global_typicality_df, correlations_dir)

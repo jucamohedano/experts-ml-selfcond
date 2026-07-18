@@ -80,9 +80,16 @@ def plot_jsd_vs_diversity_scatter(jsd_results_df: pd.DataFrame, jsd_dir) -> None
     Plots Label-Centroid Divergence (X-axis) against Internal Category Diversity (Y-axis).
     Tests if high member dispersion forces the model to create a distinct prototype label.
     """
+    # An empty results frame has no columns at all, so guard before dropna(subset=...).
+    if jsd_results_df.empty:
+        log.warning("  Skipping JSD vs. diversity scatter: no JSD results.")
+        return
     # Drop rows missing either of the two metrics we need
     df = jsd_results_df.dropna(subset=['jensen_shannon_divergence', 'avg_member_diversity_jsd']).copy()
-    
+    if df.empty:
+        log.warning("  Skipping JSD vs. diversity scatter: no rows with both metrics present.")
+        return
+
     plt.figure(figsize=(10, 8))
     
     # Calculate correlation for the title
@@ -126,11 +133,17 @@ def plot_jsd_micro_distributions(jsd_results_df: pd.DataFrame, layer_labels: lis
     against Q (the average-of-members exemplar distribution) across layers, so the layer-wise
     allocations behind the smallest and largest JSD values can be inspected directly.
     """
-    if len(jsd_results_df) < 2: return
+    # Need at least two categories with a valid JSD to contrast extremes; guard the empty
+    # frame (no columns) before dropna(subset=...) and NaN JSDs before idxmin/idxmax.
+    if jsd_results_df.empty: return
+    valid_jsd_df = jsd_results_df.dropna(subset=['jensen_shannon_divergence'])
+    if len(valid_jsd_df) < 2:
+        log.warning("  Skipping JSD micro distributions: fewer than 2 categories with a valid JSD.")
+        return
 
     # Find the extremes
-    min_cat = jsd_results_df.loc[jsd_results_df['jensen_shannon_divergence'].idxmin()]
-    max_cat = jsd_results_df.loc[jsd_results_df['jensen_shannon_divergence'].idxmax()]
+    min_cat = valid_jsd_df.loc[valid_jsd_df['jensen_shannon_divergence'].idxmin()]
+    max_cat = valid_jsd_df.loc[valid_jsd_df['jensen_shannon_divergence'].idxmax()]
 
     # Width scales with the layer count (48 for GPT-2, 196 for Qwen3) so the per-layer
     # x-axis stays legible, matching module 1's layer plots.
@@ -173,7 +186,14 @@ def plot_jsd_micro_distributions(jsd_results_df: pd.DataFrame, layer_labels: lis
 
 def plot_jsd_vs_entropy_scatter(jsd_results_df: pd.DataFrame, jsd_dir) -> None:
     """Visualization 3: Scatter plot checking if concentrated concepts diverge more."""
+    # An empty results frame has no columns at all, so guard before dropna(subset=...).
+    if jsd_results_df.empty:
+        log.warning("  Skipping JSD vs. entropy scatter: no JSD results.")
+        return
     divergence_entropy_data = jsd_results_df.dropna(subset=['jensen_shannon_divergence', 'shannon_entropy_label']).copy()
+    if divergence_entropy_data.empty:
+        log.warning("  Skipping JSD vs. entropy scatter: no rows with both metrics present.")
+        return
 
     plt.figure(figsize=(10, 8))
 
@@ -216,6 +236,9 @@ def execute_module_6_dual_category_jsd(formatted_expert_allocation_df: pd.DataFr
     """
     log.info("  Computing Dual Category Definitions (JSD) and Internal Member Diversity...")
     jsd_results_df, jsd_layer_labels = compute_dual_category_jsd(formatted_expert_allocation_df, concept_metadata, jsd_dir)
+    if jsd_results_df.empty:
+        log.warning("  Skipping JSD visualisations: no qualifying categories at this AP threshold.")
+        return jsd_results_df, jsd_layer_labels
     log.info("  Generating JSD visualisations...")
     plot_jsd_vs_diversity_scatter(jsd_results_df, jsd_dir)
     plot_jsd_micro_distributions(jsd_results_df, jsd_layer_labels, jsd_dir)

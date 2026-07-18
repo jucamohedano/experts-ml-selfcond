@@ -35,7 +35,11 @@ def plot_hierarchy_similarities(expert_allocation_df: pd.DataFrame, concept_meta
                 "category": category,
                 "hierarchy": f"{category} -> {concept}",
                 "jaccard_pct": (intersection / union) * 100,
-                "overlap_pct": (intersection / min(len_a, len_b)) * 100
+                "overlap_pct": (intersection / min(len_a, len_b)) * 100,
+                # Raw set sizes behind the percentages, for scale
+                "shared_expert_units": intersection,
+                "concept_expert_units": len_a,
+                "category_expert_units": len_b,
             })
     
     similarity_metrics_df = pd.DataFrame(results)
@@ -66,6 +70,7 @@ def plot_hierarchy_similarities(expert_allocation_df: pd.DataFrame, concept_meta
             plot_dataframe=similarity_metrics_df, x_col="hierarchy", y_col=col,
             title=title, x_label="Category->Concept", y_label="Percentage %",
             bar_colors=bar_colors, color_legend=color_legend, legend_title="Category",
+            tick_label_colors=bar_colors,
             show_x_ticks=True, figsize=(width, 10.14), order=bar_order,
             out_path=sim_dir / f"{col.replace('_pct', '')}_hierarchy.png"
         )

@@ -24,7 +24,7 @@ $$O(c, k) = 100 \cdot \frac{|E_c \cap E_k|}{\min(|E_c|,\, |E_k|)} \in [0, 100],$
 
 which reaches 100 whenever one set is entirely contained in the other, regardless of the size difference. Read together, the two metrics separate two hypotheses. A high $J$ would mean concept and category recruit *the same* experts, whereas a high $O$ with a low $J$ would mean the smaller set (typically the concept's or the category's, whichever is smaller) is largely *inside* the other, a signature compatible with hierarchical containment rather than identity. Note that $J(c,k) \le O(c,k)$ always, since $|E_c \cup E_k| \ge \min(|E_c|, |E_k|)$.
 
-**Generated data structures.** One CSV, `category_concept_similarity_metrics.csv`, with one row per concept-category pair:
+**Generated data structures.** One CSV, `category_concept_similarity_metrics.csv`, with one row per concept-category pair. Alongside the two percentages, the raw set sizes behind them are stored, because a percentage alone hides its scale: an overlap of 20% resting on a 15-expert concept set is far less stable than the same 20% resting on a 1,500-expert set (one shared expert more or less moves the former by nearly 7 points), which is the same small-denominator caveat module 1 (subchapter 1.3) raises for layer percentages.
 
 | Column | Type | Symbol | Description |
 |--------|------|--------|-------------|
@@ -33,18 +33,18 @@ which reaches 100 whenever one set is entirely contained in the other, regardles
 | hierarchy | string | (none) | String describing the concept-category relationship ("$k$ -> $c$"). |
 | jaccard_pct | float | $J(c,k)$ | Percentage similarity computed with the Jaccard index. |
 | overlap_pct | float | $O(c,k)$ | Percentage similarity computed with the overlap coefficient. |
+| shared_expert_units | int | $\|E_c \cap E_k\|$ | Raw number of (layer, unit) experts shared by concept and category. |
+| concept_expert_units | int | $\|E_c\|$ | Size of the concept's expert set. |
+| category_expert_units | int | $\|E_k\|$ | Size of the category's expert set. |
 
-Example (head of `AP_0.6/3_category_concept_similarities/category_concept_similarity_metrics.csv` in `research_plots_150_revised_executor_again`):
+Example (head of `AP_0.6/3_category_concept_similarities/category_concept_similarity_metrics.csv` in `research_plots_qwen_richie_hsj_with_sublayer_analysis`):
 
-| concept | category | hierarchy | jaccard_pct | overlap_pct |
-|---|---|---|---|---|
-| alligator | animal | animal -> alligator | 4.0175 | 19.9134 |
-| frog | animal | animal -> frog | 9.7765 | 21.6049 |
-| goldfish | animal | animal -> goldfish | 4.7722 | 9.5238 |
-| iguana | animal | animal -> iguana | 4.2105 | 20.7792 |
-| leech | animal | animal -> leech | 3.4924 | 12.9870 |
+| concept | category | hierarchy | jaccard_pct | overlap_pct | shared_expert_units | concept_expert_units | category_expert_units |
+|---|---|---|---|---|---|---|---|
+| bed | furniture | furniture -> bed | 16.7411 | 28.9575 | 75 | 264 | 259 |
+| bench | furniture | furniture -> bench | 5.2632 | 12.1547 | 22 | 181 | 259 |
 
-Two horizontal **bar charts** plot the same table, one per metric:
+Two **bar charts** plot the same table, one per metric, with each pair's `hierarchy` tick label colored in its category's color (matching the palette used by module 5's heatmaps), so the category blocks are readable directly from the axis:
 
 - `jaccard_hierarchy.png`, `jaccard_pct` ($J(c,k)$, x-axis) plotted against `hierarchy` (y-axis, one bar per concept-category pair), showing Jaccard similarity as a percentage for each concept-category hierarchy.
 - `overlap_hierarchy.png`, `overlap_pct` ($O(c,k)$, x-axis) plotted against `hierarchy` (y-axis), showing the overlap coefficient as a percentage for each concept-category hierarchy.

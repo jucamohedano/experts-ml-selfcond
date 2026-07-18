@@ -1,5 +1,6 @@
 import logging
 import pathlib
+import numpy as np
 import pandas as pd
 
 log = logging.getLogger(__name__)
@@ -135,6 +136,49 @@ def init_global_layer_mapping(responses_dir, model, mapping_path: pathlib.Path, 
 
     return mapping_df
 
+def filter_expert_data_to_sublayer(expert_allocation_df: pd.DataFrame, sublayer: str) -> pd.DataFrame:
+    """
+    Restrict expert data to one sublayer type (e.g. 'mlp.gate_proj'): keeps only rows
+    whose layer_name ends in that projection, prunes the layer_name categories to the
+    retained layers, and leaves layer_idx values untouched (so they stay non-contiguous
+    across blocks by design). Returns the input unchanged when sublayer is falsy, so
+    callers can pass a config value directly.
+    """
+    if not sublayer:
+        return expert_allocation_df
+    sublayer_of = expert_allocation_df['layer_name'].astype(str).str.extract(r'^\d+\.L\.\d+\.(.+)$')[0]
+    filtered = expert_allocation_df[sublayer_of == sublayer].copy()
+    filtered['layer_name'] = filtered['layer_name'].cat.remove_unused_categories()
+    return filtered
+
+
+def gearys_c(values) -> float:
+    """
+    Geary's C spatial autocorrelation of a 1-D sequence (e.g. a layer distribution in
+    depth order), with binary adjacent-neighbor weights. The general definition
+
+        C = (N-1) * sum_ij w_ij (x_i - x_j)^2 / (2 W sum_i (x_i - mean)^2)
+
+    with w_ij = 1 iff |i-j| == 1 (so W = 2(N-1)) algebraically reduces to the chain form
+    implemented here:
+
+        C = sum_i (x[i+1] - x[i])^2 / (2 * sum_i (x[i] - mean)^2)
+
+    The numerator is the squared discrete first derivative, so C measures local
+    step-to-step change: C ~ 1 no spatial structure, C < 1 smooth/clumped (neighbors
+    alike), C > 1 jagged/alternating. Scale-invariant, so raw counts and normalized
+    probabilities give the same value. Returns NaN for degenerate inputs (< 3 values
+    or zero variance).
+    """
+    if values is None or len(values) < 3:
+        return np.nan
+    values = np.asarray(values, dtype=float)
+    sum_of_squares = np.sum((values - values.mean()) ** 2)
+    if sum_of_squares == 0:
+        return np.nan
+    return float(np.sum(np.diff(values) ** 2) / (2 * sum_of_squares))
+
+
 def build_layer_probability_matrix(expert_allocation_df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
     Build a concept-by-layer expert count matrix and its row-normalized probability matrix.
@@ -143,13 +187,16 @@ def build_layer_probability_matrix(expert_allocation_df: pd.DataFrame) -> tuple[
     layer_idx is a plain int column (not categorical), so groupby only yields columns for
     layers that actually have at least one retained expert; at stricter AP thresholds a whole
     layer can have zero experts across every concept. The matrix is reindexed to the full set
-    of layers (from layer_name's categorical dtype) so it always has one column per model
-    layer, keeping it aligned with layer_name.cat.categories used elsewhere (e.g. module 6's
-    per-layer x-axis) even when some layers are entirely empty at the given threshold.
+    of layers so it always has one column per layer of the current support, keeping it aligned
+    with layer_name.cat.categories used elsewhere (e.g. module 6's per-layer x-axis) even when
+    some layers are entirely empty at the given threshold. The support is parsed from the
+    layer_name categories (whose leading number IS the layer_idx) rather than assumed to be
+    1..N, so it stays correct when the data is filtered to one sublayer type and the retained
+    layer_idx values are non-contiguous (e.g. 3, 7, 11, ... for mlp.c_fc).
     Returns: (count_matrix, prob_matrix), both indexed by concept with layer_idx as columns.
     """
     count_matrix = expert_allocation_df.groupby(['concept', 'layer_idx'], observed=False).size().unstack(fill_value=0)
-    n_layers = expert_allocation_df['layer_name'].cat.categories.size
-    count_matrix = count_matrix.reindex(columns=range(1, n_layers + 1), fill_value=0)
+    layer_support = [int(str(name).split('.', 1)[0]) for name in expert_allocation_df['layer_name'].cat.categories]
+    count_matrix = count_matrix.reindex(columns=layer_support, fill_value=0)
     prob_matrix = count_matrix.div(count_matrix.sum(axis=1), axis=0)
     return count_matrix, prob_matrix
