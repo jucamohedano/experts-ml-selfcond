@@ -53,6 +53,7 @@ dependencies = [
     "nltk>=3.9.1",
     "seaborn>=0.13.2",
     "osfclient>=0.0.5",
+    "statsmodels>=0.14.1",
 ]
 
 [project.optional-dependencies]

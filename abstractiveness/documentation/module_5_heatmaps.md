@@ -92,6 +92,8 @@ Example (head, first 5 columns, of `AP_0.6/5_heatmaps/shared_expert_counts_matri
 - `jaccard_heatmap.png`, encodes the values $J_{cd}$ of `jaccard_matrix.csv`.
 - `overlap_heatmap.png`, encodes the values $O_{cd}$ of `overlap_matrix.csv`.
 
+The category color system behind the tick labels and the boundary lines is shared with module 3's bar charts, so a category reads as the same color in both modules. The palette alternates cool and warm hues across adjacent categories in the sorted order, rather than assigning colors by simple index, so that neighboring category blocks in the heatmap stay visually distinct even when the category order places similar categories next to each other.
+
 ## Results
 
 At AP=0.6, the same-category effect is strong in relative terms. Splitting all 13,366 concept pairs into same category (619 pairs) and different category (12,747 pairs), within-category pairs average **3.46%** Jaccard against **0.52%** across categories, a factor of **6.6**, and **10.29%** overlap against **1.93%**, a factor of **5.3**. Same-category concepts share disproportionately many specific (layer, unit) experts, whereas a random different-category pair shares almost none. In absolute terms, even within-category similarity is small, with a mean of 3.5% Jaccard, the largest off-diagonal pair at 33%, and the 99th percentile at just 6.8%.

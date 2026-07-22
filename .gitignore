@@ -6,10 +6,13 @@
 *.json
 *.mat
 *.pyc
+*.md
+.*
 prototypes/*
 assets/
 results/
 responses/
+!abstractiveness/documentation/*
 !dataset_config_Qwen3-30B-A3B-Instruct-2507-abstractiveness.json
 !dataset_config_Qwen3-30B-A3B-Instruct-2507-abstractiveness_150.json
 !dataset_config_Qwen3-30B-A3B-Instruct-2507-abstractiveness_Richie_HSJ.json

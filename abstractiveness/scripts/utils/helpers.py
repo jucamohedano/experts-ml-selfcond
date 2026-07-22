@@ -1,7 +1,9 @@
+import json
 import logging
 import pathlib
 import numpy as np
 import pandas as pd
+from scipy import stats
 
 log = logging.getLogger(__name__)
 formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
@@ -150,6 +152,257 @@ def filter_expert_data_to_sublayer(expert_allocation_df: pd.DataFrame, sublayer:
     filtered = expert_allocation_df[sublayer_of == sublayer].copy()
     filtered['layer_name'] = filtered['layer_name'].cat.remove_unused_categories()
     return filtered
+
+
+def pair_similarity_vector(expert_sets_df: pd.DataFrame, concepts: list) -> np.ndarray:
+    """
+    Jaccard similarity of raw expert sets for every unordered pair of ``concepts``,
+    as a flat vector aligned with np.triu_indices(len(concepts), k=1). Expert sets are
+    binary membership keyed on (layer_idx, unit); no probability normalization.
+    """
+    presence = expert_sets_df.assign(present=1).pivot_table(
+        index="concept", columns=["layer_idx", "unit"], values="present", fill_value=0)
+    A = presence.reindex(concepts, fill_value=0).values.astype(np.float32)
+
+    intersection = A @ A.T
+    sizes = A.sum(axis=1)
+    union = sizes[:, None] + sizes[None, :] - intersection
+    with np.errstate(divide="ignore", invalid="ignore"):
+        jaccard = np.where(union > 0, intersection / union, 0.0)
+    return jaccard[np.triu_indices(len(concepts), k=1)]
+
+
+def pair_shared_count_vector(expert_sets_df: pd.DataFrame, concepts: list) -> np.ndarray:
+    """
+    Raw count of shared experts for every unordered concept pair, aligned with
+    np.triu_indices(len(concepts), k=1). Unlike Jaccard, this is not normalized by
+    set size, so it is the more interpretable x-axis for a per-pair scatter (Jaccard
+    compresses most pairs toward zero regardless of how many experts they actually share).
+    """
+    presence = expert_sets_df.assign(present=1).pivot_table(
+        index="concept", columns=["layer_idx", "unit"], values="present", fill_value=0)
+    A = presence.reindex(concepts, fill_value=0).values.astype(np.float32)
+    intersection = A @ A.T
+    return intersection[np.triu_indices(len(concepts), k=1)]
+
+
+# ---------------------------------------------------------------------------
+# Representational Similarity Analysis (module 8)
+#
+# An RDM here is a square (n_concepts x n_concepts) similarity or dissimilarity
+# matrix whose off-diagonal, taken in np.triu_indices(n, k=1) order, is the vector
+# every statistic below operates on. Square form is required because the Mantel
+# null permutes CONCEPTS, which re-indexes rows and columns together and cannot be
+# expressed on a flat pair vector.
+# ---------------------------------------------------------------------------
+
+def embedding_rdm(feature_matrix: np.ndarray, metric: str = "correlation_zscored") -> np.ndarray:
+    """
+    Concept-by-concept similarity of embedding vectors, as a square matrix.
+
+    feature_matrix is (n_concepts, n_units), one row per concept. Two metrics:
+
+    correlation_zscored (default): each unit is z-scored across concepts, then
+      similarity is the Pearson correlation between concept vectors over units.
+      Standardizing per unit removes the baseline every concept shares, since a
+      mean over positive sentences is dominated by generic sentence structure and
+      the concept signal is a small perturbation on top of it. Correlation rather
+      than cosine additionally removes each concept's overall activation
+      magnitude, which tracks word frequency and would otherwise enter the RDM as
+      a nuisance dimension.
+    cosine_raw: cosine similarity of the unstandardized vectors, kept as a
+      robustness variant. Expect it to be compressed toward 1.0 for exactly the
+      reason above.
+
+    Units that do not vary across concepts carry no discriminative information and are
+    dropped under the z-scored metric rather than producing NaN. The threshold is
+    relative to the layer's activation scale rather than an exact zero test: a unit
+    whose spread is float noise would otherwise be amplified into a full-magnitude
+    z-score and inject that noise into every pair. The deviations are computed once and
+    reused rather than recomputed after the columns are dropped, because numpy's
+    pairwise reduction is sensitive to memory layout, so the same near-constant column
+    can measure as exactly zero before the copy and non-zero after it (or the reverse),
+    which silently reintroduces division by zero.
+    """
+    X = np.asarray(feature_matrix, dtype=np.float64)
+
+    if metric == "correlation_zscored":
+        deviations = X.std(axis=0)
+        tolerance = 1e-10 * max(1.0, float(np.abs(X).max(initial=0.0)))
+        informative = deviations > tolerance
+        if not informative.any():
+            return np.full((len(X),) * 2, np.nan)
+        X = X[:, informative]
+        X = (X - X.mean(axis=0)) / deviations[informative]
+        X = X - X.mean(axis=1, keepdims=True)
+    elif metric != "cosine_raw":
+        raise ValueError(f"Unknown embedding RDM metric: {metric}")
+
+    norms = np.linalg.norm(X, axis=1, keepdims=True)
+    norms[norms == 0] = 1.0
+    X = X / norms
+    similarity = X @ X.T
+    np.fill_diagonal(similarity, 1.0)
+    return similarity
+
+
+def _offdiag(square_matrix: np.ndarray) -> np.ndarray:
+    """Upper-triangle (k=1) of a square matrix as a flat vector."""
+    n = square_matrix.shape[0]
+    return square_matrix[np.triu_indices(n, k=1)]
+
+
+def _rank_square(square_matrix: np.ndarray, centre: bool = False) -> np.ndarray:
+    """
+    Square matrix holding the ranks of the off-diagonal values, mirrored into both
+    triangles with a zero diagonal, so that permuting rows and columns permutes the
+    ranks with them. Optionally mean-centred over the off-diagonal.
+    """
+    n = square_matrix.shape[0]
+    iu = np.triu_indices(n, k=1)
+    ranks = stats.rankdata(square_matrix[iu])
+    if centre:
+        ranks = ranks - ranks.mean()
+    out = np.zeros((n, n), dtype=np.float64)
+    out[iu] = ranks
+    return out + out.T
+
+
+def spearman_rdm_mantel(rdm_a: np.ndarray, rdm_b: np.ndarray, n_permutations: int = 9999,
+                        rng: np.random.Generator = None) -> dict:
+    """
+    Spearman correlation between the off-diagonals of two square RDMs, with a
+    concept-level Mantel permutation p-value.
+
+    spearman_rho: rank correlation over all n(n-1)/2 concept pairs.
+    mantel_p: pairs are not independent observations (each concept appears in n-1
+      pairs), so the null shuffles CONCEPTS rather than pairs. One RDM is re-indexed
+      as rdm[p][:, p], which preserves its internal geometry and breaks only the
+      concept-to-concept correspondence under test. One-sided, smallest reportable
+      value 1/(n_permutations + 1), matching the convention in module 1.
+
+    Permuting rows and columns is a bijection on the off-diagonal multiset, so the
+    ranks are computed once and permuted along with the matrix rather than being
+    recomputed per shuffle, and the permuted rank vector's mean and standard
+    deviation are invariant. Spearman under permutation therefore reduces to a
+    single dot product, and the ravel form below measured about 6x faster than
+    gathering the upper triangle each time.
+
+    Returns rho=NaN, p=1.0 when either off-diagonal is constant, since with no
+    variation there is nothing to correlate and pearsonr would be undefined.
+    """
+    rng = rng if rng is not None else np.random.default_rng(42)
+    n = rdm_a.shape[0]
+    a_off, b_off = _offdiag(rdm_a), _offdiag(rdm_b)
+
+    if a_off.min() == a_off.max() or b_off.min() == b_off.max():
+        return {"spearman_rho": np.nan, "mantel_p": 1.0}
+
+    rho = float(stats.spearmanr(a_off, b_off).statistic)
+
+    # Uncentred ranks on the permuted side are safe because the fixed side is
+    # centred and has a zero diagonal, so the omitted mean term contributes zero.
+    rank_a = _rank_square(rdm_a)
+    rank_b_centred = _rank_square(rdm_b, centre=True)
+
+    observed = float(rank_a.ravel() @ rank_b_centred.ravel())
+    n_at_least = 0
+    for _ in range(n_permutations):
+        p = rng.permutation(n)
+        if rank_a[p][:, p].ravel() @ rank_b_centred.ravel() >= observed:
+            n_at_least += 1
+
+    return {"spearman_rho": rho, "mantel_p": (1 + n_at_least) / (1 + n_permutations)}
+
+
+def bootstrap_rdm_rho_ci(rdm_a: np.ndarray, rdm_b: np.ndarray, n_boot: int = 1000,
+                         rng: np.random.Generator = None, ci: float = 95.0) -> tuple:
+    """
+    Percentile confidence interval for the Spearman correlation between two RDMs,
+    resampling CONCEPTS with replacement (the unit of observation, as in the Mantel
+    null above). Pairs where a resampled concept meets itself are excluded, since
+    they are similarity-by-identity rather than evidence and would inflate rho.
+
+    Used to report a peak plateau rather than a bare argmax: the layers whose
+    intervals overlap the peak's are statistically indistinguishable from it, which
+    matters because the layer-sweep literature reports a broad middle region rather
+    than one best layer. Returns (lo, hi), or (NaN, NaN) if too few resamples were
+    usable.
+    """
+    rng = rng if rng is not None else np.random.default_rng(42)
+    n = rdm_a.shape[0]
+    rhos = []
+    for _ in range(n_boot):
+        idx = rng.integers(0, n, size=n)
+        i, j = np.triu_indices(n, k=1)
+        keep = idx[i] != idx[j]
+        if keep.sum() < 30:
+            continue
+        a = rdm_a[idx[i][keep], idx[j][keep]]
+        b = rdm_b[idx[i][keep], idx[j][keep]]
+        if a.min() == a.max() or b.min() == b.max():
+            continue
+        rhos.append(stats.spearmanr(a, b).statistic)
+
+    if len(rhos) < n_boot // 10:
+        return (np.nan, np.nan)
+    tail = (100.0 - ci) / 2.0
+    return (float(np.percentile(rhos, tail)), float(np.percentile(rhos, 100.0 - tail)))
+
+
+def spearman_brown(reliability: float) -> float:
+    """
+    Spearman-Brown correction for a split-half reliability, 2r / (1 + r). The two
+    halves each hold half the sentences, so the raw split-half correlation
+    underestimates the reliability of the full-data estimate. Apply exactly once.
+    """
+    if not np.isfinite(reliability) or reliability <= -1.0:
+        return np.nan
+    return float(2.0 * reliability / (1.0 + reliability))
+
+
+def load_concept_embeddings(cache_path: pathlib.Path) -> dict:
+    """
+    Load the concept embedding cache written by precompute_concept_embeddings.py.
+
+    Returns a dict with concepts (row order), layers (raw layer strings, the join key
+    onto layer_mapping_*.csv), offsets (start index of each layer on the unit axis),
+    mean (n_concepts x total_units, recombined from the split-half sums), half_a and
+    half_b (the same for each half, used for the per-layer noise ceiling), and
+    provenance from the sidecar JSON.
+
+    Returns None with a warning naming the command that produces the cache, so a
+    missing cache skips module 8 rather than failing the whole AP sweep.
+    """
+    cache_path = pathlib.Path(cache_path)
+    if not cache_path.exists():
+        log.warning(f"Concept embedding cache not found at {cache_path}. "
+                    f"Module 8 will be skipped. Build it with: "
+                    f"python scripts/precompute_concept_embeddings.py --config <config_key>")
+        return None
+
+    data = np.load(cache_path, allow_pickle=False)
+    n_even = data["n_even"].astype(np.float64)[:, None]
+    n_odd = data["n_odd"].astype(np.float64)[:, None]
+
+    sidecar = cache_path.with_suffix(".json")
+    provenance = json.loads(sidecar.read_text()) if sidecar.exists() else {}
+
+    return {
+        "concepts": [str(c) for c in data["concepts"]],
+        "layers": [str(l) for l in data["layers"]],
+        "offsets": data["offsets"],
+        "mean": (data["sum_even"] + data["sum_odd"]) / (n_even + n_odd),
+        "half_a": data["sum_even"] / n_even,
+        "half_b": data["sum_odd"] / n_odd,
+        "provenance": provenance,
+    }
+
+
+def layer_slice(embedding_cache: dict, layer: str) -> slice:
+    """Column slice of one raw layer string within the cache's flat unit axis."""
+    i = embedding_cache["layers"].index(layer)
+    return slice(int(embedding_cache["offsets"][i]), int(embedding_cache["offsets"][i + 1]))
 
 
 def gearys_c(values) -> float:

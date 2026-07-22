@@ -18,7 +18,8 @@ import pandas as pd
 import numpy as np
 import seaborn as sns
 from scipy import stats
-from utils.helpers import save_dataframe, gearys_c, filter_expert_data_to_sublayer
+from utils.helpers import (save_dataframe, gearys_c, filter_expert_data_to_sublayer,
+                           pair_similarity_vector)
 from utils.plot_helpers import _plot_bar_with_leaders, apply_rotated_leader_labels, fig_width_for
 
 log = logging.getLogger(__name__)
@@ -229,24 +230,6 @@ def plot_cumulative_layer_distribution_sorted(global_layer_dist: pd.DataFrame, d
 # 3. Sublayer informativeness (category alignment + Geary's C)
 # ---------------------------------------------------------------------------
 
-def _pair_similarity_vector(expert_sets_df: pd.DataFrame, concepts: list) -> np.ndarray:
-    """
-    Jaccard similarity of raw expert sets for every unordered pair of ``concepts``,
-    as a flat vector aligned with np.triu_indices(len(concepts), k=1). Expert sets are
-    binary membership keyed on (layer_idx, unit); no probability normalization.
-    """
-    presence = expert_sets_df.assign(present=1).pivot_table(
-        index="concept", columns=["layer_idx", "unit"], values="present", fill_value=0)
-    A = presence.reindex(concepts, fill_value=0).values.astype(np.float32)
-
-    intersection = A @ A.T
-    sizes = A.sum(axis=1)
-    union = sizes[:, None] + sizes[None, :] - intersection
-    with np.errstate(divide="ignore", invalid="ignore"):
-        jaccard = np.where(union > 0, intersection / union, 0.0)
-    return jaccard[np.triu_indices(len(concepts), k=1)]
-
-
 def _category_alignment_metrics(pair_similarity: np.ndarray, concept_categories: np.ndarray,
                                 n_permutations: int, rng: np.random.Generator) -> dict:
     """
@@ -345,7 +328,7 @@ def compute_sublayer_informativeness(expert_allocation_df: pd.DataFrame, concept
     rows = []
     for sublayer, sub_df in df.groupby("sublayer", sort=False):
         # Category alignment of the sublayer's expert sets (level-2 concepts only).
-        pair_similarity = _pair_similarity_vector(sub_df, concepts)
+        pair_similarity = pair_similarity_vector(sub_df, concepts)
         alignment = _category_alignment_metrics(pair_similarity, concept_categories, n_permutations, rng)
 
         # Per-word Geary's C over this sublayer's layers in depth order (pivot columns

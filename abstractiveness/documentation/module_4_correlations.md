@@ -25,7 +25,27 @@ with the two-sided p-value obtained from the exact null distribution used by `sc
 | typicality_vs_overlap | $t_c$ | $O_c$ | the typicality–alignment link survives switching to the containment-based similarity (module 3's overlap coefficient), which ignores the category set's larger size |
 | frequency_vs_jaccard | $\tilde{f}_c$ | $J_c$ | more frequent words share more experts with their category |
 
-Every panel runs through a single shared helper (`_run_regression_panel`) that drops missing values for the relevant pair, saves the cleaned subset to CSV, draws the scatter + regression plot with the Pearson $r$/$p$ annotated in the title if more than two points remain, and saves the PNG, all within one call, so every panel's CSV and PNG are always written together.
+Every panel runs through a single shared helper (`_run_regression_panel`) that drops missing values for the relevant pair, saves the cleaned subset to CSV, draws the scatter plot and saves the PNG, all within one call, so every panel's CSV and PNG are always written together regardless of how much data survived.
+
+**Where the missing values come from.** Module 4 never generates missingness itself, it only inherits gaps that were created upstream, and a concept can drop out of a panel for two structurally different reasons.
+
+The first is a value that is genuinely null in the source metadata, independent of the AP threshold. `human_typicality` is null for every category-label word (`furniture`, `clothing`, and so on), since those are root nodes with no HSJ pairwise rating of their own, and it can also be null for the small number of concepts the HSJ rating procedure did not cover. `frequency` (and therefore `log_frequency`, computed only when `frequency > 0` in module 1's `save_expert_counts_metadata`) is null or non-positive for the handful of concepts absent from the Wikipedia frequency source. These gaps show up as `NaN` inside an otherwise present row, so `dropna` removes only that row from only that panel.
+
+The second, and the dominant one as AP tightens, is a concept disappearing entirely from an upstream table because it failed a structural condition, not because a cell is `NaN`. Three such conditions feed module 4:
+
+- `expert_count` and everything derived from it: module 1's `save_expert_counts_metadata` builds the base table with `expert_allocation_df.groupby("concept").size()` then an inner merge onto the metadata. A concept with zero expert units surviving the AP filter has no rows to group, so it is absent from the grouped table, not present with a zero. The inner merge then drops it from `merged_metadata_df` entirely, and every module 4 panel built on that table (`frequency_vs_expert_count`, `typicality_vs_expert_count`, `frequency_vs_typicality`, `shannon_entropy_vs_expert_count`) loses it along with it.
+- `jaccard_pct` and `overlap_pct`: module 3 only emits a row for a concept when *both* the concept's own expert set and its parent category's expert set are non-empty (`if u_concept and u_category` in `plot_hierarchy_similarities`). Root category-label words are excluded even earlier, by `concept_metadata.dropna(subset=["category"])`, since a label is never its own child. As a consequence, if the *category label itself* loses all its experts at a strict threshold, every member concept of that category loses its Jaccard and overlap value too, not just the label.
+- `global_cosine_typicality`: module 7 skips any category with fewer than two member concepts that still have expert data (`if len(valid_members) < 2: continue`), so every concept in an under-populated category is absent from module 4b's panel.
+
+In short, `NaN` in a retained row means a rating was never collected, while a concept's total absence from a panel means it (or its category) ran out of surviving expert units at the current AP threshold. The two are handled the same way by `dropna`, but only the second one is threshold-dependent, and it drives the coverage collapse at strict thresholds.
+
+**When a correlation is reported.** Every panel is gated on two conditions together, both defined as module constants (`MIN_ABSOLUTE_N = 30`, `MIN_COVERAGE_FRACTION = 0.75`):
+
+$$n \ge \texttt{MIN\_ABSOLUTE\_N} \quad \text{and} \quad \frac{n}{n_{\text{total}}} \ge \texttt{MIN\_COVERAGE\_FRACTION},$$
+
+where $n$ is the number of complete pairs after `dropna` and $n_{\text{total}}$ is a fixed count of concepts that could in principle have contributed to that panel, read once from `concept_metadata` and independent of the AP threshold: the full metadata row count for panels that only need metadata and expert counts, or the count of concepts with a defined category for the Jaccard/overlap/Cosine-Typicality panels (root labels never appear there by construction and are excluded from the denominator). Because $n_{\text{total}}$ does not move with the AP threshold, `coverage_pct` in the summary reports how much of the concept set a given panel rests on at any threshold. The gate suppresses reporting on small or non-representative subsets, since survivors at a strict AP are systematically the higher-frequency or better-populated concepts rather than a random sample.
+
+When a panel clears both bars, the Pearson statistic and the fitted regression line are computed and drawn. When it does not, the scatter of the remaining points is drawn unfitted (titled with the coverage shortfall) and the CSV holds the cleaned data, but `pearson_r`/`pearson_p` are left empty in `correlation_summary.csv`. Every panel gets a summary row either way, with `n_points`, `n_total_relevant`, and `coverage_pct` always populated.
 
 **Generated data structures.** One two-column CSV per panel (the cleaned $(x, y)$ data actually used) and one PNG per panel, plus one summary CSV collecting the statistics of all panels in the module.
 
@@ -110,20 +130,24 @@ One row per panel run in this module (including subchapters 4.2, 4.3, and 4.4), 
 | plot_name | string | (none) | Identifier of the corresponding regression/plot (matches the `.png` file stem). |
 | x_variable | string | $x$ | Name of the column used on the x-axis. |
 | y_variable | string | $y$ | Name of the column used on the y-axis. |
-| pearson_r | float | $r_{xy}$ | Pearson correlation coefficient between x_variable and y_variable. |
-| pearson_p | float | $p$ | Two-sided p-value for the Pearson correlation test. |
+| pearson_r | float or empty | $r_{xy}$ | Pearson correlation coefficient, left empty when the panel did not clear the coverage bar (see above). |
+| pearson_p | float or empty | $p$ | Two-sided p-value, left empty under the same condition as pearson_r. |
 | n_points | int | $n$ | Number of $(x, y)$ pairs used after dropping missing values. |
+| n_total_relevant | int | $n_{\text{total}}$ | Fixed count of concepts that could in principle contribute to this panel (read from `concept_metadata`, independent of AP), the coverage denominator. |
+| coverage_pct | float | $100 \, n / n_{\text{total}}$ | Percentage of the relevant concepts actually retained. A correlation is only computed when `n_points >= 30` and `coverage_pct >= 75`. |
 | controlling_for | string | $z$ | Control variable, only populated for the partial-correlation row (4.2), and empty otherwise. |
 
-Example (head of `AP_0.6/4_correlations/correlation_summary.csv` in `research_plots_150_revised_executor_again`):
+Example (GPT-2 Richie-HSJ run, `mlp.c_fc` sublayer, AP=0.5, where every panel clears the coverage bar):
 
-| plot_name | x_variable | y_variable | pearson_r | pearson_p | n_points | controlling_for |
-|---|---|---|---|---|---|---|
-| frequency_vs_expert_count | log_frequency | expert_count | -0.5521 | 1.81e-14 | 164 | |
-| typicality_vs_expert_count | human_typicality | expert_count | -0.2581 | 1.60e-03 | 147 | |
-| frequency_vs_typicality | log_frequency | human_typicality | 0.4364 | 3.29e-08 | 147 | |
-| typicality_vs_jaccard | human_typicality | jaccard_pct | 0.4429 | 1.95e-08 | 147 | |
-| frequency_vs_jaccard | log_frequency | jaccard_pct | 0.3706 | 3.84e-06 | 147 | |
+| plot_name | x_variable | y_variable | pearson_r | pearson_p | n_points | n_total_relevant | coverage_pct |
+|---|---|---|---|---|---|---|---|
+| frequency_vs_expert_count | log_frequency | expert_count | -0.1329 | 5.82e-02 | 204 | 204 | 100.0 |
+| typicality_vs_expert_count | human_typicality | expert_count | 0.0355 | 6.21e-01 | 196 | 204 | 96.1 |
+| frequency_vs_typicality | log_frequency | human_typicality | -0.0256 | 7.22e-01 | 196 | 204 | 96.1 |
+| typicality_vs_jaccard | human_typicality | jaccard_pct | 0.2764 | 8.79e-05 | 196 | 196 | 100.0 |
+| frequency_vs_jaccard | log_frequency | jaccard_pct | 0.0789 | 2.72e-01 | 196 | 196 | 100.0 |
+
+At AP=0.9 in the same run, `expert_count` covers only 98 of 204 concepts (48% coverage), so `frequency_vs_expert_count`, `typicality_vs_expert_count`, `frequency_vs_typicality`, and `shannon_entropy_vs_expert_count` all report `n_points=98`, `coverage_pct=48.0`, and empty `pearson_r`/`pearson_p`, and the Jaccard-based panels do not appear at all, since module 3 returns an empty similarity table at that threshold (no concept-category pair shares any expert unit).
 
 **Plots.** Each panel is a **scatter plot with a linear regression line** (`seaborn.regplot`, including the shaded confidence band) and the Pearson $r$/$p$ annotated in the title:
 
@@ -136,7 +160,7 @@ Example (head of `AP_0.6/4_correlations/correlation_summary.csv` in `research_pl
 
 ### 4.2 Partial correlation: Jaccard vs. typicality, controlling for frequency
 
-**Mathematical formulation.** Panels 3–5 of subchapter 4.1 show that frequency correlates with *both* typicality and Jaccard similarity, so their pairwise correlation could be a frequency artifact: frequent words might be both judged more typical and better aligned with their category, without typicality and alignment being directly related. To isolate the direct component, both variables are residualized against the control $z_c = \tilde{f}_c$. For a variable $v$ regressed on $z$ by simple OLS,
+**Mathematical formulation.** If frequency were correlated with both typicality and Jaccard similarity, their pairwise correlation could be partly a frequency artifact rather than a direct typicality-alignment association. To isolate the direct component, both variables are residualized against the control $z_c = \tilde{f}_c$. For a variable $v$ regressed on $z$ by simple OLS,
 
 $$\beta_v = \frac{\operatorname{Cov}(z, v)}{\operatorname{Var}(z)}, \qquad \alpha_v = \bar{v} - \beta_v \bar{z}, \qquad \tilde{v}_c = v_c - (\beta_v z_c + \alpha_v),$$
 
@@ -144,7 +168,7 @@ the residual $\tilde{v}_c$ is the part of $v_c$ that a linear function of freque
 
 $$r_{Jt \cdot f} = \operatorname{corr}\!\left(\tilde{J}, \tilde{t}\right),$$
 
-which is algebraically identical to the standard partial-correlation formula $r_{Jt\cdot f} = \dfrac{r_{Jt} - r_{Jf}\, r_{tf}}{\sqrt{(1 - r_{Jf}^2)(1 - r_{tf}^2)}}$. If $r_{Jt\cdot f}$ stays significantly positive, the typicality–alignment link is not just frequency in disguise.
+which is algebraically identical to the standard partial-correlation formula $r_{Jt\cdot f} = \dfrac{r_{Jt} - r_{Jf}\, r_{tf}}{\sqrt{(1 - r_{Jf}^2)(1 - r_{tf}^2)}}$. A non-zero $r_{Jt\cdot f}$ indicates a typicality-alignment association not attributable to frequency. Missingness here is the union of the sources listed under 4.1 for `jaccard_pct` and `human_typicality`, plus `log_frequency`, and the same coverage rule applies, against the categorized-concepts denominator, since this panel needs a defined category throughout.
 
 **Generated data structures.** One CSV, one PNG, and one row appended to `correlation_summary.csv` (with `controlling_for = log_frequency`):
 
@@ -178,7 +202,7 @@ Example (head of `AP_0.6/4_correlations/partial_correlation_jaccard_typicality.c
 
 $$x = T^{\cos}_c, \qquad y = J_c,$$
 
-over the inner join of module 3's similarity table with module 7's `global_prototype_typicality.csv` on (`concept`, `category`). Because it needs module 7's output, the executor runs it after module 7 and appends its row to the same `correlation_summary.csv` that 4.1 and 4.2 already wrote, so the two "typicality vs. Jaccard" rows (human-based and model-based) can be compared directly in one file.
+over the inner join of module 3's similarity table with module 7's `global_prototype_typicality.csv` on (`concept`, `category`). Because it needs module 7's output, the executor runs it after module 7 and appends its row to the same `correlation_summary.csv` that 4.1 and 4.2 already wrote, so the two "typicality vs. Jaccard" rows (human-based and model-based) can be compared directly in one file. Beyond the Jaccard-side missingness already described under 4.1, this panel loses a concept whenever module 7 drops its entire category for having fewer than two members with expert data, and it is judged against the same categorized-concepts denominator (module 7's extra per-category minimum is not itself subtracted from that denominator, so the reported coverage is, if anything, a slight underestimate of the true eligible set, never an overestimate).
 
 **Generated data structures.** One CSV, one PNG, and one appended summary row:
 
@@ -202,7 +226,7 @@ Example (head of `AP_0.6/4_correlations/jaccard_vs_cosine_typicality.csv` in `re
 
 $$x = H(c), \qquad y = n_c,$$
 
-over *every* word in module 2's concepts descriptor table, which contains both abstraction levels, since category labels are words with expert distributions too. The two levels are separated only for display (words are classified by membership in the category list), while $r$ and $p$ are computed on the pooled sample. A near-zero $r$ licenses reading module 2's entropy contrasts as organizational, while a strong positive $r$ would flag them as count artifacts.
+over *every* word in module 2's concepts descriptor table, which contains both abstraction levels, since category labels are words with expert distributions too. The two levels are separated only for display (words are classified by membership in the category list), while $r$ and $p$ are computed on the pooled sample. A near-zero $r$ licenses reading module 2's entropy contrasts as organizational, while a strong positive $r$ would flag them as count artifacts. A word is missing here only when module 2 itself dropped it for having zero experts across every layer, so this panel's coverage denominator is the full metadata count, the same one used for the metadata-only panels of 4.1.
 
 **Generated data structures.** One CSV, one PNG, and one row in `correlation_summary.csv`:
 
@@ -229,46 +253,65 @@ Example (head of `AP_0.6/4_correlations/shannon_entropy_vs_expert_count.csv` in 
 
 ## Results
 
-At AP=0.6, all five correlations are statistically significant (p<0.001 in four of five, p=0.0016 in the fifth), but "significant" and "strong" are not the same thing here: with 147–164 points, even modest correlations clear the significance bar. Squaring each $r$ to get variance explained tells the more honest story:
+Values are from the two Richie-HSJ sublayer runs, GPT-2 on `mlp.c_fc` (`research_plots_gpt2_richie_hsj_with_sublayer_analysis`) and Qwen3-1.7B on `mlp.gate_proj` (`research_plots_qwen_richie_hsj_with_sublayer_analysis`), each with 204 concepts, 8 category labels, and 196 concepts with a defined category.
 
-| Relationship | r | r² (variance explained) |
+**Main correlations, AP=0.5.**
+
+| Relationship | GPT-2 (mlp.c_fc) r, p | Qwen3 (mlp.gate_proj) r, p |
 |---|---|---|
-| Frequency vs. Expert Count | -0.55 | 30% |
-| Human Typicality vs. Jaccard | 0.44 | 20% |
-| Frequency vs. Human Typicality | 0.44 | 19% |
-| Frequency vs. Jaccard | 0.37 | 14% |
-| Human Typicality vs. Expert Count | -0.26 | 7% |
+| Frequency vs. Expert Count | -0.203, p=3.6e-3 | -0.176, p=1.2e-2 |
+| Human Typicality vs. Expert Count | 0.036, p=0.62 (n.s.) | 0.007, p=0.92 (n.s.) |
+| Frequency vs. Human Typicality | -0.026, p=0.72 (n.s.) | -0.026, p=0.72 (n.s.) |
+| Human Typicality vs. Jaccard | 0.300, p=2.0e-5 | 0.381, p=3.5e-8 |
+| Human Typicality vs. Overlap | (not run for GPT-2) | 0.381, p=3.7e-8 |
+| Frequency vs. Jaccard | 0.059, p=0.41 (n.s.) | -0.060, p=0.40 (n.s.) |
 
-Only the frequency-vs-expert-count relationship explains close to a third of the variance, and it's the one that's also visually obvious in `frequency_vs_expert_count.png`, a clear funnel-shaped downward trend, even though individual points still scatter by a factor of 2-3x around the line. Typicality-vs-Jaccard sits second (r=0.44, 20% of variance, close behind frequency-vs-typicality). Even so, 20% of variance is a diffuse relationship, and the scatter in `typicality_vs_jaccard.png` remains a broad cloud around the fitted line rather than a tight trend.
+Human-Typicality-vs-Jaccard is positive and significant in both models (r = 0.30 to 0.38), indicating that more typical concepts share more experts with their category label. Frequency-vs-expert-count is negative and modest (r ≈ -0.20, about 4% of variance). The remaining pairs are non-significant at AP=0.5, including frequency-vs-Jaccard (r ≈ 0.06 in GPT-2, r ≈ -0.06 in Qwen3).
 
-The two panels added by subchapters 4.2 and 4.3 sharpen this picture at AP=0.6, in opposite directions. The **partial correlation** between Jaccard similarity and Human Typicality, controlling for frequency, is $r_{Jt\cdot f}$=0.34 (p=3.1e-5, n=147). This is smaller than the raw r=0.44, so frequency does inflate the raw relationship, but it is still clearly significant, meaning the link between typicality and alignment is *not* just frequency in disguise. **Cosine Typicality, by contrast, only marginally predicts Jaccard** (r=0.16, p=0.057, not significant), so Human Typicality, which is measured entirely independently of the expert data, tracks a concept's category alignment far better than the model's own centroid-based typicality score does at this threshold.
+**Concept expert count vs category alignment.** Using the raw expert-set sizes stored by module 3 alongside each Jaccard value:
+
+| Relationship (concept's own expert set size vs alignment) | GPT-2 AP0.5 | GPT-2 AP0.6 | Qwen3 AP0.5 | Qwen3 AP0.6 |
+|---|---|---|---|---|
+| concept expert count vs Jaccard | -0.280, p=6.9e-5 | -0.334, p=1.8e-6 | -0.292, p=3.3e-5 | -0.378, p=4.7e-8 |
+| concept expert count vs Overlap coefficient | 0.149, p=0.037 | 0.118, p=0.10 (n.s.) | 0.022, p=0.76 (n.s.) | 0.006, p=0.94 (n.s.) |
+
+Concept expert count and Jaccard are negatively correlated in both models (r = -0.28 to -0.38, p < 1e-4), so a larger expert set is associated with lower Jaccard. The relationship is essentially unchanged when controlling for frequency (GPT-2 -0.288 to -0.282, Qwen3 -0.321 to -0.347), so it is not frequency-mediated.
+
+This inverse relationship is a property of the Jaccard index rather than a semantic effect. Jaccard is $J = |A \cap B| / |A \cup B|$ with $A$ the concept's expert set and $B$ the category label's, and here the category label is the smaller and roughly fixed set (labels hold fewer experts than concepts). As the concept set $A$ grows, the union in the denominator grows with it while the intersection stays capped by the small label set $B$, so Jaccard falls by dilution. The overlap coefficient $|A \cap B| / \min(|A|, |B|)$, which normalizes the set-size disparity, shows no relationship with concept count (r = 0.0 to 0.15, non-significant), confirming the effect is arithmetic. The diagnostic figure `count_vs_jaccard_overlap.png` (produced separately, not part of the standard module output) shows the downward Jaccard trend in the left column flattening under the overlap coefficient in the right column, for both models.
+
+**Typicality-alignment link and the size effect.** The Human-Typicality-vs-Jaccard result is independent of the Jaccard size effect. The partial correlation controlling for frequency is essentially unchanged (see the sweep table), and the relationship holds under the overlap coefficient (Qwen3 typicality-vs-overlap r=0.381 versus typicality-vs-Jaccard r=0.381 at AP=0.5). The typicality-alignment association is therefore size-independent.
 
 ### Across AP thresholds
 
-| AP | Freq vs. ExpertCount (r) | Typ vs. ExpertCount (r) | Freq vs. Typ (r) | Typ vs. Jaccard (r, p) | Freq vs. Jaccard (r, p) |
+Frequency-vs-expert-count and the three null relationships, both models:
+
+| AP | GPT-2 Freq-ExpCount | Qwen3 Freq-ExpCount | GPT-2 Freq-Jaccard | Qwen3 Freq-Jaccard | Freq-Typ (both) |
 |---|---|---|---|---|---|
-| 0.5 | -0.56 | -0.23 | 0.44 | 0.43 (p=4e-8) | 0.42 (p=1e-7) |
-| 0.6 | -0.55 | -0.26 | 0.44 | 0.44 (p=2e-8) | 0.37 (p=4e-6) |
-| 0.7 | -0.52 | -0.26 | 0.44 | 0.36 (p=7e-6) | 0.29 (p=4e-4) |
-| 0.8 | -0.47 | -0.25 | 0.43 | 0.30 (p=7e-4) | 0.20 (p=0.02) |
-| 0.9 | -0.44 | -0.21 | 0.42 | 0.16 (p=0.24, n.s.) | 0.21 (p=0.10, n.s.) |
+| 0.5 | -0.203 (p=4e-3) | -0.176 (p=1e-2) | 0.059 (p=0.41, n.s.) | -0.060 (p=0.40, n.s.) | -0.026 (p=0.72, n.s.) |
+| 0.6 | -0.262 (p=2e-4) | -0.215 (p=2e-3) | 0.106 (p=0.14, n.s.) | -0.020 (p=0.78, n.s.) | -0.026 (n.s.) |
+| 0.7 | -0.302 (p=1e-5) | -0.229 (p=1e-3) | 0.123 (p=0.08, n.s.) | 0.040 (p=0.58, n.s.) | -0.026 (n.s.) |
+| 0.8 | -0.297 (p=3e-5) | -0.203 (p=4e-3) | 0.238 (p=1e-2, n<75%) | -0.053 (p=0.46, n.s.) | -0.044 (n.s.) |
+| 0.9 | -0.225 (p=2e-2, n<75%) | -0.037 (p=0.61, n.s.) | dropped (coverage) | dropped (coverage) | dropped (coverage) |
 
-Two patterns stand out. First, **frequency vs. human typicality is essentially invariant to AP** (r=0.44, 0.44, 0.44, 0.43, 0.42), which makes sense, since neither variable depends on expert allocation at all. The AP threshold only changes which concepts have a defined `expert_count` or `jaccard_pct` and therefore survive the join, not the frequency or typicality values themselves. This is a useful sanity check, as relationships that do not mechanically involve expert counts should be (and are) stable across thresholds.
+Frequency-vs-Jaccard is non-significant at every threshold in both models. The single nominal exception, GPT-2 at AP=0.8 (r=0.238, p=0.012), rests on 110 of 196 categorized concepts (56% coverage), below the 75% reporting bar, and is not reported under the coverage rule. Frequency-vs-typicality is constant at -0.026 across all thresholds within each model, since neither variable depends on the expert data and the threshold only changes which concepts survive the join.
 
-Second, **the two Jaccard-based relationships are strongest at the lenient end and decay monotonically as AP tightens**, losing significance entirely only at AP=0.9 (typicality-vs-jaccard p=0.24, frequency-vs-jaccard p=0.10). Given that module 3 shows the median concept-category pair has *zero* shared experts at AP=0.8 to 0.9, the AP=0.9 collapse is not surprising, since once jaccard_pct is mostly zero there is little variance left for it to correlate with anything. Both are cleanly significant across AP 0.5 to 0.8, which makes them nearly as dependable as the expert-count relationships everywhere except the strictest threshold.
+The typicality-alignment panels, both models:
 
-The threshold sweep for the two added panels:
+| AP | GPT-2 Typ-Jaccard | GPT-2 partial (ctrl freq) | GPT-2 Jaccard-CosineTyp | Qwen3 Typ-Jaccard | Qwen3 partial | Qwen3 Jaccard-CosineTyp |
+|---|---|---|---|---|---|---|
+| 0.5 | 0.300 (2e-5) | 0.302 (1.7e-5) | 0.527 (2e-15) | 0.381 (3e-8) | 0.381 (4e-8) | 0.641 (5e-24) |
+| 0.6 | 0.301 (2e-5) | 0.305 (1.4e-5) | 0.343 (8e-7) | 0.376 (6e-8) | 0.376 (6e-8) | 0.568 (4e-18) |
+| 0.7 | 0.206 (4e-3) | 0.211 (3e-3) | 0.155 (0.03) | 0.329 (2e-6) | 0.331 (2e-6) | 0.400 (7e-9) |
+| 0.8 | 0.056 (0.56, n<75%) | 0.123 (0.20, n<75%) | 0.231 (0.02, n<75%) | 0.342 (9e-7) | 0.341 (1e-6) | 0.031 (0.67, n.s.) |
 
-| AP | Partial: Jaccard vs. Typ controlling Freq (r, p, n) | Jaccard vs. Cosine Typicality (r, p, n) |
-|---|---|---|
-| 0.5 | 0.31 (p=1.5e-4, 147) | 0.28 (p=5.3e-4, 147) |
-| 0.6 | 0.34 (p=3.1e-5, 147) | 0.16 (p=0.057, n.s., 147) |
-| 0.7 | 0.27 (p=8.1e-4, 147) | 0.09 (p=0.29, n.s., 147) |
-| 0.8 | 0.24 (p=0.007, 128) | 0.07 (p=0.44, n.s., 128) |
-| 0.9 | 0.07 (p=0.62, n.s., 59) | -0.04 (p=0.75, n.s., 59) |
+Typicality-vs-Jaccard is significant across AP 0.5 to 0.8 in Qwen3 and across AP 0.5 to 0.7 in GPT-2 (its AP=0.8 row rests on 110 concepts, below the coverage bar). The partial correlation controlling for frequency matches the raw value at every threshold, so frequency contributes negligibly. Qwen3 shows a stronger and more stable effect than GPT-2 across thresholds. The Jaccard-vs-Cosine-Typicality panel is high at AP=0.5 (r=0.53 GPT-2, 0.64 Qwen3) and decays with threshold, weak or absent by AP 0.7 to 0.8, so the model-derived centroid typicality tracks category alignment only at the most lenient threshold.
 
-The **partial correlation tracks the raw typicality-vs-jaccard row closely at every threshold** (significant at AP 0.5 to 0.8, gone at AP=0.9), sitting consistently several points below it, so the frequency-corrected conclusion matches the raw one wherever the raw relationship exists at all, real but modest, and gone once Jaccard variance collapses at the strictest threshold. The **Jaccard-vs-Cosine-Typicality relationship is the module's weakest**, significant only at AP=0.5 (r=0.28) and marginal to null everywhere else. The fully independent Human Typicality is a *better* predictor of a concept's category alignment than the model's own Cosine Typicality at every threshold, an instructive result given module 7's finding that Cosine Typicality does not agree with human judgments pointwise either.
+**Overlap and entropy panels.** Human-Typicality-vs-Overlap (run for Qwen3) matches typicality-vs-Jaccard at every threshold (AP=0.5 both 0.381, AP=0.8 overlap 0.304 versus Jaccard 0.342), consistent with the typicality-alignment link being independent of Jaccard's size sensitivity. Shannon-entropy-vs-expert-count is near zero at the lenient thresholds (Qwen3 r=0.114 at AP=0.5, r=0.021 at AP=0.6) and rises to r=0.233 (p=8e-4) by AP=0.8 as counts fall toward the $\log_2 n_c$ ceiling. Module 2's entropy contrasts are therefore count-independent at AP 0.5 to 0.6 but not at strict thresholds.
 
-### The two added panels (Qwen3 Richie-HSJ run, AP=0.6)
+## Conclusions
 
-The overlap and entropy panels currently have reference numbers from `research_plots_qwen_richie_hsj_with_sublayer_analysis` (the tables above come from the earlier 150-concept sweep, which predates these panels). **Typicality vs. overlap** behaves almost identically to typicality vs. Jaccard in the same run (r=0.365, p=1.5e-7 vs. r=0.376, p=5.5e-8, both n=196): the typicality–alignment link is not an artifact of the Jaccard index's sensitivity to the category set's larger size, since it survives unchanged under the containment-based metric. **Shannon entropy vs. expert count is essentially null** (r=0.021, p=0.77, n=204): across three orders of magnitude in expert count (114 to 4,640), entropy does not track set size at this threshold. This is the check module 2 leans on, since its concept-vs-label entropy contrasts at AP=0.6 are measuring layer organization, not expert-set volume. The caveat remains for strict thresholds (AP ≥ 0.8), where module 1 shows counts dropping to single digits and the $\log_2 n_c$ bound must bind.
+- Human Typicality is positively associated with category alignment in both models (typicality-vs-Jaccard r = 0.30 to 0.38 at AP=0.5), significant across the lenient-to-moderate thresholds, and this association is independent of both frequency (partial correlation unchanged) and Jaccard's set-size sensitivity (matched under the overlap coefficient).
+- Frequency has at most a modest negative association with expert count (r ≈ -0.20 at AP=0.5, strengthening toward mid thresholds) and no association with category alignment or typicality.
+- Concept expert count is negatively associated with Jaccard alignment (r = -0.28 to -0.38), but this is an arithmetic property of the Jaccard index for a fixed smaller comparison set and vanishes under the overlap coefficient, so it does not reflect a size-dependent tendency in category alignment.
+- The model-derived Cosine Typicality tracks Jaccard alignment only at the most lenient threshold and decays with AP, unlike Human Typicality.
+- Shannon entropy and expert count are decorrelated at AP 0.5 to 0.6, supporting module 2's use of entropy contrasts at those thresholds, and become correlated at strict thresholds.

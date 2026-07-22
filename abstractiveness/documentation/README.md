@@ -26,6 +26,7 @@ The outputs are written into one `AP_{threshold}` subfolder per AP threshold und
 - Module 5: pairwise heatmaps of expert overlap, using Jaccard and overlap matrices (plus the raw shared-expert counts matrix) across all concepts, with category-block separators.
 - Module 6: dual category definitions with Jensen-Shannon divergence, comparing category-label prototypes to member-exemplar distributions.
 - Module 7: empirical cosine typicality, comparing concepts to global and per-layer category prototypes.
+- Module 8: expert set versus embedding semantics, a second-order RSA correlating the pooled expert-set Jaccard geometry against the concept-embedding geometry of each layer, with a concept-level Mantel permutation, a split-half noise ceiling, and the density and depth-stability diagnostics needed to read the depth curve correctly.
 
 Each module is described in its own page below.
 
