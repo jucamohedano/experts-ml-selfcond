@@ -68,7 +68,7 @@ MODEL_CONFIGS = {
         "metadata_file": "metadata_Richie_HSJ.json",
         "layer_mapping_file": "layer_mapping_Qwen3_1-7B.csv",
         "typicality_column": "typicality_HSJ_pairwise",
-        "output_subdir": "research_plots_qwen_richie_hsj_with_sublayer_analysis",
+        "output_subdir": "research_plots_qwen_richie_hsj_with_module_8",
         "sublayer_filter": "mlp.gate_proj",
         "embedding_cache_file": "concept_embeddings_qwen3_richie_hsj.npz",
     },
@@ -88,7 +88,7 @@ MODEL_CONFIGS = {
 }
 
 # Select which configuration to run.
-ACTIVE_CONFIG = "gpt2_richie_hsj"
+ACTIVE_CONFIG = "qwen3_richie_hsj"
 
 if __name__ == "__main__":
     REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]

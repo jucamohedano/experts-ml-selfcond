@@ -80,32 +80,61 @@ def ensure_nltk_wordnet() -> None:
             pass
 
 
-# Define the high-level categories (Synsets) that represent the concrete objects
-# in your list (Tools, Vehicles, Furniture, Animals, Plants, Buildings).
-TARGET_HYPERNYMS = {
+# High-level hypernyms marking a synset as a concrete, physical thing. Resolved lazily
+# rather than at import time, because resolving a synset requires the WordNet corpus to
+# already be downloaded, which ensure_nltk_wordnet() only guarantees once main() runs.
+TARGET_HYPERNYM_NAMES = (
     # Artifacts (man-made things: tools, furniture, vehicles, buildings)
-    wn.synset('artifact.n.01'), 
+    'artifact.n.01',
     # Living Things (animals, insects, plants)
-    wn.synset('living_thing.n.01'),
+    'living_thing.n.01',
     # Body Parts (for arm, eye, foot, hand, leg)
-    wn.synset('body_part.n.01')
-}
+    'body_part.n.01',
+)
+
+_TARGET_HYPERNYMS: t.Optional[t.Set[Synset]] = None
+
+
+def target_hypernyms() -> t.Set[Synset]:
+    global _TARGET_HYPERNYMS
+    if _TARGET_HYPERNYMS is None:
+        _TARGET_HYPERNYMS = {wn.synset(name) for name in TARGET_HYPERNYM_NAMES}
+    return _TARGET_HYPERNYMS
+
 
 def is_relevant_concept(synset: Synset) -> bool:
     """
-    Checks if a synset belongs to a desired concrete, physical category 
+    Checks if a synset belongs to a desired concrete, physical category
     by traversing its hypernym (superclass) hierarchy.
     """
+    targets = target_hypernyms()
     # Use closure to traverse all hypernyms up the tree
     for hypernym in synset.closure(lambda s: s.hypernyms()):
-        if hypernym in TARGET_HYPERNYMS:
+        if hypernym in targets:
             return True
     return False
 
-# Crude category -> WordNet lexicographer-domain hint, used only to pick between
-# multiple senses of a word that means different things in different categories
-# (e.g. "squash" the vegetable vs. "squash" the sport). Not exhaustive -- it only
-# needs to disambiguate the specific ambiguous words in a given word list.
+
+# Category -> the WordNet synsets the intended sense must descend from (or be). This is
+# the primary disambiguation signal, and it is far stricter than the lexicographer-domain
+# hint below: "canary" has a noun.animal sense and a noun.person sense, but only the bird
+# descends from bird.n.01. Anchors are resolved lazily, for the same reason as above.
+CATEGORY_ANCHOR_NAMES: t.Dict[str, t.Tuple[str, ...]] = {
+    "birds": ("bird.n.01",),
+    "fruit": ("edible_fruit.n.01", "fruit.n.01"),
+    "vegetables": ("vegetable.n.01", "herb.n.01"),
+    "clothing": ("clothing.n.01", "garment.n.01", "footwear.n.02", "accessory.n.01"),
+    "furniture": ("furniture.n.01", "furnishing.n.02", "home_appliance.n.01"),
+    "vehicles": ("vehicle.n.01",),
+    "sports": ("sport.n.01", "athletic_game.n.01", "diversion.n.01"),
+    "professions": ("person.n.01",),
+}
+
+# Crude category -> WordNet lexicographer-domain hint, used to pick between multiple
+# senses when no anchor matches. Broader than the anchors and so a weaker signal, but it
+# rescues concepts whose intended sense sits outside the anchor subtree: "chess" the board
+# game is not under sport.n.01 (its first sense is a weed, noun.plant), while noun.act
+# selects it correctly.
 CATEGORY_LEXNAME_HINTS: t.Dict[str, t.Set[str]] = {
     "sports": {"noun.act", "noun.event"},
     "vegetables": {"noun.plant", "noun.food"},
@@ -117,41 +146,128 @@ CATEGORY_LEXNAME_HINTS: t.Dict[str, t.Set[str]] = {
     "professions": {"noun.person"},
 }
 
+# Level 1 category labels carry no category of their own, so neither the anchors nor the
+# lexname hints apply to them and the generic heuristic picks a person sense ("sports"
+# resolves to sport.n.03, "(Maine colloquial) a temporary summer resident"). There are
+# only eight of them, so they are pinned explicitly.
+LEVEL1_LABEL_SENSES: t.Dict[str, str] = {
+    "birds": "bird.n.01",
+    "clothing": "clothing.n.01",
+    "fruit": "fruit.n.01",
+    "furniture": "furniture.n.01",
+    "professions": "profession.n.02",
+    "sports": "sport.n.01",
+    "vegetables": "vegetable.n.01",
+    "vehicles": "vehicle.n.01",
+}
 
-def fetch_wordnet_gloss(concept: str, category: t.Optional[str] = None) -> str:
-    """
-    Fetches the definition for a concept, prioritizing senses that are concrete
-    objects or natural kinds over abstract, informal, or verbal senses.
+# Concepts where WordNet sense ordering picks a wrong-but-anchor-matching sense, so no
+# amount of hierarchy walking helps. Both competing senses satisfy the category, and only
+# the source word list settles which one is meant. Keyed by (concept, category).
+SENSE_OVERRIDES: t.Dict[t.Tuple[str, str], str] = {
+    # a soft padded bag, not shock_absorber.n.01 "a mechanical damper"
+    ("cushion", "furniture"): "cushion.n.03",
+    # the road vehicle, not van.n.03 "(Great Britain) a closed railroad car"
+    ("van", "vehicles"): "van.n.05",
+    # the motor scooter, not water_scooter.n.01 "a motorboat resembling a motor scooter"
+    ("scooter", "vehicles"): "motor_scooter.n.01",
+    # horse-drawn, not passenger_car.n.01 "a railcar where passengers ride"
+    ("carriage", "vehicles"): "carriage.n.02",
+    # the firefighter, not stoker.n.02 "a laborer who tends fires"
+    ("fireman", "professions"): "fireman.n.04",
+    # the clerical assistant, not secretary.n.01 "head of an administrative department"
+    ("secretary", "professions"): "secretary.n.02",
+    # the government office holder, not curate.n.01 "authorized to conduct religious worship"
+    ("minister", "professions"): "minister.n.02",
+    # riding in a sailboat, not seafaring.n.01 "the work of a sailor"
+    ("sailing", "sports"): "sailing.n.02",
+}
 
-    If `category` is given and matches CATEGORY_LEXNAME_HINTS, a sense whose
-    WordNet lexicographer domain matches is preferred over that default heuristic --
-    this is what correctly separates e.g. "squash" the vegetable from "squash" the
-    sport, which the generic concreteness heuristic below can't tell apart (both
-    exist as valid noun senses; the concreteness heuristic always prefers the plant).
+
+def select_wordnet_sense(concept: str, category: t.Optional[str] = None) -> t.Optional[Synset]:
     """
+    Picks the WordNet noun sense of `concept` that the given `category` intends.
+
+    Resolution order, first hit wins:
+
+    1. SENSE_OVERRIDES, for the handful of words where two senses both satisfy the
+       category and only the source word list decides between them.
+    2. LEVEL1_LABEL_SENSES, when the concept is a category label and so has no category.
+    3. CATEGORY_ANCHOR_NAMES, the lowest-indexed sense that is, or descends from, one of
+       the category's anchor synsets.
+    4. CATEGORY_LEXNAME_HINTS, the lowest-indexed sense in a matching lexicographer domain.
+    5. The concreteness heuristic (is_relevant_concept), with noun.person senses excluded
+       unless the category is professions. That exclusion is the core fix: person inherits
+       from organism and then living_thing, so without it every noun.person sense passes
+       the concreteness filter and outranks the intended one ("date" the escort beating
+       "date" the fruit, "canary" the informer beating "canary" the bird).
+    6. The first sense WordNet lists, for words whose concrete sense is already first.
+
+    Returns None only when WordNet has no noun sense for the word at all.
+    """
+    key = category.lower() if category else None
+
     synsets = wn.synsets(concept, pos=wn.NOUN)
+    if not synsets:
+        return None
 
-    if category:
-        hints = CATEGORY_LEXNAME_HINTS.get(category.lower())
+    if key:
+        override = SENSE_OVERRIDES.get((concept.lower(), key))
+        if override:
+            return wn.synset(override)
+    else:
+        label_sense = LEVEL1_LABEL_SENSES.get(concept.lower())
+        if label_sense:
+            return wn.synset(label_sense)
+
+    if key:
+        anchor_names = CATEGORY_ANCHOR_NAMES.get(key, ())
+        anchors = {wn.synset(name) for name in anchor_names}
+        if anchors:
+            for s in synsets:
+                if s in anchors or anchors & set(s.closure(lambda x: x.hypernyms())):
+                    return s
+
+        hints = CATEGORY_LEXNAME_HINTS.get(key)
         if hints:
             for s in synsets:
                 if s.lexname() in hints:
-                    return s.definition()
+                    return s
 
-    # 1. Check for relevant senses based on hypernyms
-    relevant_synsets = [s for s in synsets if is_relevant_concept(s)]
-
-    if relevant_synsets:
+    allow_person = key == "professions"
+    relevant = [
+        s for s in synsets
+        if is_relevant_concept(s) and (allow_person or s.lexname() != "noun.person")
+    ]
+    if relevant:
         # Prioritize the lowest index (most frequent) among the relevant senses
-        best_synset = relevant_synsets[0]
-        return best_synset.definition()
+        return relevant[0]
 
-    # 2. Fallback: If no relevant hypernym is found, use the first available sense
-    # This handles words where the concrete sense IS the first sense, or obscure words.
-    if synsets:
-        return synsets[0].definition()
+    return synsets[0]
 
-    return f"{concept} (definition unavailable)"
+
+def describe_sense(synset: t.Optional[Synset], concept: str) -> str:
+    """
+    A compact restatement of the chosen sense, given to the LM alongside the definition so
+    the intended meaning is pinned by more than one phrasing. Reads e.g.
+    "date, escort (a kind of participant)".
+    """
+    if synset is None:
+        return f"{concept} (no WordNet sense available)"
+    lemmas = ", ".join(dict.fromkeys(l.name().replace("_", " ") for l in synset.lemmas()))
+    hypernyms = synset.hypernyms()
+    if hypernyms:
+        parent = hypernyms[0].lemmas()[0].name().replace("_", " ")
+        return f"{lemmas} (a kind of {parent})"
+    return lemmas
+
+
+def fetch_wordnet_gloss(concept: str, category: t.Optional[str] = None) -> str:
+    """Definition of the sense chosen by select_wordnet_sense."""
+    synset = select_wordnet_sense(concept, category)
+    if synset is None:
+        return f"{concept} (definition unavailable)"
+    return synset.definition()
 
 
 def pick_article(word: str) -> str:
@@ -197,6 +313,9 @@ class GenerateFacts(dspy.Signature):
                                           "May be blank for top-level category concepts.")
     article: str = dspy.InputField(desc="The article to use ('a' or 'an').")
     definition: str = dspy.InputField(desc="The WordNet definition of the concept.")
+    sense_hint: str = dspy.InputField(desc="Synonyms of the intended sense and what kind of "
+                                           "thing it is, e.g. 'date (a kind of edible fruit)'. "
+                                           "Write about this sense only.")
     random_seed: str = dspy.InputField(desc="Random seed to ensure diversity.")
 
     sentences: t.List[str] = dspy.OutputField(
@@ -222,6 +341,9 @@ class GenerateStories(dspy.Signature):
                                           "May be blank for top-level category concepts.")
     article: str = dspy.InputField(desc="The article to use ('a' or 'an').")
     definition: str = dspy.InputField(desc="The WordNet definition of the concept.")
+    sense_hint: str = dspy.InputField(desc="Synonyms of the intended sense and what kind of "
+                                           "thing it is, e.g. 'date (a kind of edible fruit)'. "
+                                           "Write about this sense only.")
     random_seed: str = dspy.InputField(desc="Random seed to ensure diversity.")
 
     sentences: t.List[str] = dspy.OutputField(
@@ -247,7 +369,8 @@ class ConceptGenerator(dspy.Module):
         self.fact_count = fact_count
         self.story_count = story_count
     
-    def forward(self, concept: str, definition: str, article: str, category: str = ""):
+    def forward(self, concept: str, definition: str, article: str, category: str = "",
+                sense_hint: str = ""):
         """Generate sentences for a concept (synchronous)."""
         positives = []
 
@@ -259,7 +382,8 @@ class ConceptGenerator(dspy.Module):
                     concept=concept,
                     category=category,
                     article=article,
-                    definition=definition
+                    definition=definition,
+                    sense_hint=sense_hint
                 )
                 positives.extend([sentence for sentence in result.sentences if sentence])
             except Exception as e:
@@ -273,7 +397,8 @@ class ConceptGenerator(dspy.Module):
                     concept=concept,
                     category=category,
                     article=article,
-                    definition=definition
+                    definition=definition,
+                    sense_hint=sense_hint
                 )
                 positives.extend([sentence for sentence in result.sentences if sentence])
             except Exception as e:
@@ -289,7 +414,8 @@ class ConceptGenerator(dspy.Module):
             story_count=min(self.story_count, len(positives) - self.fact_count) if len(positives) > self.fact_count else 0
         )
     
-    async def aforward(self, concept: str, definition: str, article: str, category: str = ""):
+    async def aforward(self, concept: str, definition: str, article: str, category: str = "",
+                       sense_hint: str = ""):
         """Generate sentences for a concept (asynchronous)."""
         positives = []
 
@@ -307,6 +433,7 @@ class ConceptGenerator(dspy.Module):
                     category=category,
                     article=article,
                     definition=definition,
+                    sense_hint=sense_hint,
                     random_seed=str(random.random())
                 )
                 # Add unique valid sentences
@@ -338,6 +465,7 @@ class ConceptGenerator(dspy.Module):
                     category=category,
                     article=article,
                     definition=definition,
+                    sense_hint=sense_hint,
                     random_seed=str(random.random())
                 )
                 new_stories = [s for s in result.sentences if s]
@@ -376,11 +504,15 @@ async def generate_concept_positives_async(
     generator: ConceptGenerator,
 ) -> t.Tuple[str, str, t.Optional[str], t.List[str]]:
     """Generate positives for a single concept asynchronously using DSPy's native async support."""
-    definition = fetch_wordnet_gloss(concept, category)
+    synset = select_wordnet_sense(concept, category)
+    definition = synset.definition() if synset else f"{concept} (definition unavailable)"
+    sense_hint = describe_sense(synset, concept)
     article = pick_article(concept)
+    print(f"    [{concept}] sense: {synset.name() if synset else 'none'} -- {definition}")
 
     # Use acall() to ensure DSPy async wrappers (callbacks, context, usage tracking) are applied.
-    result = await generator.acall(concept=concept, definition=definition, article=article, category=category or "")
+    result = await generator.acall(concept=concept, definition=definition, article=article,
+                                   category=category or "", sense_hint=sense_hint)
 
     # Verify counts
     total_target = generator.fact_count + generator.story_count
@@ -501,9 +633,19 @@ def load_categories_for_concepts(
     metadata_Richie_HSJ.json), aligned by position with `concepts` -- both are built by
     flattening the same source list in the same order. Falls back to all-None (no
     disambiguation) if the metadata doesn't line up, rather than risk mismatched pairing.
+
+    Rows without a "concept" key are skipped rather than raising: the metadata file also
+    carries deliberately excluded entries under underscore-prefixed keys (e.g.
+    "_ignored_concept_squash_sport"), which are not part of the dataset and must not shift
+    the positional alignment.
     """
     with metadata_path.open("r", encoding="utf-8") as fp:
-        entries = json.load(fp)
+        raw_entries = json.load(fp)
+    entries = [e for e in raw_entries if isinstance(e, dict) and "concept" in e]
+    skipped = len(raw_entries) - len(entries)
+    if skipped:
+        print(f"Note: skipped {skipped} metadata row(s) without a 'concept' key "
+              f"(excluded entries).")
     meta_concepts = [e["concept"] for e in entries]
     if meta_concepts != concepts:
         print(f"Warning: {metadata_path} concepts don't match config concepts 1:1; "
@@ -686,10 +828,19 @@ def gather_negatives(
     entries: t.List[t.Tuple[str, str, t.Optional[str]]],
     dataset_root: pathlib.Path,
     intermediate_dir: pathlib.Path,
+    all_entries: t.Optional[t.List[t.Tuple[str, str, t.Optional[str]]]] = None,
+    source_tag: str = "",
 ) -> None:
     """Phase 2: Build stratified negatives and write final JSON files.
 
     `entries` is a list of (concept, storage_key, category) tuples, same as generate_positives.
+    Only these concepts get a JSON written, which is what makes a targeted rebuild possible
+    (regenerate a handful of concepts and leave every other file on disk untouched, so the
+    model responses already computed from them stay valid).
+
+    `all_entries` is the unfiltered list, used only for concept_list.csv. The CSV describes
+    the whole dataset, so writing it from a filtered `entries` would silently truncate it to
+    the rebuilt subset. It defaults to `entries` for a full run, where the two are the same.
     """
     print("Phase 2: Loading intermediate positives...")
     records = load_all_intermediate_records(intermediate_dir)
@@ -708,6 +859,10 @@ def gather_negatives(
     # Write final JSON files
     group = "custom"
     source_name = f"dspy_{cfg.model.replace('/', '_')}"
+    if source_tag:
+        # Records that a file came from a later, targeted rebuild rather than the original
+        # sweep, so a dataset containing both provenances stays auditable.
+        source_name = f"{source_name}_{source_tag}"
 
     missing = []
     for concept, storage_key, category in tqdm(entries, desc="Writing concept files"):
@@ -731,8 +886,11 @@ def gather_negatives(
         print(f"  WARNING: {len(missing)} concept(s) had no intermediate positives and were "
               f"written with empty sentences: {missing}")
 
-    # Write concept list CSV
-    write_concept_list_csv(dataset_root=dataset_root, group=group, entries=entries)
+    # Write concept list CSV, always describing the full dataset rather than the subset
+    # that was just rebuilt.
+    write_concept_list_csv(
+        dataset_root=dataset_root, group=group, entries=all_entries if all_entries else entries
+    )
 
     print(f"Phase 2: Complete. Dataset written to: {dataset_root}")
 
@@ -801,6 +959,14 @@ async def async_main() -> None:
         help="API key for LM provider (overrides config/env)",
     )
     parser.add_argument(
+        "--source-tag",
+        type=str,
+        default="",
+        help="Suffix appended to the 'source' field of every concept JSON written by this "
+             "run, e.g. 'sensefix2026-07'. Use it when rebuilding a subset so the mixed "
+             "provenance of the dataset stays visible in the files themselves.",
+    )
+    parser.add_argument(
         "--generator-type",
         type=str,
         default="cot",
@@ -839,6 +1005,9 @@ async def async_main() -> None:
         categories = [None] * len(all_concepts)
     storage_keys = [storage_key_for(c, cat, all_concepts) for c, cat in zip(all_concepts, categories)]
     entries = list(zip(all_concepts, storage_keys, categories))
+    # Kept unfiltered: concept_list.csv must describe the whole dataset even when this run
+    # only rebuilds a subset via --only-concepts.
+    all_entries = list(entries)
 
     dupes = {sk for sk in storage_keys if storage_keys.count(sk) > 1}
     if dupes:
@@ -861,6 +1030,8 @@ async def async_main() -> None:
             for key, r in records.items()
         ]
         print(f"Found {len(entries)} concepts in .intermediate")
+        # In fix mode the intermediate files, not the config, define the dataset.
+        all_entries = list(entries)
         args.phase = "negatives"  # Force phase to negatives/processing only
 
     target_positives = cfg.positive_fact + cfg.positive_story
@@ -911,6 +1082,8 @@ async def async_main() -> None:
             entries=entries,
             dataset_root=dataset_root,
             intermediate_dir=intermediate_dir,
+            all_entries=all_entries,
+            source_tag=args.source_tag,
         )
 
 
