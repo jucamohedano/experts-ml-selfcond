@@ -5,9 +5,19 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
 from scipy import stats
-from utils.helpers import save_dataframe
+from utils.helpers import save_dataframe, scope_out_dir, scope_summary_row
 
 log = logging.getLogger(__name__)
+
+# Headline metrics for the cross-scope sublayer_comparison table: the correlations that
+# actually move between scopes. frequency_vs_typicality is absent by design, it reads only
+# metadata and is written once at the module's top level.
+SUMMARY_LABELS = {
+    "r_typicality_vs_jaccard": "r, typicality vs Jaccard",
+    "r_frequency_vs_expert_count": "r, frequency vs expert count",
+    "r_shannon_entropy_vs_expert_count": "r, entropy vs expert count",
+    "r_jaccard_vs_cosine_typicality": "r, Jaccard vs cosine typicality",
+}
 
 LEVEL_PALETTE = {"Specific Concepts": "#D96A5B", "Broad Categories": "#4B5A6A"}
 
@@ -128,7 +138,8 @@ def plot_partial_correlation_jaccard_typicality(corr_data: pd.DataFrame, corr_di
 
 def plot_correlations(merged_metadata_df: pd.DataFrame, similarity_metrics_df: pd.DataFrame,
                       concept_entropy_df: pd.DataFrame, category_entropy_df: pd.DataFrame,
-                      concept_metadata: pd.DataFrame, corr_dir) -> None:
+                      concept_metadata: pd.DataFrame, corr_dir,
+                      include_scope_invariant: bool = True) -> pd.DataFrame:
     """
     Generate scatter plots with regression lines for multiple correlation analyses.
     Tests relationships between: frequency vs expert count, human typicality vs expert count,
@@ -162,11 +173,15 @@ def plot_correlations(merged_metadata_df: pd.DataFrame, similarity_metrics_df: p
         "Human Typicality vs Expert Count (r={r:.2f}, p={p:.2e})", '#955196',
         corr_dir / "typicality_vs_expert_count.csv", corr_dir / "typicality_vs_expert_count.png", n_total_words))
 
-    summary_rows.append(_run_regression_panel(
-        merged_metadata_df, "log_frequency", "human_typicality",
-        "Wikipedia Frequency(Log10)", "Human Typicality",
-        "Frequency(Log10) vs Human Typicality (r={r:.2f}, p={p:.2e})", '#2ca02c',
-        corr_dir / "frequency_vs_typicality.csv", corr_dir / "frequency_vs_typicality.png", n_total_words))
+    # Frequency against human typicality reads only metadata columns, so it is identical
+    # in every analysis scope. It is written once, at the module's top level, rather than
+    # copied byte-for-byte into all seven sublayer folders at all five AP thresholds.
+    if include_scope_invariant:
+        summary_rows.append(_run_regression_panel(
+            merged_metadata_df, "log_frequency", "human_typicality",
+            "Wikipedia Frequency(Log10)", "Human Typicality",
+            "Frequency(Log10) vs Human Typicality (r={r:.2f}, p={p:.2e})", '#2ca02c',
+            corr_dir / "frequency_vs_typicality.csv", corr_dir / "frequency_vs_typicality.png", n_total_words))
 
     if similarity_metrics_df is not None and not similarity_metrics_df.empty:
         # Merge the metadata with the similarity dataframe
@@ -195,7 +210,9 @@ def plot_correlations(merged_metadata_df: pd.DataFrame, similarity_metrics_df: p
     if concept_entropy_df is not None and not concept_entropy_df.empty:
         summary_rows.append(plot_entropy_vs_expert_count(concept_entropy_df, category_entropy_df, corr_dir, n_total_words))
 
-    save_dataframe(pd.DataFrame(summary_rows), corr_dir / "correlation_summary.csv")
+    summary_df = pd.DataFrame(summary_rows)
+    save_dataframe(summary_df, corr_dir / "correlation_summary.csv")
+    return summary_df
 
 
 def plot_entropy_vs_expert_count(concept_entropy_df: pd.DataFrame, category_entropy_df: pd.DataFrame,
@@ -243,8 +260,8 @@ def plot_entropy_vs_expert_count(concept_entropy_df: pd.DataFrame, category_entr
     plt.close()
     return summary_row
 
-def execute_module_4b_jaccard_vs_cosine_typicality(similarity_metrics_df: pd.DataFrame, global_typicality_df: pd.DataFrame,
-                                                   concept_metadata: pd.DataFrame, corr_dir) -> None:
+def execute_module_4b_jaccard_vs_cosine_typicality(scope, similarity_metrics_df: pd.DataFrame, global_typicality_df: pd.DataFrame,
+                                                   concept_metadata: pd.DataFrame, corr_dir) -> dict:
     """
     Second pass of module 4, run after module 7 so global_cosine_typicality is available.
     Compares Jaccard similarity against Cosine Typicality (module 7's model-derived score) to
@@ -256,9 +273,10 @@ def execute_module_4b_jaccard_vs_cosine_typicality(similarity_metrics_df: pd.Dat
     which this denominator does not know about, so its coverage reads slightly conservative
     rather than overstated).
     """
+    out_dir = scope_out_dir(corr_dir, scope)
     if similarity_metrics_df is None or similarity_metrics_df.empty or global_typicality_df is None or global_typicality_df.empty:
         log.warning("  Skipping Jaccard vs. Cosine Typicality: similarity or typicality data unavailable.")
-        return
+        return {}
 
     n_total_categorized = concept_metadata['category'].notna().sum()
     merged = similarity_metrics_df.merge(global_typicality_df, on=["concept", "category"], how="inner")
@@ -266,18 +284,40 @@ def execute_module_4b_jaccard_vs_cosine_typicality(similarity_metrics_df: pd.Dat
         merged, "global_cosine_typicality", "jaccard_pct",
         "Cosine Typicality", "Jaccard Similarity Index %",
         "Cosine Typicality vs Jaccard Similarity % (r={r:.2f}, p={p:.2e})", '#17becf',
-        corr_dir / "jaccard_vs_cosine_typicality.csv", corr_dir / "jaccard_vs_cosine_typicality.png", n_total_categorized)
+        out_dir / "jaccard_vs_cosine_typicality.csv", out_dir / "jaccard_vs_cosine_typicality.png", n_total_categorized)
 
-    summary_path = corr_dir / "correlation_summary.csv"
+    summary_path = out_dir / "correlation_summary.csv"
     existing_summary = pd.read_csv(summary_path) if summary_path.exists() else pd.DataFrame()
     save_dataframe(pd.concat([existing_summary, pd.DataFrame([row])], ignore_index=True), summary_path)
+    return _panel_r_columns(pd.DataFrame([row]))
 
-def execute_module_4_correlations(merged_metadata_df: pd.DataFrame, similarity_metrics_df: pd.DataFrame,
+
+def _panel_r_columns(summary_df: pd.DataFrame) -> dict:
+    """
+    Flatten a correlation summary table into {r_<plot_name>: pearson_r}, the shape the
+    cross-scope comparison table wants. Panels whose coverage gate left pearson_r empty
+    come through as NaN, so a scope that lost too many concepts is visibly blank rather
+    than missing a column.
+    """
+    if summary_df.empty or "plot_name" not in summary_df.columns:
+        return {}
+    return {f"r_{row['plot_name']}": row.get("pearson_r", np.nan) for _, row in summary_df.iterrows()}
+
+
+def execute_module_4_correlations(scope, merged_metadata_df: pd.DataFrame, similarity_metrics_df: pd.DataFrame,
                                   concept_entropy_df: pd.DataFrame, category_entropy_df: pd.DataFrame,
-                                  concept_metadata: pd.DataFrame, corr_dir) -> None:
+                                  concept_metadata: pd.DataFrame, corr_dir) -> dict:
     """Execute Module 4: Correlations.
     Generates scatter plots with regression analysis for relationships between frequency,
     human typicality, expert count, entropy, and similarity metrics.
+
+    Every panel except frequency-vs-typicality depends on the scope, through the expert
+    counts, the Jaccard/overlap values, or the entropies feeding it, so the module runs
+    per scope. Returns {r_<panel>: pearson_r} for this module's sublayer_comparison table.
     """
-    log.info("  Generating correlation plots...")
-    plot_correlations(merged_metadata_df, similarity_metrics_df, concept_entropy_df, category_entropy_df, concept_metadata, corr_dir)
+    out_dir = scope_out_dir(corr_dir, scope)
+    log.info(f"  [{scope.label}] Generating correlation plots...")
+    summary_df = plot_correlations(merged_metadata_df, similarity_metrics_df, concept_entropy_df,
+                                   category_entropy_df, concept_metadata, out_dir,
+                                   include_scope_invariant=scope.is_whole_model)
+    return scope_summary_row(scope, **_panel_r_columns(summary_df))

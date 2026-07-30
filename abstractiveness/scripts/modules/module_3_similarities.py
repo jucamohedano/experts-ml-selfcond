@@ -1,9 +1,17 @@
 import logging
 import pandas as pd
-from utils.helpers import save_dataframe
+from utils.helpers import save_dataframe, scope_out_dir, scope_summary_row
 from utils.plot_helpers import _plot_bar_with_leaders, build_category_color_map, fig_width_for
 
 log = logging.getLogger(__name__)
+
+# Headline metrics for the cross-scope sublayer_comparison table.
+SUMMARY_LABELS = {
+    "jaccard_mean_pct": "Mean Jaccard %",
+    "jaccard_median_pct": "Median Jaccard %",
+    "overlap_mean_pct": "Mean overlap %",
+    "overlap_median_pct": "Median overlap %",
+}
 
 def plot_hierarchy_similarities(expert_allocation_df: pd.DataFrame, concept_metadata: pd.DataFrame, sim_dir) -> pd.DataFrame:
     """
@@ -77,10 +85,32 @@ def plot_hierarchy_similarities(expert_allocation_df: pd.DataFrame, concept_meta
 
     return similarity_metrics_df
 
-def execute_module_3_category_concept_similarities(formatted_expert_allocation_df: pd.DataFrame, concept_metadata: pd.DataFrame, sim_dir) -> pd.DataFrame:
+def execute_module_3_category_concept_similarities(scope, concept_metadata: pd.DataFrame, sim_dir) -> tuple[pd.DataFrame, dict]:
     """Execute Module 3: Category-Concept Similarities.
     Calculates Jaccard and Overlap coefficients between concepts and their categories.
+
+    Both metrics are set-based, so they read the expert rows as an unordered set of
+    (layer_idx, unit) pairs and layer order is irrelevant. The whole-model scope is
+    therefore the unqualified answer to the module's research question, and each
+    sublayer scope answers the narrower "where in the block do a concept and its label
+    actually share neurons".
+
+    Returns (similarity_metrics_df, summary_row) where summary_row feeds this module's
+    sublayer_comparison table.
     """
-    log.info("  Generating hierarchy similarities (Jaccard & Overlap)...")
-    similarity_metrics_df = plot_hierarchy_similarities(formatted_expert_allocation_df, concept_metadata, sim_dir)
-    return similarity_metrics_df
+    out_dir = scope_out_dir(sim_dir, scope)
+    log.info(f"  [{scope.label}] Generating hierarchy similarities (Jaccard & Overlap)...")
+    similarity_metrics_df = plot_hierarchy_similarities(scope.expert_df, concept_metadata, out_dir)
+
+    if similarity_metrics_df.empty:
+        summary = scope_summary_row(scope, n_pairs=0, **{key: float("nan") for key in SUMMARY_LABELS})
+    else:
+        summary = scope_summary_row(
+            scope,
+            n_pairs=len(similarity_metrics_df),
+            jaccard_mean_pct=similarity_metrics_df["jaccard_pct"].mean(),
+            jaccard_median_pct=similarity_metrics_df["jaccard_pct"].median(),
+            overlap_mean_pct=similarity_metrics_df["overlap_pct"].mean(),
+            overlap_median_pct=similarity_metrics_df["overlap_pct"].median(),
+        )
+    return similarity_metrics_df, summary

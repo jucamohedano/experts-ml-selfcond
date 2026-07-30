@@ -12,6 +12,8 @@ $$E_c = \{(\ell, u) : \text{unit } u \text{ in layer } \ell \text{ is an expert 
 
 A neuron is identified by its (layer, unit) pair because the raw `unit` column holds only the neuron index within a layer, and these indices repeat across layers. The sets are therefore built by zipping `layer_idx` with `unit` (`set(zip(layer_idx, unit))` per concept), which gives $|E_c| = n_c$, the concept's expert count. The module iterates over every `(concept, category)` row of the metadata with a non-null category, that is, every hierarchical pair $(c, k)$ where $k$ is the parent category of concept $c$. Pairs where either $E_c$ or $E_k$ is empty are skipped.
 
+**Analysis scopes.** This module is *set-based*, meaning it reads expert rows as an unordered collection of (layer, unit) pairs, so the layer axis never enters and each scope runs it exactly once. It runs on the whole model first, writing into the module folder itself, then once per sublayer type into `sublayers/<rank>_<sublayer>/`. Module 1, subchapter 1.7 defines the scopes and the rank prefix. A cross-scope summary lands in `sublayer_comparison.csv` and `sublayer_comparison.png` at the module's top level. Its columns are the pair count and the mean and median of both percentages.
+
 ### 3.1 Expert-set similarity between a concept and its parent category
 
 **Mathematical formulation.** Two set-similarity metrics are computed for each pair $(c, k)$, both expressed as percentages. The Jaccard index measures *global equivalence* of the two sets, the intersection over the union:
@@ -50,6 +52,8 @@ Two **bar charts** plot the same table, one per metric, with each pair's `hierar
 - `overlap_hierarchy.png`, `overlap_pct` ($O(c,k)$, x-axis) plotted against `hierarchy` (y-axis), showing the overlap coefficient as a percentage for each concept-category hierarchy.
 
 ## Results
+
+*Scope note.* Every figure in this section comes from the runs that predate the whole-model refactor, so it describes the **analysis sublayer** (`mlp.c_fc` for GPT-2, `mlp.gate_proj` for Qwen3), which is now one scope among several rather than the only one. Those numbers still stand, they are reproduced byte for byte by the corresponding `sublayers/<rank>_<sublayer>/` outputs. Whole-model and other-sublayer figures land here once the sweep is re-run.
 
 At AP=0.6, across the 147 concept-category pairs, Jaccard similarity is consistently low: mean 4.0%, median 2.5%, and 90% of pairs fall below 10%. By the more forgiving overlap-coefficient measure (which ignores how much larger the category's expert set is), the picture improves but is still modest: mean 15.2%, median 10.0%.
 

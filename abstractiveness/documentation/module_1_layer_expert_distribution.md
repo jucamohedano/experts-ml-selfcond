@@ -6,7 +6,7 @@ Are expert allocations concentrated in a subset of model layers rather than spre
 
 ## Analysis
 
-Notation. Let $\mathcal{C}$ be the set of analyzed items (concepts and category labels), partitioned by abstraction level into $\mathcal{C}_1$ (broad categories) and $\mathcal{C}_2$ (specific concepts). Let $L$ be the number of model layers, 48 for GPT-2 (12 blocks × 4 projections) and 196 for Qwen3-1.7B (28 blocks × 7 projections), where the layer label encodes its position as `{layer_idx}.L.{block}.{sublayer}`, e.g. `5.L.0.mlp.gate_proj`. $E_c$ is the set of expert units retained for item $c$ after AP filtering, $n_c = |E_c|$ its expert count, and $N_{c\ell}$ the number of expert rows of item $c$ in layer $\ell$. Module 1 is the only module that sees the **full** expert table: when a sublayer filter is configured (see subchapter 1.7), it computes the whole-model views and the sublayer ranking on everything, and hands the sublayer-restricted table to modules 2–7.
+Notation. Let $\mathcal{C}$ be the set of analyzed items (concepts and category labels), partitioned by abstraction level into $\mathcal{C}_1$ (broad categories) and $\mathcal{C}_2$ (specific concepts). Let $L$ be the number of model layers, 48 for GPT-2 (12 blocks × 4 projections) and 196 for Qwen3-1.7B (28 blocks × 7 projections), where the layer label encodes its position as `{layer_idx}.L.{block}.{sublayer}`, e.g. `5.L.0.mlp.gate_proj`. $E_c$ is the set of expert units retained for item $c$ after AP filtering, $n_c = |E_c|$ its expert count, and $N_{c\ell}$ the number of expert rows of item $c$ in layer $\ell$. Every module, this one included, runs once per **analysis scope**: first the whole model, then one scope per sublayer type. Subchapter 1.7 defines the scopes and the two layer axes they can be read on, and every other module doc refers back to it.
 
 ### 1.1 From responses to expert sets (data provenance)
 
@@ -30,7 +30,7 @@ and concatenates all words' surviving rows into the (concept, layer, unit) table
 
 $$n_c = \sum_{\ell=1}^{L} N_{c\ell} = |E_c|,$$
 
-i.e. the number of expert rows that survive the AP threshold for that item (computed on the analysis table, so it is restricted to the configured sublayer when the filter of subchapter 1.7 is active). Each count is then joined with the item's metadata, and the raw Wikipedia frequency $f_c$ is mapped to a logarithmic scale,
+i.e. the number of expert rows that survive the AP threshold for that item, counted within the current scope, so the whole-model scope reports the item's total across the network and each sublayer scope reports only that projection type's share of it. Each count is then joined with the item's metadata, and the raw Wikipedia frequency $f_c$ is mapped to a logarithmic scale,
 
 $$\tilde{f}_c = \log_{10} f_c, \qquad f_c > 0,$$
 
@@ -72,7 +72,7 @@ $$\mathrm{SE}(\hat{p}) = \sqrt{\frac{\hat{p}(1-\hat{p})}{n_c}},$$
 
 so e.g. a 10% layer share is measured to about ±0.6 pp at $n_c = 2{,}160$ but only to about ±6 pp at $n_c = 23$, an uncertainty as large as the value itself. An apparent shift in a layer's percentage between two low-count words (or between AP thresholds, which change $n_c$ drastically) is therefore greatly *amplified* by the small denominator and can be pure sampling noise rather than a real reallocation. This is why the raw counts are now written next to every percentage (the `expert_count` column below, and `total_expert_count` in subchapter 1.4): every reported share carries its scale, and shares backed by small counts should be read with proportionally wide error bars. The problem is most acute at strict AP thresholds, where many words drop to single-digit expert counts (see Results).
 
-**Generated data structures.** One CSV and one plot per item, under `per_concept/<concept>/` (restricted to the analysis sublayer when the filter is active):
+**Generated data structures.** One CSV and one plot per item, under `per_concept/<concept>/`. These are written for the analysis sublayer only, and only in the whole-model scope, for the volume reason given in subchapter 1.7:
 
 - `<concept>_data.csv` is the single row $P_{c\,\cdot}$ of the matrix paired with the matching row $N_{c\,\cdot}$ of the count matrix.
 
@@ -112,7 +112,7 @@ which rises from $\bar{P}^{(a)}_{1}$ to 100 across the depth axis and feeds the 
 
 **Generated data structures.** One CSV, since the plain bar chart that used to accompany it was retired and the cumulative plots of subchapter 1.5 now carry the same bars plus the cumulative curves:
 
-- `mean_expert_layer_distribution.csv`, in long format, sorted into two blocks by `abstraction_level` with layers in model order inside each block (so each block reads as a depth profile and its `cumulative_pct` ends at 100).
+- `mean_expert_layer_distribution{suffix}.csv`, in long format, sorted into two blocks by `abstraction_level` with layers in model order inside each block (so each block reads as a depth profile and its `cumulative_pct` ends at 100). `{suffix}` is `_by_block` or `_by_layer` in the whole-model scope and empty in a sublayer scope, per subchapter 1.7.
 
 | Column | Type | Symbol | Description |
 |--------|------|--------|-------------|
@@ -122,7 +122,7 @@ which rises from $\bar{P}^{(a)}_{1}$ to 100 across the depth axis and feeds the 
 | total_expert_count | int | $T^{(a)}_{\ell}$ | Raw number of that level's experts in that layer (scale reference). |
 | cumulative_pct | float | $C^{(a)}_{\ell}$ | Cumulative mean allocation up to this layer, in depth order, within the level. |
 
-Example (head of `AP_0.6/1_layer_expert_distribution/mean_expert_layer_distribution.csv` in `research_plots_qwen_richie_hsj_with_sublayer_analysis`):
+Example (head of `AP_0.6/1_layer_expert_distribution/mean_expert_layer_distribution_by_layer.csv`):
 
 | abstraction_level | layer_name | mean_expert_allocation_pct | total_expert_count | cumulative_pct |
 |---|---|---|---|---|
@@ -140,11 +140,12 @@ $$\ell^{(a)}_{50} = \min\{\ell : C^{(a)}_{\ell} \ge 50\}, \qquad \ell^{(a)}_{90}
 
 The *Pareto-sorted* view instead orders the layers of each level by descending $\bar{P}^{(a)}_{\ell}$ and accumulates in that order, which answers "how many layers hold the bulk of the mass" independent of where they sit in the network: the milestones are the smallest $k$ such that the top-$k$ layers hold 50% (resp. 90%) of the total mass. The two views are deliberately different summaries, since a distribution can be very concentrated (small $k_{50}$) while reaching depth-ordered 50% late, if its dominant layers sit deep in the network.
 
-**Generated data structures.** No new CSVs, since both plots are drawn from `mean_expert_layer_distribution.csv`. Four plots:
+**Generated data structures.** No new CSVs, since both plots are drawn from `mean_expert_layer_distribution*.csv`. Two plots per layer-axis variant (subchapter 1.7), so two in a sublayer scope and four in the whole-model scope:
 
-- `mean_expert_layer_distribution_cumulative.png`: depth-ordered bars ($\bar{P}^{(a)}_{\ell}$, both abstraction levels side by side, left y-axis) with each level's cumulative curve $C^{(a)}_{\ell}$ on a secondary 0–100% axis. The 50% and 90% crossings are flagged with diamond markers, dotted projection lines onto both axes, and legend labels naming the crossing layers.
-- `mean_expert_layer_distribution_cumulative_sorted.png`: the Pareto view, one panel per abstraction level (the sort order differs between levels, so they cannot share an x-axis). Bars are the sorted $\bar{P}^{(a)}_{\ell}$, the line is the cumulative mass recomputed in sorted order, diamonds mark the top-$k_{50}$/top-$k_{90}$ milestones and the panel title states them (e.g. "top 8 layers hold 50% of the mass").
-- `{sublayer}_mean_expert_layer_distribution_cumulative.png` and `{sublayer}_mean_expert_layer_distribution_cumulative_sorted.png`: the same two compositions recomputed on the *focus sublayer* only, meaning the configured analysis sublayer (subchapter 1.7), or, when no filter is set, the sublayer that wins the level-2 AUC ranking of subchapter 1.6, with each concept's percentages renormalized within that sublayer's layers.
+- `mean_expert_layer_distribution_cumulative{suffix}.png`: depth-ordered bars ($\bar{P}^{(a)}_{\ell}$, both abstraction levels side by side, left y-axis) with each level's cumulative curve $C^{(a)}_{\ell}$ on a secondary 0–100% axis. The 50% and 90% crossings are flagged with diamond markers, dotted projection lines onto both axes, and legend labels naming the crossing layers.
+- `mean_expert_layer_distribution_cumulative_sorted{suffix}.png`: the Pareto view, one panel per abstraction level (the sort order differs between levels, so they cannot share an x-axis). Bars are the sorted $\bar{P}^{(a)}_{\ell}$, the line is the cumulative mass recomputed in sorted order, diamonds mark the top-$k_{50}$/top-$k_{90}$ milestones and the panel title states them (e.g. "top 8 layers hold 50% of the mass").
+
+`{suffix}` is `_by_block` or `_by_layer` in the whole-model scope and empty in a sublayer scope. Within a sublayer scope each concept's percentages are renormalized to sum to 100 *within* that sublayer's layers, so the profiles describe where inside the projection type the experts sit, not how much of the model's total mass the type holds, which is `share_of_all_experts_pct` in subchapter 1.6.
 
 ### 1.6 Sublayer informativeness (category alignment and depth smoothness)
 
@@ -193,11 +194,32 @@ Example (level-2 block of `AP_0.6/1_layer_expert_distribution/sublayer_informati
 | 2 | self_attn.q_proj | 0.452 | 0.698 | 0.304 | 0.0001 | 4.13 | 17122 |
 | 2 | mlp.down_proj | 0.785 | 0.626 | 0.168 | 0.0001 | 8.24 | 34118 |
 
-### 1.7 Per-sublayer distribution files and the analysis handoff
+### 1.7 Analysis scopes and the two layer axes
 
-**Mechanics.** For every sublayer type, the level-mean distribution of subchapter 1.4 is recomputed on that sublayer's layers only, with each concept's percentages renormalized to sum to 100 *within* the sublayer (so the profiles describe where inside the projection type the experts sit, not how much of the model's total mass the type holds, which is `share_of_all_experts_pct` in 1.6). The configured analysis sublayer's CSV (`{sublayer}_mean_expert_layer_distribution.csv`) is written into the module folder itself (its plots are the focus cumulative plots of 1.5), and every other sublayer's CSV and bar chart go into the `sublayers_distribution/` subfolder, so the main folder stays focused on the analysis sublayer while the alternatives remain inspectable.
+This subchapter defines the machinery every module shares. The other module docs refer back to it rather than restating it.
 
-**The handoff.** Each model configuration in the executor sets a `sublayer_filter`, namely `mlp.c_fc` for GPT-2 and `mlp.gate_proj` for Qwen3, in both cases the sublayer that wins the level-2 AUC ranking of subchapter 1.6 for that architecture (see Results). Module 1 computes the whole-model views (1.4's CSV, 1.5's unprefixed plots, 1.6's ranking, 1.7's per-sublayer files) on the full expert table, restricts 1.2's counts, 1.3's per-concept files, and 1.5's focus plots to the filtered table, and returns that filtered table as the expert data that modules 2–7 consume. Setting the filter to `None` reproduces the previous whole-model behavior end to end. Note that under the filter, retained `layer_idx` values are non-contiguous by design (e.g. 5, 12, 19, … for `mlp.gate_proj`), and layers keep their absolute whole-model indices so that depth statements remain comparable across analyses.
+**Scopes.** Each module computes its analysis once on the entire model and once per sublayer type $s$, that is on the restricted expert sets $E_c^{(s)}$. The whole-model scope writes into the module's own folder, so the big picture is what a reader sees first, and each sublayer scope writes into `<module>/sublayers/<rank>_<sublayer>/`. The rank is the sublayer's position by expert count, computed once at the most lenient AP threshold of the sweep and cached in `results/<output_subdir>/sublayer_rank.csv`. Freezing it there rather than recomputing per threshold means a given prefix names the same sublayer in every `AP_*` folder, so paths stay comparable across the sweep, which matters because stricter thresholds thin the sublayers unevenly and would otherwise reshuffle the prefixes. A sublayer left with no experts at a strict threshold is skipped with a warning instead of producing an empty folder. Within a sublayer scope the retained `layer_idx` values are non-contiguous by design (5, 12, 19, and so on for `mlp.gate_proj`) and layers keep their absolute whole-model indices, so depth statements stay comparable across scopes.
+
+**The two layer axes.** Analyses divide into two kinds, and only one of them is affected. *Set-based* analyses (module 3, module 5, module 7's global prototype, every Jaccard computation, and subchapter 1.6 here) treat $E_c$ as an unordered set of $(\ell, u)$ pairs, so layer order never enters and the whole-model scope needs no special handling. *Order-based* analyses (subchapters 1.4 and 1.5, module 2's descriptors, module 6, module 7's per-layer prototypes) read $\ell$ as depth, and there the whole-model layer index is not a depth coordinate. Layers are numbered
+
+$$\ell = b \cdot S + s + 1,$$
+
+with $b$ the block, $S$ the number of sublayers per block, and $s$ the sublayer's position inside the block, so on Qwen3 indices 1 to 7 all belong to block 0. Adjacent indices are therefore different projection types of the *same* block, not different depths. Geary's C, which differences adjacent indices, then measures the alternation between projection types rather than depth smoothness, and the peak layer $\arg\max_\ell \bar{P}_\ell$ returns whichever sublayer is densest for nearly every word. Measured on GPT-2 at AP 0.6, the flat whole-model axis gives a mean per-concept Geary's C of 1.036, which is exactly the value meaning *no spatial structure at all*, and 68% of concepts peak in an `mlp.c_fc` layer.
+
+The whole-model scope therefore produces every order-based output twice:
+
+- **`_by_block`** (canonical): the sublayers within each block are summed into one bin, $N_{cb} = \sum_{s} N_{c, bS+s+1}$, giving $B$ bins (12 for GPT-2, 28 for Qwen3) that carry the model's full expert mass on a genuine depth axis. The same GPT-2 run gives mean Geary's C 0.361 here. This is the variant downstream modules consume.
+- **`_by_layer`**: the flat axis at full resolution ($L$ = 48 or 196 bins), kept because it is the only view that separates projection types, with the caveat above attached to any depth reading of it.
+
+A sublayer scope holds exactly one layer per block, so block aggregation would be an identity relabel there and only one variant is written, with no suffix.
+
+**Whole-model-only outputs.** Two things are not replicated per scope. `sublayer_informativeness.csv` (subchapter 1.6) is a cross-sublayer table by construction, so it has one natural home at the module's top level. The per-concept files of subchapter 1.3 stay restricted to the configured analysis sublayer, `mlp.c_fc` for GPT-2 and `mlp.gate_proj` for Qwen3, in both cases the winner of the level-2 AUC ranking for that architecture: one plot per concept per sublayer per threshold would be 204 × 7 × 5 figures on Qwen3, and this is already the slowest step in the pipeline.
+
+**Cross-scope comparison.** Each module writes `sublayer_comparison.csv` and `sublayer_comparison.png` at its top level, one row per scope (whole model first) with that module's headline metrics, `n_experts` on every row so each percentage or correlation is read against the mass it rests on. These are the readable surface of the sweep, and the per-scope folders are the evidence behind them. Module 1's row carries the mean expert count per word at each abstraction level, alongside the deeper per-sublayer ranking in `sublayer_informativeness.csv`. Because the block axis puts one bin per block and a sublayer scope holds exactly one layer per block, all scopes in a comparison table share the same bin count, so bin-count-sensitive quantities such as Shannon entropy are on a common scale across rows.
+
+**How to read these tables, and the one thing they do not control for.** Every scope-level metric here is confounded with expert density, because sublayers differ enormously in how many experts they hold (on GPT-2 at AP 0.6, `mlp.c_fc` has 40,564 expert rows against `mlp.c_proj`'s 5,271, a factor of 7.7). Measured on that run, the cross-sublayer rankings produced by module 1's `roc_auc`, module 5's category contrast, and module 8's raw $\rho$ are *all* Spearman +1.00 with each other **and with the raw expert count**, so nothing in those four rankings distinguishes "this projection type carries more category structure" from "this projection type simply holds more experts". Module 8 is the only place that controls for it, by recomputing $\rho$ on a count-matched top-$k$ expert set, and doing so **re-ranks the sublayers**: `attn.c_proj` goes from third on raw $\rho$ (0.313) to first on the count-matched value (0.275), ahead of `mlp.c_fc` (0.486 raw, 0.189 matched) and `attn.c_attn` (0.392 raw, 0.190 matched). Read the comparison tables of modules 1 to 7 as descriptions of what each scope's expert set actually looks like, which is what they are, and read `8_embedding_rsa/sublayer_comparison.csv` for the density-controlled ranking. Extending count-matching to the other modules is an open item.
+
+The same confound explains the sparse-scope readings that would otherwise look like findings. `attn.c_proj` and `mlp.c_proj` carry roughly 31 and 26 experts per word, so their layer distributions are sparse, which mechanically depresses Shannon entropy (module 2 reports 1.94 and 1.33 bits for concepts, against about 3.1 in the dense scopes) and mechanically inflates Jensen-Shannon divergence (module 6 reports 0.36 and 0.33, against 0.09 in `mlp.c_fc`). Module 4's `shannon_entropy_vs_expert_count` panel measures this relationship directly, at $r \approx 0.6$ to $0.7$ in every scope, and subchapter 1.3's small-denominator caveat is the same point at the level of a single layer share.
 
 ## Results
 

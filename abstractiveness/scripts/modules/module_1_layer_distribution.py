@@ -1,16 +1,20 @@
 """
 Module 1: Expert layer distributions.
 
+Runs once per analysis scope (whole model, then one scope per sublayer).
+
 Pipeline order (mirrored by execute_module_1_layer_expert_distribution at the bottom):
   1. save_expert_counts_metadata        -- per-concept expert counts + metadata CSV
   2. compute_layer_distributions        -- count/percentage matrices, cumulative column
-  3. plot_global_distribution           -- global per-layer bar chart
-  4. compute_sublayer_informativeness   -- (level x sublayer) ranking: category-
-                                           alignment AUC + Mantel p, Geary's C, shares
-  5. plot_cumulative_layer_distribution(+_sorted) -- cumulative-mass plots for the
-                                           entire model and the most informative sublayer
-  6. plot_per_sublayer_distributions    -- one distribution plot + CSV per sublayer type
-  7. plot_per_concept_distributions     -- one distribution plot + CSV per concept
+  3. plot_global_distribution           -- layer distribution CSV for the scope
+  4. plot_cumulative_layer_distribution(+_sorted) -- cumulative-mass plots, once per
+                                           layer-axis variant (block and flat)
+  5. compute_sublayer_informativeness   -- (level x sublayer) ranking: category-
+                                           alignment AUC + Mantel p, Geary's C, shares.
+                                           Whole-model scope only, it IS the cross-
+                                           sublayer table
+  6. plot_per_concept_distributions     -- one distribution plot + CSV per concept,
+                                           analysis sublayer only (see the entry point)
 """
 import logging
 import matplotlib.pyplot as plt
@@ -18,11 +22,20 @@ import pandas as pd
 import numpy as np
 import seaborn as sns
 from scipy import stats
-from utils.helpers import (save_dataframe, gearys_c, filter_expert_data_to_sublayer,
-                           pair_similarity_vector)
+from utils.helpers import (save_dataframe, gearys_c, pair_similarity_vector,
+                           category_alignment_metrics, axis_variants, scope_out_dir,
+                           scope_summary_row)
 from utils.plot_helpers import _plot_bar_with_leaders, apply_rotated_leader_labels, fig_width_for
 
 log = logging.getLogger(__name__)
+
+# Headline metrics for the cross-scope sublayer_comparison table. The deeper per-sublayer
+# ranking lives in sublayer_informativeness.csv, which this table does not duplicate.
+SUMMARY_LABELS = {
+    "n_experts": "Expert rows in scope",
+    "mean_expert_count_concepts": "Mean experts per concept",
+    "mean_expert_count_categories": "Mean experts per category label",
+}
 
 # Define a high-contrast color palette for the different abstraction levels
 ABSTRACTION_COLORS = {1: "#003f5c", 2: "#ffa600"}
@@ -106,13 +119,13 @@ def compute_layer_distributions(expert_allocation_df: pd.DataFrame) -> tuple[pd.
 # 2. Global distribution and cumulative-mass plots
 # ---------------------------------------------------------------------------
 
-def plot_global_distribution(global_layer_distribution_df: pd.DataFrame, dist_dir) -> None:
+def plot_global_distribution(global_layer_distribution_df: pd.DataFrame, dist_dir, suffix: str = "") -> None:
     """Save the global layer distribution CSV. (The plain bar chart was retired: the
     cumulative plots carry the same bars plus the cumulative-mass curves.)"""
-    save_dataframe(global_layer_distribution_df, dist_dir / "mean_expert_layer_distribution.csv")
+    save_dataframe(global_layer_distribution_df, dist_dir / f"mean_expert_layer_distribution{suffix}.csv")
 
 def plot_cumulative_layer_distribution(global_layer_dist: pd.DataFrame, dist_dir,
-                                       filename_prefix: str = "", title_suffix: str = "") -> None:
+                                       suffix: str = "", title_suffix: str = "") -> None:
     """
     Depth-ordered bars (both abstraction levels side by side, as in the main plot) with
     each level's cumulative expert mass drawn as a line on a secondary 0-100% axis --
@@ -161,13 +174,13 @@ def plot_cumulative_layer_distribution(global_layer_dist: pd.DataFrame, dist_dir
 
     ax1.set_title(f"Mean Expert Distribution with Cumulative Mass{title_suffix}", fontsize=18, pad=15)
     plt.tight_layout()
-    plt.savefig(dist_dir / f"{filename_prefix}mean_expert_layer_distribution_cumulative.png",
+    plt.savefig(dist_dir / f"mean_expert_layer_distribution_cumulative{suffix}.png",
                 dpi=300, bbox_inches="tight")
     plt.close(fig)
 
 
 def plot_cumulative_layer_distribution_sorted(global_layer_dist: pd.DataFrame, dist_dir,
-                                              filename_prefix: str = "", title_suffix: str = "") -> None:
+                                              suffix: str = "", title_suffix: str = "") -> None:
     """
     Pareto view: layers sorted by descending expert mass, one panel per abstraction
     level (the sort order differs between levels, so they cannot share an x-axis).
@@ -221,7 +234,7 @@ def plot_cumulative_layer_distribution_sorted(global_layer_dist: pd.DataFrame, d
     axes[-1].set_xlabel("Model Layer (descending expert mass)", fontsize=14)
     fig.suptitle(f"Cumulative Expert Mass Concentration{title_suffix}", fontsize=18, y=1.0)
     plt.tight_layout()
-    plt.savefig(dist_dir / f"{filename_prefix}mean_expert_layer_distribution_cumulative_sorted.png",
+    plt.savefig(dist_dir / f"mean_expert_layer_distribution_cumulative_sorted{suffix}.png",
                 dpi=300, bbox_inches="tight")
     plt.close(fig)
 
@@ -229,69 +242,6 @@ def plot_cumulative_layer_distribution_sorted(global_layer_dist: pd.DataFrame, d
 # ---------------------------------------------------------------------------
 # 3. Sublayer informativeness (category alignment + Geary's C)
 # ---------------------------------------------------------------------------
-
-def _category_alignment_metrics(pair_similarity: np.ndarray, concept_categories: np.ndarray,
-                                n_permutations: int, rng: np.random.Generator) -> dict:
-    """
-    How well expert-set similarity tracks category membership, over all concept pairs.
-
-    roc_auc (primary): P(random same-category pair is more similar than a random
-    different-category pair) -- rank-based (equals Mann-Whitney U / (n1*n2)), so immune
-    to the same/different pair imbalance and to the skewed shape of Jaccard values.
-    Computed via the rank-sum identity with average ranks for ties (identical to
-    sklearn's roc_auc_score); ranking once and re-summing per shuffle is what keeps
-    9999 permutations cheap.
-    category_alignment_r (companion): Pearson correlation between the same-category
-    indicator (1 if a pair shares a category, 0 otherwise) and pair_similarity itself,
-    r = corr(same, pair_similarity) in [-1, 1], called point-biserial because one of
-    the two inputs is binary. Positive r means same-category pairs run more similar on
-    average, and r^2 is the fraction of pair_similarity's variance explained by category
-    membership alone (the RSA-style linear reading of categorical-model alignment).
-    Unlike the rank-based AUC, r assumes a roughly linear relationship, so a skewed
-    similarity distribution or a few extreme pairs can pull r away from what the AUC's
-    ranking shows, which is why the two are read together rather than interchangeably.
-    mantel_p: permutation p-value for the AUC. Pairs are not independent observations
-    (each concept appears in n-1 pairs), so category labels are shuffled across
-    CONCEPTS (never across pairs), the indicator rebuilt, and the AUC recomputed --
-    preserving the similarity geometry and category sizes while breaking only the
-    concept-to-category correspondence under test. Smallest reportable value is
-    1/(n_permutations + 1).
-
-    Degenerate sublayers whose pair similarities are all identical (e.g. at strict AP
-    thresholds no concept pair shares any expert) short-circuit to AUC=0.5, r=NaN,
-    p=1.0: with zero similarity variation there is nothing to align, and pearsonr on a
-    constant vector is undefined (would only emit a ConstantInputWarning).
-    """
-    n = len(concept_categories)
-    iu = np.triu_indices(n, k=1)
-    same = (concept_categories[:, None] == concept_categories[None, :])[iu]
-
-    if pair_similarity.min() == pair_similarity.max():
-        return {"roc_auc": 0.5, "category_alignment_r": np.nan, "mantel_p": 1.0}
-
-    # Category sizes (hence the number of same-category pairs n1) are invariant under
-    # label permutation, so ranks and the U-statistic constants are precomputed once.
-    ranks = stats.rankdata(pair_similarity)
-    n1 = int(same.sum())
-    n0 = len(same) - n1
-    rank_offset = n1 * (n1 + 1) / 2
-
-    def rank_auc(same_mask):
-        return (ranks[same_mask].sum() - rank_offset) / (n1 * n0)
-
-    auc = rank_auc(same)
-    r, _ = stats.pearsonr(same.astype(float), pair_similarity)
-
-    n_at_least = 0
-    for _ in range(n_permutations):
-        permuted = rng.permutation(concept_categories)
-        same_perm = (permuted[:, None] == permuted[None, :])[iu]
-        if rank_auc(same_perm) >= auc:
-            n_at_least += 1
-    mantel_p = (1 + n_at_least) / (1 + n_permutations)
-
-    return {"roc_auc": auc, "category_alignment_r": r, "mantel_p": mantel_p}
-
 
 def compute_sublayer_informativeness(expert_allocation_df: pd.DataFrame, concept_metadata: pd.DataFrame,
                                      dist_dir, n_permutations: int = 9999, seed: int = 42) -> pd.DataFrame:
@@ -329,7 +279,7 @@ def compute_sublayer_informativeness(expert_allocation_df: pd.DataFrame, concept
     for sublayer, sub_df in df.groupby("sublayer", sort=False):
         # Category alignment of the sublayer's expert sets (level-2 concepts only).
         pair_similarity = pair_similarity_vector(sub_df, concepts)
-        alignment = _category_alignment_metrics(pair_similarity, concept_categories, n_permutations, rng)
+        alignment = category_alignment_metrics(pair_similarity, concept_categories, n_permutations, rng)
 
         # Per-word Geary's C over this sublayer's layers in depth order (pivot columns
         # are layer_idx sorted ascending; gearys_c is scale-invariant, so raw counts
@@ -366,46 +316,6 @@ def compute_sublayer_informativeness(expert_allocation_df: pd.DataFrame, concept
 # 4. Per-sublayer and per-concept distribution plots
 # ---------------------------------------------------------------------------
 
-def plot_per_sublayer_distributions(expert_allocation_df: pd.DataFrame, dist_dir, chosen_sublayer: str = None) -> None:
-    """
-    Generate one mean expert distribution CSV (+ plot) per sublayer type. The chosen
-    sublayer's CSV goes into the main dist_dir (its plot is covered by the cumulative
-    variants there); every other sublayer's CSV and plot go into the
-    sublayers_distribution/ subfolder so the main folder stays focused on the analysis
-    sublayer. With no chosen sublayer, everything lands in the subfolder.
-    The sublayer type is parsed from layer_name ("{idx}.L.{block}.{sublayer}"), so this
-    works for any architecture. Each concept's percentages are renormalized WITHIN the
-    sublayer's layers (each row sums to 100% across that projection type).
-    """
-    others_dir = dist_dir / "sublayers_distribution"
-    others_dir.mkdir(parents=True, exist_ok=True)
-    sublayer_of = expert_allocation_df['layer_name'].astype(str).str.extract(r'^\d+\.L\.\d+\.(.+)$')[0]
-
-    # .unique() follows row order; the df is sorted by layer_idx, so sublayers come out in
-    # forward-pass order (e.g. q_proj, k_proj, ..., down_proj).
-    for sublayer in sublayer_of.dropna().unique():
-        sub_df = expert_allocation_df[sublayer_of == sublayer].copy()
-        # Keep only this sublayer's layers as categories so the x-axis has one bar per block
-        # instead of every model layer.
-        sub_df['layer_name'] = sub_df['layer_name'].cat.remove_unused_categories()
-
-        _, _, sublayer_global_dist, _ = compute_layer_distributions(sub_df)
-        is_chosen = sublayer == chosen_sublayer
-        target_dir = dist_dir if is_chosen else others_dir
-        save_dataframe(sublayer_global_dist, target_dir / f"{sublayer}_mean_expert_layer_distribution.csv")
-        if is_chosen:
-            continue  # the chosen sublayer's plots are the cumulative ones in dist_dir
-
-        n_layers = sublayer_global_dist['layer_name'].nunique()
-        _plot_bar_with_leaders(
-            plot_dataframe=sublayer_global_dist, x_col="layer_name", y_col="mean_expert_allocation_pct",
-            title=f"Mean Expert Distribution across '{sublayer}' layers",
-            x_label="Model Layer", y_label="Average % of Experts (within sublayer type)",
-            hue="abstraction_level", palette=ABSTRACTION_COLORS,
-            out_path=others_dir / f"{sublayer}_mean_expert_layer_distribution.png",
-            figsize=(fig_width_for(n_layers, 0.28, min_w=16.0), 10.4), linewidth=0.5, show_x_ticks=True
-        )
-
 def plot_per_concept_distributions(concept_distribution_matrix: pd.DataFrame, concept_count_matrix: pd.DataFrame,
                                    expert_counts: pd.Series, dist_dir) -> None:
     """Generate individual distribution CSVs and charts for each concept, organized by abstraction level.
@@ -438,59 +348,58 @@ def plot_per_concept_distributions(concept_distribution_matrix: pd.DataFrame, co
 # 5. Module entry point
 # ---------------------------------------------------------------------------
 
-def execute_module_1_layer_expert_distribution(formatted_expert_allocation_df: pd.DataFrame, concept_metadata: pd.DataFrame,
-                                               dist_dir, sublayer_filter: str = None) -> tuple[pd.DataFrame, pd.DataFrame]:
+def _summarize_expert_counts(merged_meta: pd.DataFrame) -> dict:
+    """Mean expert count per word at each abstraction level, the scale every share rests on."""
+    if merged_meta.empty or 'abstraction_level' not in merged_meta.columns:
+        return {"mean_expert_count_categories": np.nan, "mean_expert_count_concepts": np.nan}
+    by_level = merged_meta.groupby('abstraction_level')['expert_count'].mean()
+    return {"mean_expert_count_categories": by_level.get(1, np.nan),
+            "mean_expert_count_concepts": by_level.get(2, np.nan)}
+
+
+def execute_module_1_layer_expert_distribution(scope, concept_metadata: pd.DataFrame, dist_dir,
+                                               analysis_sublayer_df: pd.DataFrame = None) -> tuple[pd.DataFrame, dict]:
     """
     Execute Module 1: Analyze expert layer distributions across concepts and abstraction levels.
 
-    Module 1 is the only module that sees the FULL expert data: the whole-model
-    distribution CSV + cumulative plots and the sublayer-informativeness ranking are
-    computed on everything (the ranking is what justifies the sublayer choice). When
-    sublayer_filter is set, everything meant for downstream analysis is restricted to
-    that sublayer: the expert-counts metadata, the per-concept plots, the focus
-    cumulative plots, and the returned expert DataFrame. Non-chosen sublayers'
-    distribution files land in sublayers_distribution/.
+    Per scope this writes the expert-count metadata table and the layer-distribution CSV
+    plus cumulative-mass plots. The distribution reads the layer axis as depth, so the
+    whole-model scope produces both entries of axis_variants: "_by_block", where the
+    sublayers of each transformer block are summed into one depth bin, and "_by_layer",
+    the flat interleaved axis at full resolution.
 
-    Returns (merged_meta, analysis_expert_df): the expert-count metadata table and the
-    (possibly sublayer-filtered) expert DataFrame that modules 2+ should consume.
+    Two outputs stay whole-model only, because replicating them per sublayer would be
+    either meaningless or ruinously slow:
+      sublayer_informativeness.csv is a cross-sublayer ranking by construction, so it has
+        one natural home at the module's top level.
+      per_concept/ is capped at the analysis sublayer passed in as analysis_sublayer_df.
+        One plot per concept per sublayer per AP threshold would be 204 x 7 x 5 figures
+        for Qwen3, which is both unreadable and the single slowest step in the pipeline.
+
+    Returns (merged_meta, summary_row): the expert-count metadata table that module 4
+    consumes for this scope, and this module's sublayer_comparison row.
     """
-    analysis_df = filter_expert_data_to_sublayer(formatted_expert_allocation_df, sublayer_filter)
-    if sublayer_filter:
-        log.info(f"  Sublayer filter active: '{sublayer_filter}' "
-                 f"({len(analysis_df)} of {len(formatted_expert_allocation_df)} experts retained for modules 2+).")
+    out_dir = scope_out_dir(dist_dir, scope)
 
-    log.info("  Generating combined metadata counts...")
-    merged_meta = save_expert_counts_metadata(analysis_df, concept_metadata, dist_dir)
+    log.info(f"  [{scope.label}] Generating combined metadata counts...")
+    merged_meta = save_expert_counts_metadata(scope.expert_df, concept_metadata, out_dir)
 
-    log.info("  Computing layer distribution matrices...")
-    _, _, global_dist, _ = compute_layer_distributions(formatted_expert_allocation_df)
-    plot_global_distribution(global_dist, dist_dir)
+    for suffix, axis_df, axis_label in axis_variants(scope):
+        log.info(f"  [{scope.label} / {axis_label}] Computing layer distribution matrices...")
+        _, _, global_dist, _ = compute_layer_distributions(axis_df)
+        plot_global_distribution(global_dist, out_dir, suffix)
+        title_suffix = f" — {scope.label}, {axis_label}"
+        plot_cumulative_layer_distribution(global_dist, out_dir, suffix, title_suffix)
+        plot_cumulative_layer_distribution_sorted(global_dist, out_dir, suffix, title_suffix)
 
-    log.info("  Computing sublayer informativeness (AUC + Mantel permutation)...")
-    informativeness = compute_sublayer_informativeness(formatted_expert_allocation_df, concept_metadata, dist_dir)
-    log.info("  Sublayer ranking by category alignment:\n" + informativeness.to_string(index=False))
+    if scope.is_whole_model:
+        log.info("  Computing sublayer informativeness (AUC + Mantel permutation)...")
+        informativeness = compute_sublayer_informativeness(scope.expert_df, concept_metadata, out_dir)
+        log.info("  Sublayer ranking by category alignment:\n" + informativeness.to_string(index=False))
 
-    log.info("  Generating cumulative distribution plots (entire distribution + focus sublayer)...")
-    plot_cumulative_layer_distribution(global_dist, dist_dir)
-    plot_cumulative_layer_distribution_sorted(global_dist, dist_dir)
-    # Focus sublayer: the configured one, falling back to the level-2 AUC winner.
-    if sublayer_filter:
-        focus_sublayer, focus_df = sublayer_filter, analysis_df
-    else:
-        level2_ranking = informativeness[informativeness["abstraction_level"] == 2]
-        focus_sublayer = level2_ranking.sort_values("roc_auc", ascending=False).iloc[0]["sublayer"]
-        focus_df = filter_expert_data_to_sublayer(formatted_expert_allocation_df, focus_sublayer)
-    _, _, focus_global_dist, _ = compute_layer_distributions(focus_df)
-    plot_cumulative_layer_distribution(focus_global_dist, dist_dir,
-                                       filename_prefix=f"{focus_sublayer}_", title_suffix=f" — '{focus_sublayer}' layers only")
-    plot_cumulative_layer_distribution_sorted(focus_global_dist, dist_dir,
-                                              filename_prefix=f"{focus_sublayer}_", title_suffix=f" — '{focus_sublayer}' layers only")
+        if analysis_sublayer_df is not None and not analysis_sublayer_df.empty:
+            log.info("  Generating per-concept expert layer distribution plots (analysis sublayer only)...")
+            concept_matrix, concept_counts_matrix, _, expert_counts = compute_layer_distributions(analysis_sublayer_df)
+            plot_per_concept_distributions(concept_matrix, concept_counts_matrix, expert_counts, out_dir)
 
-    log.info("  Generating per-sublayer-type expert layer distribution files...")
-    plot_per_sublayer_distributions(formatted_expert_allocation_df, dist_dir, chosen_sublayer=sublayer_filter)
-
-    log.info("  Generating per-concept expert layer distribution plots...")
-    concept_matrix, concept_counts_matrix, _, expert_counts = compute_layer_distributions(analysis_df)
-    plot_per_concept_distributions(concept_matrix, concept_counts_matrix, expert_counts, dist_dir)
-
-    return merged_meta, analysis_df
+    return merged_meta, scope_summary_row(scope, **_summarize_expert_counts(merged_meta))

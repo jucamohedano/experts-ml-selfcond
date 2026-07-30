@@ -1,9 +1,10 @@
 import json
 import logging
 import pathlib
+from dataclasses import dataclass
 import numpy as np
 import pandas as pd
-from scipy import stats
+from scipy import sparse, stats
 
 log = logging.getLogger(__name__)
 formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
@@ -154,21 +155,304 @@ def filter_expert_data_to_sublayer(expert_allocation_df: pd.DataFrame, sublayer:
     return filtered
 
 
+# ---------------------------------------------------------------------------
+# Analysis scopes
+#
+# Every module runs its analysis once per scope: the whole model first, then one
+# scope per sublayer type. The whole-model scope writes to the module's own folder
+# so the big picture is what you see first; each sublayer scope writes to
+# <module>/sublayers/<rank>_<sublayer>/, where rank is that sublayer's position by
+# expert count. The rank is frozen at the most lenient AP threshold of the sweep so
+# a given prefix names the same sublayer in every AP_x folder of a run.
+# ---------------------------------------------------------------------------
+
+WHOLE_MODEL_SCOPE_KEY = "whole_model"
+
+
+@dataclass(frozen=True, eq=False)
+class AnalysisScope:
+    """
+    One unit of analysis: a slice of the expert data plus where its outputs belong.
+
+    key       : WHOLE_MODEL_SCOPE_KEY, or the sublayer type (e.g. "mlp.gate_proj")
+    label     : text for plot titles ("whole model" / the sublayer name)
+    dir_name  : sublayers/ subfolder name ("1_mlp.gate_proj"), None for the whole model
+    expert_df : the expert rows this scope analyzes
+    """
+    key: str
+    label: str
+    dir_name: str | None
+    is_whole_model: bool
+    expert_df: pd.DataFrame
+
+
+def sublayer_expert_counts(expert_allocation_df: pd.DataFrame) -> pd.Series:
+    """
+    Expert-row count per sublayer type, descending. Index is the sublayer name parsed
+    out of layer_name, so it reflects whatever sublayers the frame actually contains.
+    """
+    sublayer_of = expert_allocation_df['layer_name'].astype(str).str.extract(r'^\d+\.L\.\d+\.(.+)$')[0]
+    return sublayer_of.value_counts().sort_values(ascending=False)
+
+
+def load_or_build_sublayer_rank(rank_path: pathlib.Path, build_expert_df, reference_ap: float) -> pd.DataFrame:
+    """
+    Rank sublayer types by expert count, cached at rank_path across the whole AP sweep.
+
+    The ranking is computed once from the expert data at reference_ap (the most lenient
+    threshold, where every sublayer still has experts) and reused for every threshold,
+    so "1_mlp.gate_proj" names the same sublayer in AP_0.5 and in AP_0.9 and output
+    paths stay comparable across the sweep. Ranking per threshold instead would let a
+    sublayer drift between prefixes as stricter thresholds thin the sets unevenly.
+
+    build_expert_df is a zero-argument callable returning the reference expert frame; it
+    is only invoked when the cache is missing, since loading that frame costs about 40
+    seconds on Qwen3. Returns a DataFrame with rank, sublayer, n_experts, reference_ap.
+    """
+    if rank_path.exists():
+        return pd.read_csv(rank_path)
+
+    log.info(f"  Building sublayer rank from AP {reference_ap} expert counts (first run)...")
+    counts = sublayer_expert_counts(build_expert_df())
+    rank_df = pd.DataFrame({
+        "rank": range(1, len(counts) + 1),
+        "sublayer": counts.index,
+        "n_experts": counts.values,
+        "reference_ap": reference_ap,
+    })
+    save_dataframe(rank_df, rank_path)
+    return rank_df
+
+
+def build_analysis_scopes(full_expert_df: pd.DataFrame, sublayer_rank: pd.DataFrame) -> list:
+    """
+    Build the scope list every module iterates over: the whole model first, then one
+    scope per sublayer in rank order. Sublayers left with no experts at the current AP
+    threshold are skipped with a warning rather than producing empty output folders.
+    """
+    scopes = [AnalysisScope(key=WHOLE_MODEL_SCOPE_KEY, label="whole model", dir_name=None,
+                            is_whole_model=True, expert_df=full_expert_df)]
+    for _, row in sublayer_rank.sort_values("rank").iterrows():
+        sublayer = row["sublayer"]
+        scope_df = filter_expert_data_to_sublayer(full_expert_df, sublayer)
+        if scope_df.empty:
+            log.warning(f"  No experts in sublayer '{sublayer}' at this AP threshold, skipping its scope.")
+            continue
+        scopes.append(AnalysisScope(key=sublayer, label=sublayer,
+                                    dir_name=f"{int(row['rank'])}_{sublayer}",
+                                    is_whole_model=False, expert_df=scope_df))
+    return scopes
+
+
+def scope_out_dir(module_dir: pathlib.Path, scope: AnalysisScope) -> pathlib.Path:
+    """Output folder for one scope of one module, created on demand."""
+    out_dir = module_dir if scope.is_whole_model else module_dir / "sublayers" / scope.dir_name
+    out_dir.mkdir(parents=True, exist_ok=True)
+    return out_dir
+
+
+def scope_summary_row(scope: AnalysisScope, **metrics) -> dict:
+    """
+    One row of a module's sublayer_comparison table: the scope's identity followed by
+    that module's headline metrics. n_experts is carried on every row because every
+    percentage or correlation below it has to be read against the mass it rests on.
+    """
+    return {"scope": scope.label, "is_whole_model": scope.is_whole_model,
+            "n_experts": len(scope.expert_df), **metrics}
+
+
+def axis_variants(scope: AnalysisScope) -> list:
+    """
+    Layer-axis variants an order-based module should run for a given scope, as
+    (filename_suffix, expert_df, axis_label) tuples with the canonical variant first.
+
+    Modules split into two kinds. Set-based ones (3, 5, and module 7's global prototype)
+    read expert rows as an unordered set, so the layer axis never enters and they ignore
+    this helper. Order-based ones (1, 2, 6, 7's per-layer part) read layer_idx as depth,
+    and for those the whole-model scope is genuinely ambiguous: the flat axis carries
+    every layer at full resolution but interleaves sublayer types, while the block axis
+    carries the same expert mass on a real depth axis. Both are produced and both are
+    kept, suffixed "_by_layer" and "_by_block", with the block variant first because it
+    is the one downstream modules consume. A sublayer scope already holds exactly one
+    layer per block, so its two variants would be identical and only one is run.
+    """
+    if scope.is_whole_model:
+        return [("_by_block", to_block_axis(scope.expert_df), "block (depth) axis"),
+                ("_by_layer", scope.expert_df, "flat layer axis")]
+    return [("", scope.expert_df, "layer axis")]
+
+
+def to_block_axis(expert_allocation_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Re-key expert rows from the flat layer axis onto a block (depth) axis, summing the
+    sublayers within each transformer block into one bin.
+
+    build_layer_mapping_from_layers numbers layers as block * n_sublayers + sublayer
+    position, so on Qwen3 indices 1..7 are all block 0. Any descriptor that reads
+    layer_idx as depth therefore misreads that flat axis: gearys_c differences adjacent
+    indices, which on the flat axis compares q_proj against k_proj of the SAME block and
+    measures sublayer-type alternation rather than depth smoothness, while peak_layer
+    returns whichever sublayer is densest for nearly every word. Aggregating to blocks
+    gives a genuine depth axis carrying the full expert mass of the model, with one bin
+    per block (28 on Qwen3, 12 on GPT-2).
+
+    layer_idx becomes block + 1 and layer_name becomes "<block+1>.B.<block>", preserving
+    the leading-number-is-layer_idx convention that build_layer_probability_matrix parses.
+    Categories cover every block of the input's layer support, including blocks with no
+    experts at a strict threshold. Applying this to a single-sublayer frame is an identity
+    relabel, since such a frame already holds exactly one layer per block.
+    """
+    block_of_row = expert_allocation_df['layer_name'].astype(str).str.extract(r'^\d+\.L\.(\d+)\.')[0].astype(int)
+    support = sorted(pd.Series(expert_allocation_df['layer_name'].cat.categories)
+                     .astype(str).str.extract(r'^\d+\.L\.(\d+)\.')[0].astype(int).unique())
+
+    block_axis_df = expert_allocation_df.copy()
+    block_axis_df['layer_idx'] = block_of_row.to_numpy() + 1
+    block_axis_df['layer_name'] = pd.Categorical(
+        [f"{b + 1}.B.{b}" for b in block_of_row],
+        categories=[f"{b + 1}.B.{b}" for b in support], ordered=True)
+    return block_axis_df
+
+
+def expert_presence_matrix(expert_sets_df: pd.DataFrame, concepts: list) -> sparse.csr_matrix:
+    """
+    Binary concept-by-expert presence matrix, one row per entry of ``concepts`` in the
+    given order and one column per distinct (layer_idx, unit) pair present in
+    expert_sets_df. Concepts absent from the frame become all-zero rows, so the caller
+    always gets a matrix of exactly len(concepts) rows.
+
+    Sparse rather than a dense pivot_table because the expert space is the whole neuron
+    space: filtered to one sublayer it is already about 172k (layer_idx, unit) pairs on
+    Qwen3, and unfiltered it is closer to 400k, so a dense 204-by-400k float matrix costs
+    hundreds of megabytes to express data that is a fraction of a percent non-zero.
+
+    Experts are keyed on the (layer_idx, unit) PAIR because the raw `unit` column is only
+    the neuron index within a layer, so identical indices from different layers would
+    otherwise collapse into one column and inflate every intersection. Duplicate
+    (concept, layer_idx, unit) rows are collapsed to a single 1, matching the mean
+    aggregation of the pivot_table this replaces, so a repeated expertise row can never
+    count twice.
+    """
+    row_of = {concept: i for i, concept in enumerate(concepts)}
+    rows = expert_sets_df["concept"].map(row_of)
+    keep = rows.notna().to_numpy()
+
+    layer_idx = expert_sets_df.loc[keep, "layer_idx"].to_numpy(dtype=np.int64)
+    unit = expert_sets_df.loc[keep, "unit"].to_numpy(dtype=np.int64)
+    if len(layer_idx) == 0:
+        return sparse.csr_matrix((len(concepts), 0), dtype=np.int32)
+
+    # Fold the pair into one integer key before factorizing: both parts are non-negative
+    # ints, so multiplying the layer by (max unit + 1) keeps the mapping injective.
+    pair_codes = pd.factorize(layer_idx * (unit.max() + 1) + unit)[0]
+
+    presence = sparse.csr_matrix(
+        (np.ones(len(pair_codes), dtype=np.int32),
+         (rows.to_numpy()[keep].astype(np.int32), pair_codes)),
+        shape=(len(concepts), pair_codes.max() + 1), dtype=np.int32)
+    # COO-to-CSR sums duplicates, so flatten any resulting 2s back to a binary indicator.
+    presence.data[:] = 1
+    return presence
+
+
+def expert_set_overlap_matrices(expert_sets_df: pd.DataFrame, concepts: list) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Pairwise expert-set overlap for every concept pair, as three square (n, n) arrays
+    aligned with ``concepts``: (intersection, jaccard, overlap).
+
+    intersection holds raw shared-expert counts, with each concept's own set size on the
+    diagonal. jaccard is |A and B| / |A or B| and overlap is |A and B| / min(|A|, |B|),
+    both as fractions in [0, 1] (callers scale to percentages), and both defined as 0
+    when their denominator is 0 so a concept with no retained experts at a strict AP
+    threshold does not produce NaNs.
+    """
+    presence = expert_presence_matrix(expert_sets_df, concepts)
+    intersection = np.asarray((presence @ presence.T).todense(), dtype=np.float64)
+
+    sizes = np.asarray(presence.sum(axis=1)).ravel()
+    union = sizes[:, None] + sizes[None, :] - intersection
+    min_size = np.minimum(sizes[:, None], sizes[None, :])
+    with np.errstate(divide="ignore", invalid="ignore"):
+        jaccard = np.where(union > 0, intersection / union, 0.0)
+        overlap = np.where(min_size > 0, intersection / min_size, 0.0)
+    return intersection, jaccard, overlap
+
+
+def category_alignment_metrics(pair_similarity: np.ndarray, concept_categories: np.ndarray,
+                               n_permutations: int = 0, rng: np.random.Generator = None) -> dict:
+    """
+    How well expert-set similarity tracks category membership, over all concept pairs.
+
+    roc_auc (primary): P(random same-category pair is more similar than a random
+    different-category pair) -- rank-based (equals Mann-Whitney U / (n1*n2)), so immune
+    to the same/different pair imbalance and to the skewed shape of Jaccard values.
+    Computed via the rank-sum identity with average ranks for ties (identical to
+    sklearn's roc_auc_score); ranking once and re-summing per shuffle is what keeps
+    9999 permutations cheap.
+    category_alignment_r (companion): Pearson correlation between the same-category
+    indicator (1 if a pair shares a category, 0 otherwise) and pair_similarity itself,
+    r = corr(same, pair_similarity) in [-1, 1], called point-biserial because one of
+    the two inputs is binary. Positive r means same-category pairs run more similar on
+    average, and r^2 is the fraction of pair_similarity's variance explained by category
+    membership alone (the RSA-style linear reading of categorical-model alignment).
+    Unlike the rank-based AUC, r assumes a roughly linear relationship, so a skewed
+    similarity distribution or a few extreme pairs can pull r away from what the AUC's
+    ranking shows, which is why the two are read together rather than interchangeably.
+    mantel_p: permutation p-value for the AUC. Pairs are not independent observations
+    (each concept appears in n-1 pairs), so category labels are shuffled across
+    CONCEPTS (never across pairs), the indicator rebuilt, and the AUC recomputed --
+    preserving the similarity geometry and category sizes while breaking only the
+    concept-to-category correspondence under test. Smallest reportable value is
+    1/(n_permutations + 1). n_permutations=0 (the default) skips the test entirely and
+    returns NaN, for callers that want the AUC as a cheap descriptor rather than a
+    hypothesis test; module 1's informativeness table is the one place that pays for it.
+
+    Degenerate sublayers whose pair similarities are all identical (e.g. at strict AP
+    thresholds no concept pair shares any expert) short-circuit to AUC=0.5, r=NaN,
+    p=1.0: with zero similarity variation there is nothing to align, and pearsonr on a
+    constant vector is undefined (would only emit a ConstantInputWarning).
+    """
+    n = len(concept_categories)
+    iu = np.triu_indices(n, k=1)
+    same = (concept_categories[:, None] == concept_categories[None, :])[iu]
+
+    if pair_similarity.min() == pair_similarity.max():
+        return {"roc_auc": 0.5, "category_alignment_r": np.nan, "mantel_p": 1.0}
+
+    # Category sizes (hence the number of same-category pairs n1) are invariant under
+    # label permutation, so ranks and the U-statistic constants are precomputed once.
+    ranks = stats.rankdata(pair_similarity)
+    n1 = int(same.sum())
+    n0 = len(same) - n1
+    rank_offset = n1 * (n1 + 1) / 2
+
+    def rank_auc(same_mask):
+        return (ranks[same_mask].sum() - rank_offset) / (n1 * n0)
+
+    auc = rank_auc(same)
+    r, _ = stats.pearsonr(same.astype(float), pair_similarity)
+
+    if not n_permutations:
+        return {"roc_auc": auc, "category_alignment_r": r, "mantel_p": np.nan}
+
+    n_at_least = 0
+    for _ in range(n_permutations):
+        permuted = rng.permutation(concept_categories)
+        same_perm = (permuted[:, None] == permuted[None, :])[iu]
+        if rank_auc(same_perm) >= auc:
+            n_at_least += 1
+    mantel_p = (1 + n_at_least) / (1 + n_permutations)
+
+    return {"roc_auc": auc, "category_alignment_r": r, "mantel_p": mantel_p}
+
+
 def pair_similarity_vector(expert_sets_df: pd.DataFrame, concepts: list) -> np.ndarray:
     """
     Jaccard similarity of raw expert sets for every unordered pair of ``concepts``,
     as a flat vector aligned with np.triu_indices(len(concepts), k=1). Expert sets are
     binary membership keyed on (layer_idx, unit); no probability normalization.
     """
-    presence = expert_sets_df.assign(present=1).pivot_table(
-        index="concept", columns=["layer_idx", "unit"], values="present", fill_value=0)
-    A = presence.reindex(concepts, fill_value=0).values.astype(np.float32)
-
-    intersection = A @ A.T
-    sizes = A.sum(axis=1)
-    union = sizes[:, None] + sizes[None, :] - intersection
-    with np.errstate(divide="ignore", invalid="ignore"):
-        jaccard = np.where(union > 0, intersection / union, 0.0)
+    _, jaccard, _ = expert_set_overlap_matrices(expert_sets_df, concepts)
     return jaccard[np.triu_indices(len(concepts), k=1)]
 
 
@@ -179,10 +463,7 @@ def pair_shared_count_vector(expert_sets_df: pd.DataFrame, concepts: list) -> np
     set size, so it is the more interpretable x-axis for a per-pair scatter (Jaccard
     compresses most pairs toward zero regardless of how many experts they actually share).
     """
-    presence = expert_sets_df.assign(present=1).pivot_table(
-        index="concept", columns=["layer_idx", "unit"], values="present", fill_value=0)
-    A = presence.reindex(concepts, fill_value=0).values.astype(np.float32)
-    intersection = A @ A.T
+    intersection, _, _ = expert_set_overlap_matrices(expert_sets_df, concepts)
     return intersection[np.triu_indices(len(concepts), k=1)]
 
 

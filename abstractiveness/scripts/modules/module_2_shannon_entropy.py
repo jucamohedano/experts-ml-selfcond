@@ -21,10 +21,19 @@ from matplotlib.patches import Patch
 import seaborn as sns
 from scipy import stats
 from scipy.stats import entropy
-from utils.helpers import save_dataframe, build_layer_probability_matrix, gearys_c
+from utils.helpers import (save_dataframe, build_layer_probability_matrix, gearys_c,
+                           axis_variants, scope_out_dir, scope_summary_row)
 from utils.plot_helpers import _plot_bar_with_leaders, apply_rotated_leader_labels, fig_width_for, plot_comparison_violin
 
 log = logging.getLogger(__name__)
+
+# Headline metrics for the cross-scope sublayer_comparison table.
+SUMMARY_LABELS = {
+    "entropy_auc_categories_over_concepts": "AUC, label entropy over concept entropy",
+    "entropy_mean_categories": "Mean entropy, category labels (bits)",
+    "entropy_mean_concepts": "Mean entropy, concepts (bits)",
+    "gearys_c_mean_concepts": "Mean Geary's C, concepts",
+}
 
 LEVEL_PALETTE = {"Specific Concepts": "#D96A5B", "Broad Categories": "#4B5A6A"}
 # Below this peak-dominance gap (percentage points) a word's peak layer is treated as an
@@ -77,7 +86,8 @@ def layer_distribution_descriptors(probs, layer_indices, top_frac: float = 0.25)
     }
 
 
-def compute_shannon_entropy(expert_allocation_df: pd.DataFrame, concept_metadata: pd.DataFrame, shan_dir) -> tuple[pd.DataFrame, pd.DataFrame]:
+def compute_shannon_entropy(expert_allocation_df: pd.DataFrame, concept_metadata: pd.DataFrame, shan_dir,
+                            suffix: str = "") -> tuple[pd.DataFrame, pd.DataFrame]:
     """
     Compute the layer-distribution descriptors for every word and save two CSVs:
     shannon_entropy_concepts.csv (one row per word with experts) and
@@ -102,7 +112,7 @@ def compute_shannon_entropy(expert_allocation_df: pd.DataFrame, concept_metadata
             "experts_count": dist_matrix.loc[concept].sum(),
         })
     concept_entropy_df = pd.DataFrame(concept_results)
-    save_dataframe(concept_entropy_df, shan_dir / "shannon_entropy_concepts.csv")
+    save_dataframe(concept_entropy_df, shan_dir / f"shannon_entropy_concepts{suffix}.csv")
 
     # Per-category descriptors under two definitions: the label word itself, and the
     # average distribution of the category's member concepts.
@@ -143,7 +153,7 @@ def compute_shannon_entropy(expert_allocation_df: pd.DataFrame, concept_metadata
             "member_count": len(valid_members),
         })
     category_entropy_df = pd.DataFrame(category_results)
-    save_dataframe(category_entropy_df, shan_dir / "shannon_entropy_categories.csv")
+    save_dataframe(category_entropy_df, shan_dir / f"shannon_entropy_categories{suffix}.csv")
 
     # Statistical test: are categories more concentrated (lower entropy) than concepts?
     clean_concept_ent = concept_entropy_df['shannon_entropy'].dropna()
@@ -178,7 +188,7 @@ def _log_level_comparison(name: str, category_values: pd.Series, concept_values:
 # 2. Plots
 # ---------------------------------------------------------------------------
 
-def plot_peak_average_distributions(expert_allocation_df: pd.DataFrame, concept_metadata: pd.DataFrame, concept_entropy_df: pd.DataFrame, category_entropy_df: pd.DataFrame, shan_dir) -> None:
+def plot_peak_average_distributions(expert_allocation_df: pd.DataFrame, concept_metadata: pd.DataFrame, concept_entropy_df: pd.DataFrame, category_entropy_df: pd.DataFrame, shan_dir, suffix: str = "") -> None:
     """
     Generate combined visualization of peak expert layers (bar plot) and average layer distributions (KDE curves).
     Compares three groups: specific concepts, broad categories, and averaged category members.
@@ -267,22 +277,22 @@ def plot_peak_average_distributions(expert_allocation_df: pd.DataFrame, concept_
     ax2.grid(False)
 
     plt.tight_layout()
-    plt.savefig(shan_dir / "peak_average_layers.png", dpi=300, bbox_inches='tight')
+    plt.savefig(shan_dir / f"peak_average_layers{suffix}.png", dpi=300, bbox_inches='tight')
     plt.close(fig)
 
 
-def plot_shannon_entropies(concept_entropy_df: pd.DataFrame, category_entropy_df: pd.DataFrame, shan_dir) -> None:
+def plot_shannon_entropies(concept_entropy_df: pd.DataFrame, category_entropy_df: pd.DataFrame, shan_dir, suffix: str = "") -> None:
     """Violin comparison of Shannon entropy between specific concepts and broad category labels."""
     plot_comparison_violin(
         {"Specific Concepts": concept_entropy_df['shannon_entropy'],
          "Broad Categories": category_entropy_df['shannon_entropy']},
         y_label="Shannon Entropy (Bits)",
         title="Shannon Entropy of Expert Allocations: Categories vs. Concepts",
-        out_path=shan_dir / "category_concept_shannon_entropies.png",
+        out_path=shan_dir / f"category_concept_shannon_entropies{suffix}.png",
         palette=LEVEL_PALETTE)
 
 
-def plot_gearys_entropy_scatter(concept_entropy_df: pd.DataFrame, category_entropy_df: pd.DataFrame, shan_dir) -> None:
+def plot_gearys_entropy_scatter(concept_entropy_df: pd.DataFrame, category_entropy_df: pd.DataFrame, shan_dir, suffix: str = "") -> None:
     """
     Profile-shape map: every word plotted by Shannon entropy (concentration, order-blind)
     vs Geary's C (depth smoothness, order-sensitive). The quadrants classify layer-profile
@@ -337,11 +347,11 @@ def plot_gearys_entropy_scatter(concept_entropy_df: pd.DataFrame, category_entro
     ax.legend(loc='lower left', bbox_to_anchor=(0.02, 0.07), fontsize=10)
     plt.title("Layer-Profile Shape Map: Geary's C vs. Shannon Entropy", fontsize=14, pad=15)
     plt.tight_layout()
-    plt.savefig(shan_dir / "gearys_entropy_scatter.png", dpi=300, bbox_inches='tight')
+    plt.savefig(shan_dir / f"gearys_entropy_scatter{suffix}.png", dpi=300, bbox_inches='tight')
     plt.close()
 
 
-def plot_avg_layer_violin(concept_entropy_df: pd.DataFrame, category_entropy_df: pd.DataFrame, shan_dir) -> None:
+def plot_avg_layer_violin(concept_entropy_df: pd.DataFrame, category_entropy_df: pd.DataFrame, shan_dir, suffix: str = "") -> None:
     """
     Violin comparison of the average expert layer between abstraction levels, in the
     same style as the entropy violin -- the direct display of whether one level's
@@ -355,11 +365,11 @@ def plot_avg_layer_violin(concept_entropy_df: pd.DataFrame, category_entropy_df:
          "Broad Categories": category_entropy_df['avg_layer_top25pct']},
         y_label="Average layer (top 25% most-loaded layers)",
         title="Average Expert Layer: Categories vs. Concepts",
-        out_path=shan_dir / "category_concept_avg_layer_violin.png",
+        out_path=shan_dir / f"category_concept_avg_layer_violin{suffix}.png",
         palette=LEVEL_PALETTE)
 
 
-def plot_peak_gap_ecdf(concept_entropy_df: pd.DataFrame, category_entropy_df: pd.DataFrame, shan_dir) -> None:
+def plot_peak_gap_ecdf(concept_entropy_df: pd.DataFrame, category_entropy_df: pd.DataFrame, shan_dir, suffix: str = "") -> None:
     """
     ECDF of the peak dominance gap per abstraction level: at any threshold x, the curve
     height is the fraction of words whose peak layer leads the runner-up by less than x
@@ -384,11 +394,11 @@ def plot_peak_gap_ecdf(concept_entropy_df: pd.DataFrame, category_entropy_df: pd
     ax.legend(loc='lower right', fontsize=10)
     plt.title("Peak-Layer Dominance Gap: ECDF by Abstraction Level", fontsize=14, pad=15)
     plt.tight_layout()
-    plt.savefig(shan_dir / "peak_gap_ecdf.png", dpi=300, bbox_inches='tight')
+    plt.savefig(shan_dir / f"peak_gap_ecdf{suffix}.png", dpi=300, bbox_inches='tight')
     plt.close()
 
 
-def plot_category_entropies_bar(category_entropy_df: pd.DataFrame, shan_dir) -> None:
+def plot_category_entropies_bar(category_entropy_df: pd.DataFrame, shan_dir, suffix: str = "") -> None:
     """
     Generate bar chart of Shannon entropy per category label, sorted by entropy value.
     Shows which categories have most localized (low entropy) vs distributed (high entropy) experts.
@@ -396,7 +406,7 @@ def plot_category_entropies_bar(category_entropy_df: pd.DataFrame, shan_dir) -> 
     entropy_data = category_entropy_df.dropna(subset=['shannon_entropy']).copy()
     entropy_data = entropy_data.sort_values(by='shannon_entropy', ascending=False).reset_index(drop=True)
     entropy_data['category_display'] = entropy_data['category'].str.title()
-    out_path = shan_dir / "category_shannon_entropies_bar.png"
+    out_path = shan_dir / f"category_shannon_entropies_bar{suffix}.png"
     _plot_bar_with_leaders(
         plot_dataframe=entropy_data, x_col="shannon_entropy", y_col="category_display",
         title="Shannon Entropy of Expert Allocations by Category", x_label="Shannon Entropy (Bits)",
@@ -408,30 +418,77 @@ def plot_category_entropies_bar(category_entropy_df: pd.DataFrame, shan_dir) -> 
 # 3. Module entry point
 # ---------------------------------------------------------------------------
 
-def execute_module_2_shannon_entropy(formatted_expert_allocation_df: pd.DataFrame, concept_metadata: pd.DataFrame, shan_dir) -> tuple[pd.DataFrame, pd.DataFrame]:
+def _summarize_descriptors(concept_entropy_df: pd.DataFrame, category_entropy_df: pd.DataFrame) -> dict:
+    """
+    Reduce the two descriptor tables to the level contrast the module exists to test:
+    do broad category labels spread their experts differently from specific concepts?
+
+    entropy_auc is P(a random category label has higher entropy than a random concept),
+    the rank-based Mann-Whitney reading already logged per run, kept here because it is
+    the density-robust column: it contrasts the two levels WITHIN a scope, whereas the
+    raw means are dragged down in sparse sublayers, where fewer experts spread over the
+    same number of bins give a lower entropy for reasons that have nothing to do with
+    abstraction level.
+    """
+    concept_entropy = concept_entropy_df['shannon_entropy'].dropna()
+    category_entropy = category_entropy_df['shannon_entropy'].dropna()
+    if concept_entropy.empty or category_entropy.empty:
+        auc = np.nan
+    else:
+        u = stats.mannwhitneyu(category_entropy, concept_entropy, alternative='two-sided').statistic
+        auc = u / (len(category_entropy) * len(concept_entropy))
+    return {
+        "entropy_mean_concepts": concept_entropy.mean(),
+        "entropy_mean_categories": category_entropy.mean(),
+        "entropy_auc_categories_over_concepts": auc,
+        "gearys_c_mean_concepts": concept_entropy_df['gearys_c'].mean(),
+        "gearys_c_mean_categories": category_entropy_df['gearys_c'].mean(),
+        "peak_gap_mean_concepts_pct": concept_entropy_df['peak_gap_pct'].mean(),
+    }
+
+
+def execute_module_2_shannon_entropy(scope, concept_metadata: pd.DataFrame, shan_dir) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
     """
     Execute Module 2: Shannon Entropy Analysis and Peak/Average Layer Distributions.
     Computes the per-word descriptor CSVs, generates the comparative visualizations
     (in the order listed in the module docstring), and returns the two descriptor
-    DataFrames for downstream modules.
+    DataFrames for downstream modules plus this module's sublayer_comparison row.
+
+    Every descriptor here except Shannon entropy reads the layer axis as depth, so the
+    whole-model scope runs the full suite twice, once per entry of axis_variants: the
+    block variant is the defensible depth reading and is what module 4 consumes, the
+    flat variant is kept alongside it. On the flat whole-model axis specifically,
+    gearys_c differences neighbouring indices that belong to the same block and so
+    measures sublayer-type alternation, and peak_layer collapses onto whichever sublayer
+    is densest, which is why the block variant is the canonical one rather than a
+    companion.
     """
-    log.info("  Computing and plotting Shannon entropy analysis...")
-    concept_entropy_df, category_entropy_df = compute_shannon_entropy(formatted_expert_allocation_df, concept_metadata, shan_dir)
-    log.info("  Generating peak vs. average layer distributions plot...")
-    plot_peak_average_distributions(formatted_expert_allocation_df, concept_metadata, concept_entropy_df, category_entropy_df, shan_dir)
-    log.info("  Generating Shannon entropy violin plot...")
-    plot_shannon_entropies(concept_entropy_df, category_entropy_df, shan_dir)
-    log.info("  Generating Geary's C vs entropy shape map...")
-    plot_gearys_entropy_scatter(concept_entropy_df, category_entropy_df, shan_dir)
-    log.info("  Generating average-layer violin plot...")
-    plot_avg_layer_violin(concept_entropy_df, category_entropy_df, shan_dir)
-    log.info("  Generating peak dominance gap ECDF...")
-    plot_peak_gap_ecdf(concept_entropy_df, category_entropy_df, shan_dir)
-    # Labels-vs-concepts statistics for the metrics displayed above.
-    _log_level_comparison("Peak dominance gap", category_entropy_df['peak_gap_pct'], concept_entropy_df['peak_gap_pct'])
-    _log_level_comparison("Avg layer (full)", category_entropy_df['avg_layer'], concept_entropy_df['avg_layer'])
-    _log_level_comparison("Avg layer (top 25% layers)", category_entropy_df['avg_layer_top25pct'], concept_entropy_df['avg_layer_top25pct'])
-    _log_level_comparison("Geary's C", category_entropy_df['gearys_c'], concept_entropy_df['gearys_c'])
-    log.info("  Generating individual category entropy bar chart...")
-    plot_category_entropies_bar(category_entropy_df, shan_dir)
-    return concept_entropy_df, category_entropy_df
+    out_dir = scope_out_dir(shan_dir, scope)
+    canonical = (pd.DataFrame(), pd.DataFrame())
+
+    for i, (suffix, axis_df, axis_label) in enumerate(axis_variants(scope)):
+        log.info(f"  [{scope.label} / {axis_label}] Computing and plotting Shannon entropy analysis...")
+        concept_entropy_df, category_entropy_df = compute_shannon_entropy(axis_df, concept_metadata, out_dir, suffix)
+        log.info("  Generating peak vs. average layer distributions plot...")
+        plot_peak_average_distributions(axis_df, concept_metadata, concept_entropy_df, category_entropy_df, out_dir, suffix)
+        log.info("  Generating Shannon entropy violin plot...")
+        plot_shannon_entropies(concept_entropy_df, category_entropy_df, out_dir, suffix)
+        log.info("  Generating Geary's C vs entropy shape map...")
+        plot_gearys_entropy_scatter(concept_entropy_df, category_entropy_df, out_dir, suffix)
+        log.info("  Generating average-layer violin plot...")
+        plot_avg_layer_violin(concept_entropy_df, category_entropy_df, out_dir, suffix)
+        log.info("  Generating peak dominance gap ECDF...")
+        plot_peak_gap_ecdf(concept_entropy_df, category_entropy_df, out_dir, suffix)
+        # Labels-vs-concepts statistics for the metrics displayed above.
+        _log_level_comparison("Peak dominance gap", category_entropy_df['peak_gap_pct'], concept_entropy_df['peak_gap_pct'])
+        _log_level_comparison("Avg layer (full)", category_entropy_df['avg_layer'], concept_entropy_df['avg_layer'])
+        _log_level_comparison("Avg layer (top 25% layers)", category_entropy_df['avg_layer_top25pct'], concept_entropy_df['avg_layer_top25pct'])
+        _log_level_comparison("Geary's C", category_entropy_df['gearys_c'], concept_entropy_df['gearys_c'])
+        log.info("  Generating individual category entropy bar chart...")
+        plot_category_entropies_bar(category_entropy_df, out_dir, suffix)
+        if i == 0:
+            canonical = (concept_entropy_df, category_entropy_df)
+
+    concept_entropy_df, category_entropy_df = canonical
+    summary = scope_summary_row(scope, **_summarize_descriptors(concept_entropy_df, category_entropy_df))
+    return concept_entropy_df, category_entropy_df, summary

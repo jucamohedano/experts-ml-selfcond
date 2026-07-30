@@ -8,6 +8,8 @@ Does the expert structure form recognizable clusters, with concepts that belong 
 
 Notation. Let $\mathcal{C}$ be the full concept list from the metadata (module 3 compared each concept only to its own category, whereas here every concept is compared to every other concept). As in module 3, each concept's expert set $E_c$ contains **(layer, unit) pairs**, because the raw `unit` column holds only the neuron index within a layer. The feature axis below is therefore indexed by pairs $(\ell, u)$ rather than by bare unit indices, so that identically indexed neurons in different layers remain distinct.
 
+**Analysis scopes.** This module is *set-based*, meaning it reads expert rows as an unordered collection of (layer, unit) pairs, so the layer axis never enters and each scope runs it exactly once. It runs on the whole model first, writing into the module folder itself, then once per sublayer type into `sublayers/<rank>_<sublayer>/`. Module 1, subchapter 1.7 defines the scopes and the rank prefix. A cross-scope summary lands in `sublayer_comparison.csv` and `sublayer_comparison.png` at the module's top level. Its columns are the mean within-category and across-category Jaccard, their difference, and the rank-based category-alignment ROC-AUC, which is the sharper form of this module's question and is computed over level-2 concepts only, since category-label words have no same-category peers.
+
 ### 5.1 All-pairs expert-set similarity via binary matrix products
 
 **Mathematical formulation.** Instead of looping over pairs, the module computes all pairwise set operations at once through linear algebra on a binary presence matrix. Define
@@ -95,6 +97,8 @@ Example (head, first 5 columns, of `AP_0.6/5_heatmaps/shared_expert_counts_matri
 The category color system behind the tick labels and the boundary lines is shared with module 3's bar charts, so a category reads as the same color in both modules. The palette alternates cool and warm hues across adjacent categories in the sorted order, rather than assigning colors by simple index, so that neighboring category blocks in the heatmap stay visually distinct even when the category order places similar categories next to each other.
 
 ## Results
+
+*Scope note.* Every figure in this section comes from the runs that predate the whole-model refactor, so it describes the **analysis sublayer** (`mlp.c_fc` for GPT-2, `mlp.gate_proj` for Qwen3), which is now one scope among several rather than the only one. Those numbers still stand, they are reproduced byte for byte by the corresponding `sublayers/<rank>_<sublayer>/` outputs. Whole-model and other-sublayer figures land here once the sweep is re-run.
 
 At AP=0.6, the same-category effect is strong in relative terms. Splitting all 13,366 concept pairs into same category (619 pairs) and different category (12,747 pairs), within-category pairs average **3.46%** Jaccard against **0.52%** across categories, a factor of **6.6**, and **10.29%** overlap against **1.93%**, a factor of **5.3**. Same-category concepts share disproportionately many specific (layer, unit) experts, whereas a random different-category pair shares almost none. In absolute terms, even within-category similarity is small, with a mean of 3.5% Jaccard, the largest off-diagonal pair at 33%, and the 99th percentile at just 6.8%.
 

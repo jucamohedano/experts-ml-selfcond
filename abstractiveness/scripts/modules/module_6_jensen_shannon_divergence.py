@@ -6,12 +6,23 @@ import seaborn as sns
 from scipy import stats
 from scipy.stats import entropy
 from scipy.spatial.distance import jensenshannon, pdist
-from utils.helpers import save_dataframe, build_layer_probability_matrix
+from utils.helpers import (save_dataframe, build_layer_probability_matrix, axis_variants,
+                           scope_out_dir, scope_summary_row)
 from utils.plot_helpers import fig_width_for, apply_rotated_leader_labels
 
 log = logging.getLogger(__name__)
 
-def compute_dual_category_jsd(expert_allocation_df: pd.DataFrame, concept_metadata: pd.DataFrame, jsd_dir) -> tuple[pd.DataFrame, list]:
+# Headline metrics for the cross-scope sublayer_comparison table, read off the block-axis
+# variant (the one whose layer axis is a genuine depth axis, see AXIS_VARIANTS below).
+SUMMARY_LABELS = {
+    "mean_jensen_shannon_divergence": "Mean label vs member-average JSD",
+    "mean_member_diversity_jsd": "Mean within-category member JSD",
+    "jsd_vs_diversity_r": "Pearson r, divergence vs diversity",
+}
+
+
+def compute_dual_category_jsd(expert_allocation_df: pd.DataFrame, concept_metadata: pd.DataFrame, jsd_dir,
+                              suffix: str = "") -> tuple[pd.DataFrame, list]:
     """
     Compute Jensen-Shannon Divergence between category label distributions and averaged member distributions.
     Also computes the internal diversity (average pairwise JSD) of the category members.
@@ -68,14 +79,14 @@ def compute_dual_category_jsd(expert_allocation_df: pd.DataFrame, concept_metada
     if not jsd_results_df.empty:
         jsd_results_df = jsd_results_df.sort_values(by="jensen_shannon_divergence").reset_index(drop=True)
         # Save a clean CSV without the massive array columns
-        save_dataframe(jsd_results_df.drop(columns=['P_dist', 'Q_dist']), jsd_dir / "dual_category_jsd.csv")
+        save_dataframe(jsd_results_df.drop(columns=['P_dist', 'Q_dist']), jsd_dir / f"dual_category_jsd{suffix}.csv")
     else:
         log.warning("  No categories qualified for JSD (no category-label concept has experts at this AP); skipping.")
 
     # Return both the dataframe and the layer labels for the X-axis of the micro plot
     return jsd_results_df, layer_labels
 
-def plot_jsd_vs_diversity_scatter(jsd_results_df: pd.DataFrame, jsd_dir) -> None:
+def plot_jsd_vs_diversity_scatter(jsd_results_df: pd.DataFrame, jsd_dir, suffix: str = "") -> None:
     """
     Plots Label-Centroid Divergence (X-axis) against Internal Category Diversity (Y-axis).
     Tests if high member dispersion forces the model to create a distinct prototype label.
@@ -123,10 +134,10 @@ def plot_jsd_vs_diversity_scatter(jsd_results_df: pd.DataFrame, jsd_dir) -> None
     
     plt.grid(True, linestyle='--', alpha=0.6)
     plt.tight_layout()
-    plt.savefig(jsd_dir / "scatter_jsd_vs_member_diversity.png", dpi=300)
+    plt.savefig(jsd_dir / f"scatter_jsd_vs_member_diversity{suffix}.png", dpi=300)
     plt.close()
 
-def plot_jsd_micro_distributions(jsd_results_df: pd.DataFrame, layer_labels: list, jsd_dir) -> None:
+def plot_jsd_micro_distributions(jsd_results_df: pd.DataFrame, layer_labels: list, jsd_dir, suffix: str = "") -> None:
     """
     Visualization 2: Overlaid Area Charts for the Lowest and Highest JSD categories.
     For each of those two categories, plots P (the category-label prototype distribution)
@@ -180,11 +191,11 @@ def plot_jsd_micro_distributions(jsd_results_df: pd.DataFrame, layer_labels: lis
     
     plt.suptitle("Micro View: Layer Allocations Behind Jensen-Shannon Divergence", fontsize=18, y=1.02)
     plt.tight_layout()
-    plt.savefig(jsd_dir / "micro_jsd_distributions.png", dpi=300, bbox_inches='tight')
+    plt.savefig(jsd_dir / f"micro_jsd_distributions{suffix}.png", dpi=300, bbox_inches='tight')
     plt.close()
 
 
-def plot_jsd_vs_entropy_scatter(jsd_results_df: pd.DataFrame, jsd_dir) -> None:
+def plot_jsd_vs_entropy_scatter(jsd_results_df: pd.DataFrame, jsd_dir, suffix: str = "") -> None:
     """Visualization 3: Scatter plot checking if concentrated concepts diverge more."""
     # An empty results frame has no columns at all, so guard before dropna(subset=...).
     if jsd_results_df.empty:
@@ -227,20 +238,49 @@ def plot_jsd_vs_entropy_scatter(jsd_results_df: pd.DataFrame, jsd_dir) -> None:
     plt.ylabel("Shannon Entropy of Category Label (Bits)\n← Concentrated | Uniform →", fontsize=12)
 
     plt.tight_layout()
-    plt.savefig(jsd_dir / "scatter_jsd_vs_entropy.png", dpi=300)
+    plt.savefig(jsd_dir / f"scatter_jsd_vs_entropy{suffix}.png", dpi=300)
     plt.close()
 
-def execute_module_6_dual_category_jsd(formatted_expert_allocation_df: pd.DataFrame, concept_metadata: pd.DataFrame, jsd_dir) -> tuple[pd.DataFrame, list]:
+def _summarize_jsd(jsd_results_df: pd.DataFrame) -> dict:
+    """Mean divergence, mean internal diversity, and the correlation the scatter plots."""
+    empty = {key: np.nan for key in SUMMARY_LABELS}
+    if jsd_results_df.empty:
+        return empty
+    paired = jsd_results_df.dropna(subset=['jensen_shannon_divergence', 'avg_member_diversity_jsd'])
+    r = (stats.pearsonr(paired['jensen_shannon_divergence'], paired['avg_member_diversity_jsd'])[0]
+         if len(paired) > 2 else np.nan)
+    return {"mean_jensen_shannon_divergence": jsd_results_df['jensen_shannon_divergence'].mean(),
+            "mean_member_diversity_jsd": jsd_results_df['avg_member_diversity_jsd'].mean(),
+            "jsd_vs_diversity_r": r}
+
+
+def execute_module_6_dual_category_jsd(scope, concept_metadata: pd.DataFrame, jsd_dir) -> tuple[pd.DataFrame, list, dict]:
     """Execute Module 6: Dual Category Definitions (JSD).
     Compute and visualize Jensen-Shannon Divergence between category prototypes and exemplars.
+
+    JSD itself is permutation-invariant, so it stays well defined on either layer axis,
+    but the micro-distribution plot reads its x-axis as depth and is unreadable over the
+    whole model's interleaved layers, so the whole-model scope produces both the block
+    and the flat variant (see axis_variants). Summary metrics come from the canonical
+    (first) variant.
+
+    Returns (jsd_results_df, layer_labels, summary_row) for the canonical variant.
     """
-    log.info("  Computing Dual Category Definitions (JSD) and Internal Member Diversity...")
-    jsd_results_df, jsd_layer_labels = compute_dual_category_jsd(formatted_expert_allocation_df, concept_metadata, jsd_dir)
-    if jsd_results_df.empty:
-        log.warning("  Skipping JSD visualisations: no qualifying categories at this AP threshold.")
-        return jsd_results_df, jsd_layer_labels
-    log.info("  Generating JSD visualisations...")
-    plot_jsd_vs_diversity_scatter(jsd_results_df, jsd_dir)
-    plot_jsd_micro_distributions(jsd_results_df, jsd_layer_labels, jsd_dir)
-    plot_jsd_vs_entropy_scatter(jsd_results_df, jsd_dir)
-    return jsd_results_df, jsd_layer_labels
+    out_dir = scope_out_dir(jsd_dir, scope)
+    canonical_results, canonical_labels = pd.DataFrame(), []
+
+    for i, (suffix, axis_df, axis_label) in enumerate(axis_variants(scope)):
+        log.info(f"  [{scope.label} / {axis_label}] Computing Dual Category Definitions (JSD) "
+                 f"and Internal Member Diversity...")
+        jsd_results_df, jsd_layer_labels = compute_dual_category_jsd(axis_df, concept_metadata, out_dir, suffix)
+        if i == 0:
+            canonical_results, canonical_labels = jsd_results_df, jsd_layer_labels
+        if jsd_results_df.empty:
+            log.warning("  Skipping JSD visualisations: no qualifying categories at this AP threshold.")
+            continue
+        log.info("  Generating JSD visualisations...")
+        plot_jsd_vs_diversity_scatter(jsd_results_df, out_dir, suffix)
+        plot_jsd_micro_distributions(jsd_results_df, jsd_layer_labels, out_dir, suffix)
+        plot_jsd_vs_entropy_scatter(jsd_results_df, out_dir, suffix)
+
+    return canonical_results, canonical_labels, scope_summary_row(scope, **_summarize_jsd(canonical_results))

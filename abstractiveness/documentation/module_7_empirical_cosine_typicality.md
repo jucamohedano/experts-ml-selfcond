@@ -6,7 +6,9 @@ Does the expert structure of a category recover human judgments of typicality, w
 
 ## Analysis
 
-Notation. For a category $k$, let $M_k$ be its member concepts that appear in the filtered expert data. Only categories with $|M_k| \ge 2$ are processed (a centroid of one member is just that member). The model-derived score computed here is called **Cosine Typicality**, to distinguish it from the metadata-sourced **Human Typicality** $t_c$ it is compared against.
+Notation. For a category $k$, let $M_k$ be its member concepts that appear in the current scope's expert data. Only categories with $|M_k| \ge 2$ are processed (a centroid of one member is just that member). The model-derived score computed here is called **Cosine Typicality**, to distinguish it from the metadata-sourced **Human Typicality** $t_c$ it is compared against.
+
+**Analysis scopes.** This module is *mixed*. The global prototype of subchapter 7.1 is set-based, since its feature space is individual (layer, unit) pairs, so it is computed once per scope and its outputs carry no axis suffix. It must be fed the scope's own flat expert rows for exactly that reason: on a block-aggregated frame the layer part of each feature is the block, so units sharing an index across different projections of one block would collapse into a single feature and inflate every prototype. The per-layer prototypes of subchapter 7.2 are order-based, so in the whole-model scope they are produced twice, suffixed `_by_block` and `_by_layer`, and once unsuffixed in a sublayer scope. Every scope writes into the module folder (whole model) or `sublayers/<rank>_<sublayer>/`, with the cross-scope summary in `sublayer_comparison.csv` and `sublayer_comparison.png`, whose columns are the Pearson correlation between global Cosine Typicality and Human Typicality pooled over all categories, its p-value, and the number of concepts carrying both scores. Filenames listed below are given in their unsuffixed form, which is what a sublayer scope writes, and the whole-model scope inserts the axis suffix before the extension. Module 1, subchapter 1.7 defines the mechanics.
 
 ### 7.1 Global prototype Cosine Typicality
 
@@ -118,6 +120,8 @@ the Pearson correlation (computed only when both variables have nonzero variance
 - `<category>_typicality_correlation_scatter.png`, a **scatter plot with a linear regression line**, x: `human_typicality` ($t_c$), y: `global_cosine_typicality` ($T^{\cos}_c$), one point per concept (annotated with the concept name) and the Pearson $r_k$/$p$ in the title.
 
 ## Results
+
+*Scope note.* Every figure in this section comes from the runs that predate the whole-model refactor, so it describes the **analysis sublayer** (`mlp.c_fc` for GPT-2, `mlp.gate_proj` for Qwen3), which is now one scope among several rather than the only one. Those numbers still stand, they are reproduced byte for byte by the corresponding `sublayers/<rank>_<sublayer>/` outputs. Whole-model and other-sublayer figures land here once the sweep is re-run.
 
 At AP=0.6, pooled across all 147 concept-category rows, ignoring which category each concept belongs to, the correlation between Human Typicality and global Cosine Typicality is **r=-0.001, p=0.99, no relationship at all**. Per-category correlations show real heterogeneity. The categories **weapon** (r=0.88, p<0.001, n=8) and **vehicle** (r=0.74, p=0.006, n=12) are strong and positive, whereas **jewelry** (r=-0.98), **container** (r=-0.74, p=0.01), and **drink** (r=-0.72, p=0.03) are significantly *negative*. Only 9 of 17 categories have a positive r at all, and only 2 of 17 are both positive and significant.
 

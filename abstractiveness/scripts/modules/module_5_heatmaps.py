@@ -1,15 +1,25 @@
 import logging
 import pandas as pd
 import numpy as np
-from utils.helpers import save_dataframe
+from utils.helpers import (save_dataframe, expert_set_overlap_matrices, category_alignment_metrics,
+                           scope_out_dir, scope_summary_row)
 from utils.plot_helpers import _plot_heatmap_with_leaders, build_category_color_map
 
 log = logging.getLogger(__name__)
 
-def plot_all_heatmaps(expert_allocation_df: pd.DataFrame, concept_metadata: pd.DataFrame, heat_dir) -> None:
+# Headline metrics for the cross-scope sublayer_comparison table.
+SUMMARY_LABELS = {
+    "category_contrast_pct": "Within minus across category Jaccard %",
+    "category_roc_auc": "Category alignment ROC-AUC",
+    "within_category_jaccard_pct": "Within-category Jaccard %",
+    "across_category_jaccard_pct": "Across-category Jaccard %",
+}
+
+def plot_all_heatmaps(expert_allocation_df: pd.DataFrame, concept_metadata: pd.DataFrame, heat_dir) -> tuple[np.ndarray, np.ndarray]:
     """
     Calculate pairwise Jaccard and Overlap similarity matrices for all concepts.
     Generates corresponding heatmap visualizations and saves matrix CSVs.
+    Returns (concepts, jaccard_matrix) so the caller can summarize without recomputing.
     """
     concepts = concept_metadata['concept'].unique()
 
@@ -42,22 +52,11 @@ def plot_all_heatmaps(expert_allocation_df: pd.DataFrame, concept_metadata: pd.D
                            if effective_categories[i] != effective_categories[i - 1]]
 
 
-    # Columns are (layer_idx, unit) pairs: the raw `unit` column is only the neuron index
-    # *within* a layer, so pivoting on it alone would merge identical indices from different
-    # layers into one column, inflating pairwise intersections between unrelated experts.
-    presence_matrix = expert_allocation_df.assign(present=1).pivot_table(index='concept', columns=['layer_idx', 'unit'], values='present', fill_value=0)
-    presence_matrix = presence_matrix.reindex(concepts, fill_value=0)
-    A = presence_matrix.values  
-    
-    # Set sizes and operations
-    intersection = np.dot(A, A.T) 
-    sizes = A.sum(axis=1)         
-    union = sizes[:, None] + sizes[None, :] - intersection
-    min_size = np.minimum(sizes[:, None], sizes[None, :])
-    
-    with np.errstate(divide='ignore', invalid='ignore'):
-        jaccard_matrix = np.where(union > 0, (intersection / union) * 100, 0.0)    
-        overlap_matrix = np.where(min_size > 0, (intersection / min_size) * 100, 0.0)
+    # Experts are keyed on (layer_idx, unit) pairs and held sparsely; see
+    # expert_set_overlap_matrices for why the dense concept-by-expert form is avoided.
+    intersection, jaccard, overlap = expert_set_overlap_matrices(expert_allocation_df, concepts)
+    jaccard_matrix = jaccard * 100
+    overlap_matrix = overlap * 100
 
     # Raw shared-expert counts behind both percentage matrices, for scale. The diagonal
     # holds each concept's own expert-set size.
@@ -79,9 +78,51 @@ def plot_all_heatmaps(expert_allocation_df: pd.DataFrame, concept_metadata: pd.D
             category_boundaries=category_boundaries,
         )
 
-def execute_module_5_heatmaps(formatted_expert_allocation_df: pd.DataFrame, concept_metadata: pd.DataFrame, heat_dir) -> None:
+    return concepts, jaccard_matrix
+
+
+def summarize_category_contrast(concepts, jaccard_matrix: np.ndarray, concept_metadata: pd.DataFrame) -> dict:
+    """
+    Reduce the pairwise Jaccard matrix to the question the heatmaps exist to answer:
+    are within-category concept pairs more similar than across-category pairs?
+
+    Restricted to level-2 concepts carrying a category, so the eight category-label words
+    (whose own category is null, and which have no same-category peers) never enter the
+    pair pool. Reports both group means and their difference, plus the rank-based
+    roc_auc from category_alignment_metrics, which is immune to the heavy same/different
+    pair imbalance and to Jaccard's skew. Fewer than two categorized concepts leaves
+    nothing to contrast, so the metrics come back NaN.
+    """
+    concept_to_cat = concept_metadata.set_index("concept")["category"].to_dict()
+    keep = [i for i, c in enumerate(concepts) if pd.notna(concept_to_cat.get(c))]
+    empty = {"within_category_jaccard_pct": np.nan, "across_category_jaccard_pct": np.nan,
+             "category_contrast_pct": np.nan, "category_roc_auc": np.nan}
+    if len(keep) < 2:
+        return empty
+
+    categories = np.array([concept_to_cat[concepts[i]] for i in keep])
+    sub_matrix = jaccard_matrix[np.ix_(keep, keep)]
+    iu = np.triu_indices(len(keep), k=1)
+    pair_similarity = sub_matrix[iu]
+    same = (categories[:, None] == categories[None, :])[iu]
+    if not same.any() or same.all():
+        return empty
+
+    alignment = category_alignment_metrics(pair_similarity, categories)
+    within, across = pair_similarity[same].mean(), pair_similarity[~same].mean()
+    return {"within_category_jaccard_pct": within, "across_category_jaccard_pct": across,
+            "category_contrast_pct": within - across, "category_roc_auc": alignment["roc_auc"]}
+
+
+def execute_module_5_heatmaps(scope, concept_metadata: pd.DataFrame, heat_dir) -> dict:
     """Execute Module 5: Heatmaps.
     Generate all pairwise similarity heatmaps and CSV matrices for concepts.
+
+    Purely set-based, so the whole-model scope is the unqualified pairwise geometry and
+    each sublayer scope shows whether that same block structure survives in a single
+    projection type. Returns the summary row for this module's sublayer_comparison table.
     """
-    log.info("  Generating all pairwise heatmaps and CSV matrices (Jaccard & Overlap)...")
-    plot_all_heatmaps(formatted_expert_allocation_df, concept_metadata, heat_dir)
+    out_dir = scope_out_dir(heat_dir, scope)
+    log.info(f"  [{scope.label}] Generating all pairwise heatmaps and CSV matrices (Jaccard & Overlap)...")
+    concepts, jaccard_matrix = plot_all_heatmaps(scope.expert_df, concept_metadata, out_dir)
+    return scope_summary_row(scope, **summarize_category_contrast(concepts, jaccard_matrix, concept_metadata))

@@ -8,6 +8,8 @@ Are concepts that are more frequent, more typical (per human judgment), or more 
 
 Notation. For each concept $c$ the module works with the scalar variables assembled by modules 1–3: the log-frequency $\tilde{f}_c = \log_{10} f_c$, the Human Typicality score $t_c$, the expert count $n_c$, the Jaccard similarity to the parent category $J(c,k)$ (written $J_c$ below, since each concept has one parent), the overlap coefficient to the parent category $O_c$, and module 2's Shannon entropy $H(c)$. The base table is module 1's `expert_counts_with_metadata.csv`, inner-joined with module 3's `category_concept_similarity_metrics.csv` on (`concept`, `category`) for the similarity-based panels, and the entropy panel of subchapter 4.4 draws directly on module 2's descriptor tables.
 
+**Analysis scopes.** This module has no expert data of its own, it correlates the scalars modules 1 to 3 and 7 produce, so it inherits their scope: every panel is recomputed per scope and written to the module folder (whole model) or to `sublayers/<rank>_<sublayer>/`. One panel is the exception. `frequency_vs_typicality` reads only metadata columns, so it is identical in every scope and is written once at the module's top level rather than copied into each sublayer folder, which also means it appears in the whole-model `correlation_summary.csv` only. The cross-scope summary of the remaining panels' correlation coefficients lands in `sublayer_comparison.csv` and `sublayer_comparison.png`. Its columns are the Pearson $r$ of typicality against Jaccard, of frequency against expert count, of Shannon entropy against expert count, and of Jaccard against Cosine Typicality, one per scope, left empty wherever that panel's coverage gate was not cleared. Module 1, subchapter 1.7 defines the scopes and the rank prefix.
+
 ### 4.1 Bivariate Pearson regression panels
 
 **Mathematical formulation.** Six variable pairs $(x, y)$ are each tested for a linear association. For a pair with $n$ complete observations $(x_i, y_i)$ (rows with a missing value in either variable are dropped per panel), the Pearson correlation coefficient is
@@ -252,6 +254,8 @@ Example (head of `AP_0.6/4_correlations/shannon_entropy_vs_expert_count.csv` in 
 - `shannon_entropy_vs_expert_count.png`, a **scatter plot with a linear regression line** over the pooled sample, x: `shannon_entropy` ($H(c)$), y: `experts_count` ($n_c$), with concepts drawn as small dots and category labels as larger diamonds, and the pooled Pearson $r$/$p$ in the title.
 
 ## Results
+
+*Scope note.* Every figure in this section comes from the runs that predate the whole-model refactor, so it describes the **analysis sublayer** (`mlp.c_fc` for GPT-2, `mlp.gate_proj` for Qwen3), which is now one scope among several rather than the only one. Those numbers still stand, they are reproduced byte for byte by the corresponding `sublayers/<rank>_<sublayer>/` outputs. Whole-model and other-sublayer figures land here once the sweep is re-run.
 
 Values are from the two Richie-HSJ sublayer runs, GPT-2 on `mlp.c_fc` (`research_plots_gpt2_richie_hsj_with_sublayer_analysis`) and Qwen3-1.7B on `mlp.gate_proj` (`research_plots_qwen_richie_hsj_with_sublayer_analysis`), each with 204 concepts, 8 category labels, and 196 concepts with a defined category.
 

@@ -178,7 +178,7 @@ Example (head of `embedding_rsa_layer_sweep.csv` in `8_embedding_rsa/`, GPT-2, A
 | correlation_zscored | 4 | 4.L.0.mlp.c_proj | 0 | mlp.c_proj | 0 | early | False | 196 | 25549 | 0 | 0 | 0.6788 | nan | nan | 0.0001 | 0.0001 | nan | nan | nan | nan | 0.9847 | 0.6893 |
 | correlation_zscored | 5 | 5.L.1.attn.c_attn | 1 | attn.c_attn | 0.09091 | early | False | 196 | 25549 | 0 | 0 | 0.6394 | nan | nan | 0.0001 | 0.0001 | nan | nan | nan | nan | 0.9756 | 0.6554 |
 
-A non-analysis sublayer's own file (e.g. `8_embedding_rsa/sublayers/attn.c_attn/embedding_rsa_layer_sweep.csv`) instead has `sublayer` constant, always `attn.c_attn`, and `is_analysis_sublayer` True on every row, since that file only sweeps its own layers.
+A non-analysis sublayer's own file (e.g. `8_embedding_rsa/sublayers/2_attn.c_attn/embedding_rsa_layer_sweep.csv`) instead has `sublayer` constant, always `attn.c_attn`, and `is_analysis_sublayer` True on every row, since that file only sweeps its own layers.
 
 #### `embedding_rsa_summary.csv`
 
@@ -248,7 +248,7 @@ Example (all rows, GPT-2, AP 0.5, only 4 sublayers so this is the full file, not
 
 #### `rsa_layer_sweep.png`
 
-One per sublayer directory (the analysis sublayer's own copy in `8_embedding_rsa/`, every other sublayer's own copy under `sublayers/<name>/`). Spearman rho against depth for that sublayer's own layers, with the bootstrap band, the split-half noise ceiling, and the middle third of the network shaded. The pooled curve and the leave-one-out curve are drawn together so how much of the pooled shape is a layer's own self-contribution is visible directly. A grey bar series on a secondary axis shows each layer's share of the pooled expert set. The legend sits below the axes rather than overlapping the curves, and the two y-axes are labelled "(curves)" for the rho axis and "(bars)" for the expert-share axis, to disambiguate them.
+One per sublayer directory (the analysis sublayer's own copy in `8_embedding_rsa/`, every other sublayer's own copy under `sublayers/<rank>_<name>/`, the rank being the run-wide expert-count ranking shared with every other module, see module 1 subchapter 1.7). Spearman rho against depth for that sublayer's own layers, with the bootstrap band, the split-half noise ceiling, and the middle third of the network shaded. The pooled curve and the leave-one-out curve are drawn together so how much of the pooled shape is a layer's own self-contribution is visible directly. A grey bar series on a secondary axis shows each layer's share of the pooled expert set. The legend sits below the axes rather than overlapping the curves, and the two y-axes are labelled "(curves)" for the rho axis and "(bars)" for the expert-share axis, to disambiguate them.
 
 #### RDM heatmaps
 

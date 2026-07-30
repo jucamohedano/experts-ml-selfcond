@@ -736,6 +736,7 @@ def _write_analysis_sublayer_extras(summary: pd.DataFrame, context: dict, embedd
 def execute_module_8_embedding_rsa(sublayer_expert_df: pd.DataFrame, concept_metadata: pd.DataFrame,
                                    rsa_dir, embedding_cache: dict, layer_mapping: pd.DataFrame,
                                    sublayer_filter: str = None, full_expert_df: pd.DataFrame = None,
+                                   sublayer_rank: dict = None,
                                    n_permutations: int = 9999, seed: int = 42) -> tuple:
     """
     Execute Module 8: expert set versus embedding semantics. See
@@ -745,7 +746,9 @@ def execute_module_8_embedding_rsa(sublayer_expert_df: pd.DataFrame, concept_met
     matrix (from ``full_expert_df`` when available, otherwise ``sublayer_expert_df``)
     against that sublayer's own embedding layers. The analysis sublayer
     (``sublayer_filter``) writes to ``rsa_dir`` directly plus the headline RDM/scatter
-    extras, every other sublayer lands under ``rsa_dir / "sublayers" / <name>``.
+    extras, every other sublayer lands under ``rsa_dir / "sublayers" / <rank>_<name>``,
+    where rank comes from ``sublayer_rank`` (the run-wide expert-count ranking frozen at
+    the most lenient AP threshold) so the folder names match every other module's.
 
     Returns (sweep_df, summary_df) for the analysis sublayer, both empty when the cache
     is unavailable.
@@ -776,7 +779,9 @@ def execute_module_8_embedding_rsa(sublayer_expert_df: pd.DataFrame, concept_met
             log.warning(f"  No experts for sublayer {sublayer} at this AP, skipping it")
             continue
         is_analysis = (sublayer == sublayer_filter)
-        target_dir = rsa_dir if is_analysis else (rsa_dir / "sublayers" / sublayer)
+        rank = (sublayer_rank or {}).get(sublayer)
+        dir_name = f"{rank}_{sublayer}" if rank else sublayer
+        target_dir = rsa_dir if is_analysis else (rsa_dir / "sublayers" / dir_name)
         target_dir.mkdir(parents=True, exist_ok=True)
 
         log.info(f"  [{sublayer}] correlating expert-set similarity against embedding similarity...")

@@ -242,6 +242,67 @@ def plot_comparison_violin(values_by_group: dict, y_label: str, title: str, out_
     plt.close()
 
 
+_WHOLE_MODEL_BAR_COLOR = "#1f2d3d"
+_SUBLAYER_BAR_COLOR = "#2a78d6"
+
+
+def plot_sublayer_comparison_bars(comparison_df: pd.DataFrame, value_labels: dict, out_path,
+                                  title: str, scope_col: str = "scope") -> None:
+    """
+    Small-multiple horizontal bars comparing every analysis scope on a module's headline
+    metrics: one panel per entry of value_labels ({column: axis label}), one bar per row
+    of comparison_df, in the frame's own order (whole model first).
+
+    This is the artifact that makes a per-sublayer sweep readable. Seven sublayers times
+    five AP thresholds is far too many folders to open by hand, so each module writes one
+    of these next to its sublayers/ folder, and the per-scope folders become the evidence
+    behind it rather than the thing anyone reads. The whole-model row is drawn in a
+    distinct color because it is the reference the sublayers are being judged against,
+    not another sublayer. Columns that are entirely NaN are skipped, so a metric that is
+    undefined at a strict AP threshold drops its panel instead of drawing empty axes.
+    """
+    panels = [(col, label) for col, label in value_labels.items()
+              if col in comparison_df.columns and comparison_df[col].notna().any()]
+    if comparison_df.empty or not panels:
+        return
+
+    scopes = comparison_df[scope_col].tolist()
+    y = range(len(scopes))
+    colors = [_WHOLE_MODEL_BAR_COLOR if i == 0 else _SUBLAYER_BAR_COLOR for i in y]
+
+    fig, axes = plt.subplots(1, len(panels), figsize=(4.2 * len(panels), 1.0 + 0.42 * len(scopes)),
+                             sharey=True, squeeze=False)
+    for ax, (col, label) in zip(axes[0], panels):
+        values = comparison_df[col].astype(float)
+        ax.barh(list(y), values.fillna(0.0), color=colors, height=0.66)
+        ax.set_xlabel(label, fontsize=10)
+        ax.grid(axis="y", visible=False)
+
+        # Pad the axis around the data's own range rather than around zero: a panel whose
+        # values are all negative (e.g. an r that is negative in every scope) would
+        # otherwise be squeezed into the left edge of an axis running to +1.
+        low, high = min(0.0, values.min()), max(0.0, values.max())
+        span = (high - low) or 1.0
+        ax.set_xlim(low - 0.04 * span, high + 0.16 * span)
+
+        # Labels always sit OUTSIDE the bar, on the side the bar grows toward, so they
+        # stay readable on the dark whole-model bar instead of being drawn over it.
+        for yi, value in zip(y, values):
+            if pd.isna(value):
+                continue
+            offset = 0.02 * span if value >= 0 else -0.02 * span
+            ax.annotate(f"{value:.3g}", (value + offset, yi), fontsize=8, va="center",
+                        ha="left" if value >= 0 else "right", color="#333")
+
+    axes[0][0].set_yticks(list(y))
+    axes[0][0].set_yticklabels(scopes, fontsize=9)
+    axes[0][0].invert_yaxis()
+    fig.suptitle(title, fontsize=14)
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+
+
 def _plot_heatmap_with_leaders(matrix, concepts, title, out_path, cmap, concept_colors=None,
                                color_legend=None, category_boundaries=None) -> None:
     """
