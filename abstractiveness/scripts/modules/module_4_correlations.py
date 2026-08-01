@@ -5,7 +5,9 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
 from scipy import stats
-from utils.helpers import save_dataframe, scope_out_dir, scope_summary_row
+from utils.helpers import (save_dataframe, scope_out_dir, scope_summary_row,
+                           pair_similarity_vector, pair_layer_profile_vectors)
+from utils.plot_helpers import plot_hexbin_with_trends
 
 log = logging.getLogger(__name__)
 
@@ -17,6 +19,8 @@ SUMMARY_LABELS = {
     "r_frequency_vs_expert_count": "r, frequency vs expert count",
     "r_shannon_entropy_vs_expert_count": "r, entropy vs expert count",
     "r_jaccard_vs_cosine_typicality": "r, Jaccard vs cosine typicality",
+    "r_jaccard_vs_layer_profile_allpairs": "r, Jaccard vs layer profile (all pairs)",
+    "r_jaccard_vs_layer_profile_z_allpairs": "r, Jaccard vs layer-profile z (all pairs)",
 }
 
 LEVEL_PALETTE = {"Specific Concepts": "#D96A5B", "Broad Categories": "#4B5A6A"}
@@ -205,6 +209,17 @@ def plot_correlations(merged_metadata_df: pd.DataFrame, similarity_metrics_df: p
             "Frequency(Log10) vs Jaccard Similarity % (r={r:.2f}, p={p:.2e})", '#ffa600',
             corr_dir / "frequency_vs_jaccard.csv", corr_dir / "frequency_vs_jaccard.png", n_total_categorized))
 
+        # Jaccard against layer-profile similarity on the concept-to-parent pairs. The
+        # all-pairs version of the same comparison is the sharper one (see
+        # plot_all_pairs_jaccard_vs_layer_profile), this one keeps it on the population
+        # every other panel in this module uses.
+        summary_rows.append(_run_regression_panel(
+            corr_data, "jaccard_pct", "layer_profile_similarity_pct",
+            "Jaccard Similarity Index %", "Layer-Profile Similarity %",
+            "Jaccard % vs Layer-Profile Similarity % (r={r:.2f}, p={p:.2e})", '#00b3b3',
+            corr_dir / "jaccard_vs_layer_profile.csv", corr_dir / "jaccard_vs_layer_profile.png",
+            n_total_categorized))
+
         summary_rows.append(plot_partial_correlation_jaccard_typicality(corr_data, corr_dir, n_total_categorized))
 
     if concept_entropy_df is not None and not concept_entropy_df.empty:
@@ -292,6 +307,68 @@ def execute_module_4b_jaccard_vs_cosine_typicality(scope, similarity_metrics_df:
     return _panel_r_columns(pd.DataFrame([row]))
 
 
+def plot_all_pairs_jaccard_vs_layer_profile(scope, concept_metadata: pd.DataFrame, corr_dir) -> list:
+    """
+    Jaccard against layer-profile agreement over EVERY unordered pair of words, not just
+    the concept-to-parent pairs the rest of the module works on.
+
+    This is the panel that answers the question the layer-profile metric exists for: is it
+    redundant with Jaccard, or does it carry something Jaccard misses? The all-pairs
+    population is the one a downstream model consuming both as features would see, so a
+    high correlation here would mean the second feature buys little, and a low one means
+    two words can share neurons without agreeing on depth, or agree on depth while sharing
+    no neuron.
+
+    Spearman is the headline rather than Pearson because the relation is expected to be
+    monotone but not linear: Jaccard is zero-inflated and layer-profile similarity
+    saturates near its ceiling. Both are reported.
+
+    Two panels are drawn, against raw similarity and against its null z-score, since raw
+    similarity is largely a size readout and z is what survives conditioning on that.
+    Returns the summary rows for correlation_summary.csv.
+    """
+    items = list(concept_metadata["concept"].unique())
+    jaccard = pair_similarity_vector(scope.expert_df, items) * 100.0
+    profile, profile_z = pair_layer_profile_vectors(scope.expert_df, items)
+
+    # Same-category mask over the same flat pair ordering. Category-label words carry a
+    # null category, and NaN never equals NaN, so every pair involving one counts as
+    # different-category, matching module 8's convention.
+    iu = np.triu_indices(len(items), k=1)
+    category_of = concept_metadata.set_index("concept")["category"].to_dict()
+    cats = np.array([category_of.get(c) for c in items], dtype=object)
+    same = (cats[:, None] == cats[None, :])[iu]
+
+    rows = []
+    panels = [
+        ("jaccard_vs_layer_profile_allpairs", profile,
+         "Layer-profile similarity %", "layer_profile_similarity_pct"),
+        ("jaccard_vs_layer_profile_z_allpairs", profile_z,
+         "Layer-profile agreement vs null (z)", "layer_profile_z"),
+    ]
+    for plot_name, y, y_label, y_variable in panels:
+        valid = np.isfinite(jaccard) & np.isfinite(y)
+        pair_frame = pd.DataFrame({"jaccard_pct": jaccard[valid], y_variable: y[valid],
+                                   "same_category": same[valid]})
+        save_dataframe(pair_frame, corr_dir / f"{plot_name}.csv")
+
+        row = {"plot_name": plot_name, "x_variable": "jaccard_pct", "y_variable": y_variable,
+               "pearson_r": None, "pearson_p": None, "spearman_rho": None, "spearman_p": None,
+               "n_points": int(valid.sum()), "n_total_relevant": len(iu[0]),
+               "coverage_pct": round(100 * valid.sum() / len(iu[0]), 1) if len(iu[0]) else 0.0}
+
+        if valid.sum() >= MIN_ABSOLUTE_N and np.ptp(jaccard[valid]) > 0 and np.ptp(y[valid]) > 0:
+            row["pearson_r"], row["pearson_p"] = stats.pearsonr(jaccard[valid], y[valid])
+            row["spearman_rho"], row["spearman_p"] = stats.spearmanr(jaccard[valid], y[valid])
+            plot_hexbin_with_trends(
+                jaccard[valid], y[valid], same[valid], corr_dir / f"{plot_name}.png",
+                "Expert Jaccard %", y_label, colorbar_label="Word pairs (log)")
+        else:
+            log.warning(f"  Skipping {plot_name}: only {int(valid.sum())} usable pairs.")
+        rows.append(row)
+    return rows
+
+
 def _panel_r_columns(summary_df: pd.DataFrame) -> dict:
     """
     Flatten a correlation summary table into {r_<plot_name>: pearson_r}, the shape the
@@ -320,4 +397,12 @@ def execute_module_4_correlations(scope, merged_metadata_df: pd.DataFrame, simil
     summary_df = plot_correlations(merged_metadata_df, similarity_metrics_df, concept_entropy_df,
                                    category_entropy_df, concept_metadata, out_dir,
                                    include_scope_invariant=scope.is_whole_model)
+
+    # The all-pairs panels need the scope's raw expert frame rather than the per-concept
+    # tables plot_correlations works from, so they run here and append to the same summary.
+    log.info(f"  [{scope.label}] Comparing Jaccard against layer-profile agreement over all word pairs...")
+    all_pairs_rows = plot_all_pairs_jaccard_vs_layer_profile(scope, concept_metadata, out_dir)
+    summary_df = pd.concat([summary_df, pd.DataFrame(all_pairs_rows)], ignore_index=True)
+    save_dataframe(summary_df, out_dir / "correlation_summary.csv")
+
     return scope_summary_row(scope, **_panel_r_columns(summary_df))

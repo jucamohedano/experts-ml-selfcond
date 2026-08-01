@@ -12,7 +12,9 @@ $$E_c = \{(\ell, u) : \text{unit } u \text{ in layer } \ell \text{ is an expert 
 
 A neuron is identified by its (layer, unit) pair because the raw `unit` column holds only the neuron index within a layer, and these indices repeat across layers. The sets are therefore built by zipping `layer_idx` with `unit` (`set(zip(layer_idx, unit))` per concept), which gives $|E_c| = n_c$, the concept's expert count. The module iterates over every `(concept, category)` row of the metadata with a non-null category, that is, every hierarchical pair $(c, k)$ where $k$ is the parent category of concept $c$. Pairs where either $E_c$ or $E_k$ is empty are skipped.
 
-**Analysis scopes.** This module is *set-based*, meaning it reads expert rows as an unordered collection of (layer, unit) pairs, so the layer axis never enters and each scope runs it exactly once. It runs on the whole model first, writing into the module folder itself, then once per sublayer type into `sublayers/<rank>_<sublayer>/`. Module 1, subchapter 1.7 defines the scopes and the rank prefix. A cross-scope summary lands in `sublayer_comparison.csv` and `sublayer_comparison.png` at the module's top level. Its columns are the pair count and the mean and median of both percentages.
+**Analysis scopes.** Subchapter 3.1 is *set-based*, meaning it reads expert rows as an unordered collection of (layer, unit) pairs, so the layer axis never enters. Subchapter 3.2 reads the layer axis, but only as a set of bins to normalize over, so it is permutation-invariant too: unlike Geary's C or peak layer, nothing in it treats adjacent layer indices as adjacent depths. Each scope therefore runs the module exactly once, and the whole-model scope needs no `_by_block` variant. It runs on the whole model first, writing into the module folder itself, then once per sublayer type into `sublayers/<rank>_<sublayer>/`. Module 1, subchapter 1.7 defines the scopes and the rank prefix. A cross-scope summary lands in `sublayer_comparison.csv` and `sublayer_comparison.png` at the module's top level. Its columns are the pair count, the mean and median of both set-based percentages, and the mean of both layer-profile readings.
+
+The whole-model scope uses the flat layer axis at full resolution, which is both the axis the Jaccard index already lives in and the one that retains sublayer identity, and sublayer identity is where the categorical signal is concentrated.
 
 ### 3.1 Expert-set similarity between a concept and its parent category
 
@@ -38,6 +40,9 @@ which reaches 100 whenever one set is entirely contained in the other, regardles
 | shared_expert_units | int | $\|E_c \cap E_k\|$ | Raw number of (layer, unit) experts shared by concept and category. |
 | concept_expert_units | int | $\|E_c\|$ | Size of the concept's expert set. |
 | category_expert_units | int | $\|E_k\|$ | Size of the category's expert set. |
+| layer_profile_similarity_pct | float | $S(c,k)$ | Layer-profile similarity, see subchapter 3.2. |
+| layer_profile_jsd_bits | float | $\mathrm{JSD}(p_c,p_k)$ | Raw Jensen-Shannon divergence between the two layer profiles, in bits. |
+| layer_profile_z | float | $z(c,k)$ | Standardized excess of $S$ over the count-matched null, see subchapter 3.2. |
 
 Example (head of `AP_0.6/3_category_concept_similarities/category_concept_similarity_metrics.csv` in `research_plots_qwen_richie_hsj_with_sublayer_analysis`):
 
@@ -50,6 +55,51 @@ Two **bar charts** plot the same table, one per metric, with each pair's `hierar
 
 - `jaccard_hierarchy.png`, `jaccard_pct` ($J(c,k)$, x-axis) plotted against `hierarchy` (y-axis, one bar per concept-category pair), showing Jaccard similarity as a percentage for each concept-category hierarchy.
 - `overlap_hierarchy.png`, `overlap_pct` ($O(c,k)$, x-axis) plotted against `hierarchy` (y-axis), showing the overlap coefficient as a percentage for each concept-category hierarchy.
+
+### 3.2 Agreement in the layer distribution of the two expert sets
+
+**Motivation.** Both metrics of subchapter 3.1 ask *which neurons* the two words share, so a concept and its category that allocate the same proportion of their experts to the same depths, without ever recruiting the same neuron, score zero on both. That is a real form of representational agreement, and it is invisible to any set metric. Subchapter 3.2 measures it directly.
+
+**Mathematical formulation.** Let $n_{c,\ell}$ be the number of experts word $c$ holds in layer $\ell$, and $n_c = \sum_\ell n_{c,\ell}$ its total expert count. The **layer profile** of $c$ is the normalized vector
+
+$$p_c[\ell] = \frac{n_{c,\ell}}{n_c}, \qquad \sum_{\ell=1}^{L} p_c[\ell] = 1,$$
+
+with $L$ the number of layers in the current scope. For a pair $(c, k)$, writing $m = \tfrac{1}{2}(p_c + p_k)$ for the mixture of the two profiles and $H(p) = -\sum_\ell p[\ell]\log_2 p[\ell]$ for the Shannon entropy in bits, with the convention $0\log_2 0 = 0$, the Jensen-Shannon divergence is
+
+$$\mathrm{JSD}(p_c, p_k) = H(m) - \tfrac{1}{2}\big(H(p_c) + H(p_k)\big) \in [0, 1].$$
+
+It is reported as a similarity on the same scale and direction as $J$ and $O$,
+
+$$S(c, k) = 100 \cdot \Big(1 - \sqrt{\mathrm{JSD}(p_c, p_k)}\Big) \in [0, 100].$$
+
+The square root serves two purposes. $\sqrt{\mathrm{JSD}}$ is the Jensen-Shannon *distance*, a true metric obeying the triangle inequality, and the observed divergences bunch near zero, a region the square root expands, so the reported similarity keeps usable variance instead of saturating.
+
+**Why Jensen-Shannon.** It is symmetric, bounded, and finite even when the two profiles have disjoint support. That last property is what rules out the alternatives: a concept holding experts in layers where its category label holds none is common, and grows more common as the AP threshold tightens, so cross-entropy and Kullback-Leibler divergence, which are infinite there and additionally asymmetric with no principled direction between a concept and a category, cannot be used. A Pearson correlation across layer bins would be dominated by the model's global density profile, which every word inherits, leaving it pinned at a high baseline with compressed range. A Spearman correlation discards magnitude and collapses into ties at strict thresholds, where most bins are empty. The histogram intersection $\sum_\ell \min(p_c[\ell], p_k[\ell])$, which is the natural distributional analogue of the overlap coefficient, carries a finite-sample bias of order $\sqrt{K/n}$ against Jensen-Shannon's $K/n$, with $K$ the number of occupied bins, because writing $\min(x,y) = \tfrac{1}{2}(x + y - |x - y|)$ shows the absolute value accumulating sampling noise rather than cancelling it. It is therefore more sensitive to expert-set size, which is the opposite of what is wanted.
+
+**The size control.** $\mathrm{JSD}$ on normalized profiles is scale-invariant algebraically, since multiplying every count of a word by a constant leaves $p_c$ unchanged. What survives is estimation bias: $p_c$ is a multinomial estimate from $n_c$ draws, and plug-in entropy is biased low by approximately $(K-1)/(2 n \ln 2)$ bits, so a word with few experts yields a spuriously spiky profile and an inflated divergence. This cannot be normalized away, because it is a property of the sample rather than of the quantity estimated.
+
+The control is a count-matched null built from **other real pairs**. Each pair is placed at the coordinate $(\log \min(n_c, n_k),\ \log \max(n_c, n_k))$, which is symmetric in the pair by construction, and compared against the $k$ nearest other pairs in that space, itself excluded. Writing $\mathcal{N}(c,k)$ for that reference set, $\mu_{\mathcal{N}}$ and $\sigma_{\mathcal{N}}$ for the mean and standard deviation of $S$ over it, the reported control is the standardized excess
+
+$$z(c, k) = \frac{S(c,k) - \mu_{\mathcal{N}(c,k)}}{\sigma_{\mathcal{N}(c,k)}}.$$
+
+A positive $z$ means the two words agree in layer allocation more than two arbitrary words of those expert counts do, and a negative $z$ means less.
+
+The choice of reference set matters more than the arithmetic. A null that instead draws both profiles from the pooled global layer profile, at the pair's own expert counts, was tried first and rejected: it models words with no word-specific layer structure whatsoever, and since real words plainly do have idiosyncratic profiles, every real pair scored far below it, with a mean $z$ around $-12$ on Qwen3 at AP 0.6 and no pair reaching the baseline. That is a true statement about the model, layer allocation is strongly word-specific, but it is a global one, and it left the sign of $z$ carrying no information about the individual pair. The question the metric is asked is whether *these two words* agree more than *two arbitrary words* of these sizes, so the comparison set has to be arbitrary words.
+
+This is why $z$, not $S$, is the reading to trust. On synthetic data where every word is drawn from one shared global profile, so that no pair has any true agreement, raw $S$ still correlates with the pair's smaller expert count at Spearman 0.965, that is, it is almost purely a size readout, while $z$ cuts that dependence to 0.04 at the full 204-word population.
+
+The reference set is drawn by $k$ nearest neighbours rather than from a fixed grid over the count space, because the count distribution is skewed enough that a grid would leave its sparse corners with too few pairs to estimate $\sigma_{\mathcal{N}}$ from. Its size scales with the pool, $k = \operatorname{clip}(0.01\,m,\ 40,\ 300)$ for $m$ available pairs, so the neighbourhood stays local rather than absorbing the count gradient as the pool shrinks.
+
+Because $z$ is defined relative to the pairs actually present, it is a **within-run ranking**. Its mean over all pairs is near zero by construction, so it answers which pairs agree more than comparable pairs, not whether words agree on depth in absolute terms, and comparisons of $z$ across AP thresholds or across scopes are comparisons of relative structure rather than of level.
+
+Words holding fewer than 2 experts have no usable profile, so all three quantities are left empty for them, rather than set to zero as the Jaccard index is for an empty set. Zero is a true statement for a set metric, the word shares no experts, but it would be a false one here, asserting a maximally different layer distribution about a word that has no layer distribution at all. When fewer than 80 usable pairs survive in total, $z$ is left empty throughout, since a count-matched reference set cannot be formed from so few.
+
+**Generated data structures.** Three columns added to `category_concept_similarity_metrics.csv` (see the table above) and two bar charts sharing the layout and category colors of the pair in subchapter 3.1:
+
+- `layer_profile_similarity_hierarchy.png`, `layer_profile_similarity_pct` ($S(c,k)$, x-axis) against `hierarchy` (y-axis), the direct counterpart of `jaccard_hierarchy.png`.
+- `layer_profile_z_hierarchy.png`, `layer_profile_z` ($z(c,k)$, x-axis) against `hierarchy` (y-axis), with a dashed reference line at $z = 0$ marking the count-matched null.
+
+The same quantities are computed for every pair of words, not only concept-to-parent pairs, in module 5's `layer_profile_matrix.csv` and `layer_profile_z_matrix.csv`, and module 4 relates them to the Jaccard index over both populations. Note that the $z$ values in this module's table are drawn from the all-pairs reference set, so a concept-to-parent pair is standardized against arbitrary word pairs of comparable size rather than against other concept-to-parent pairs. A mean $z$ above zero across this table is therefore itself a finding: it would say that concept-to-parent pairs agree on depth more than arbitrary word pairs of the same sizes do.
 
 ## Results
 
@@ -72,3 +122,21 @@ Both metrics decline steadily as the AP threshold tightens:
 | 0.9 | 59 | 0.6% / 0.0% | 4.5% / 0.0% | 97% |
 
 Concept-to-own-category identity overlap is low at *every* threshold: even at the most lenient AP=0.5, the median pair shares only 4.1% Jaccard, and 85% of pairs sit below 10%. By AP=0.8 and 0.9, **the median concept-category pair shares zero experts at all** (median = 0.0% on both metrics). Part of the decline is mechanical, since stricter AP keeps fewer experts per concept overall, shrinking every set and therefore every intersection, and n also shrinks at AP=0.8/0.9 because some concepts have too few retained experts to compute a set-based similarity at all. The overall conclusion is that a concept and its category-label word recruit largely *different* specific neurons at every threshold tested. The hierarchical relationship, to the extent modules 4 and 5 detect one, is carried by a modest shared minority of experts rather than by set identity.
+
+### Layer-profile agreement (subchapter 3.2)
+
+Whole-model scope, Qwen3 on Richie-HSJ, all 196 concept-to-parent pairs:
+
+| AP | n | mean Jaccard | mean $S$ | median $S$ | mean $z$ | % of pairs with $z > 0$ |
+|---|---|---|---|---|---|---|
+| 0.5 | 196 | 8.1% | 63.7% | 63.5% | +0.05 | 50.5% |
+| 0.6 | 196 | 6.5% | 53.9% | 53.8% | -0.04 | 46.9% |
+| 0.7 | 196 | 3.9% | 42.7% | 41.9% | +0.07 | 51.5% |
+| 0.8 | 196 | 1.2% | 23.9% | 24.1% | -0.14 | 44.9% |
+| 0.9 | 69 | 0.2% | 16.1% | 16.6% | +0.02 | 55.6% |
+
+Raw $S$ looks far more encouraging than the Jaccard index, 53.9% against 6.5% at AP=0.6, but that comparison is exactly the one the subchapter warns against, since $S$ is measured against a ceiling every pair approaches for reasons that have nothing to do with the pair. The interpretable column is $z$, and it is flat at zero: the mean sits between $-0.14$ and $+0.07$ at every threshold, and the share of pairs above zero stays near half.
+
+**A concept and its own category label therefore agree on layer allocation no more than two arbitrary words of the same expert counts do.** That is a genuine negative result, and it strengthens subchapter 3.1's conclusion rather than softening it. The natural objection to a low Jaccard, that a concept and its category might occupy the same depths through different neurons, is testable and does not hold here. On this pairing the two words are unrelated on both readings.
+
+This does not mean the metric is uninformative, only that the concept-to-label pairing is the wrong place to look for the effect. Module 5 computes the same quantity over all word pairs and finds that same-category concept *pairs* do agree on depth well above chance, with a category alignment ROC-AUC near 0.69 at every threshold. The two results together say the category-label word behaves unlike its own members, which is the same dissociation module 6 reports between the category prototype and its exemplar average.

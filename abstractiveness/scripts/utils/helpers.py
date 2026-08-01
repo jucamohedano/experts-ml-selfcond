@@ -5,6 +5,8 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 from scipy import sparse, stats
+from scipy.spatial import cKDTree
+from scipy.special import xlogy
 
 log = logging.getLogger(__name__)
 formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
@@ -465,6 +467,245 @@ def pair_shared_count_vector(expert_sets_df: pd.DataFrame, concepts: list) -> np
     """
     intersection, _, _ = expert_set_overlap_matrices(expert_sets_df, concepts)
     return intersection[np.triu_indices(len(concepts), k=1)]
+
+
+# ---------------------------------------------------------------------------
+# Layer-profile similarity (modules 3, 4, 5)
+#
+# The expert-set primitives above compare two words by WHICH neurons they share.
+# This block compares them by HOW their experts are spread over the layers: two
+# words can put the same proportion of their experts at the same depths and still
+# share no neuron at all, which every set-based metric scores as zero.
+#
+# The measure is Jensen-Shannon on the row-normalized layer profiles, reported as
+# a similarity on Jaccard's 0-100 scale, plus a z-score against other real pairs of
+# comparable expert counts. The z is what makes the metric comparable across pairs:
+# Jensen-Shannon on normalized profiles is already scale-invariant algebraically, but
+# plug-in entropy is biased low by about (K-1)/(2 n ln2) bits, so a small expert set
+# yields a spuriously spiky profile and an inflated divergence, and raw similarity
+# ends up tracking expert-set size far more than it tracks any real agreement.
+# ---------------------------------------------------------------------------
+
+# Below this many experts a word has no usable layer profile: the multinomial
+# estimate is nearly all noise and its null is degenerate. Such words are NaN
+# throughout, deliberately unlike expert_set_overlap_matrices, which returns 0 for
+# an empty set. Zero is TRUE for Jaccard (the word shares no experts) but FALSE
+# here, since it would assert "maximally different layer distribution" about a word
+# that has no layer distribution at all.
+MIN_PROFILE_EXPERTS = 2
+
+# Row block size for the pairwise mixture term. The full (n, n, L) tensor is 65 MB
+# at float64 on Qwen3 (204 words x 196 layers); blocking holds it near 10 MB.
+_JSD_BLOCK_ROWS = 32
+
+# Reference-set size for the count-matched null, as a fraction of the available pairs,
+# with an absolute floor and ceiling. It scales rather than sitting at a constant because
+# the reference set must be a small enough SHARE of the data to stay local in the
+# (log n_a, log n_b) count space, or the strong count gradient inside the neighbourhood
+# leaks back into z. Measured on synthetic null data, a fixed k=200 leaves a residual
+# count correlation of +0.04 at 204 words (20,706 pairs, k is 1% of them) but +0.41 at 60
+# words (1,770 pairs, where the same k is 11%).
+#
+# On the Richie-HSJ item set this is insurance rather than a live fix: the pool holds 204
+# words and never drops below 187 even at AP 0.9, since a word needs only
+# MIN_PROFILE_EXPERTS experts to enter it, so the fraction resolves to 174-207 across the
+# whole sweep and a fixed 200 would behave the same. It matters for smaller item sets,
+# such as the 60-concept Mitchell stimulus set used elsewhere in this repository, where a
+# constant k would land squarely in the leaky regime. The floor keeps the standard
+# deviation estimable there.
+NULL_NEIGHBOR_FRACTION = 0.01
+NULL_NEIGHBORS_MIN = 40
+NULL_NEIGHBORS_MAX = 300
+
+
+def _entropy_bits(prob: np.ndarray) -> np.ndarray:
+    """
+    Shannon entropy in bits along the last axis. xlogy returns 0 where p == 0, so the
+    0*log(0) = 0 convention needs no masking.
+    """
+    return -xlogy(prob, prob).sum(axis=-1) / np.log(2.0)
+
+
+def _profile_jsd_matrix(prob: np.ndarray) -> np.ndarray:
+    """
+    Pairwise Jensen-Shannon divergence in bits between the rows of ``prob``, as a square
+    (n, n) array. JSD(p, q) = H(m) - (H(p) + H(q))/2 with m = (p + q)/2, which is bounded
+    in [0, 1] when H is in bits.
+
+    The mixture entropy is the only term needing a pairwise tensor, so it is accumulated
+    in row blocks rather than materializing (n, n, L) at once.
+    """
+    n = len(prob)
+    row_entropy = _entropy_bits(prob)
+    mixture_entropy = np.empty((n, n), dtype=np.float64)
+
+    for start in range(0, n, _JSD_BLOCK_ROWS):
+        stop = min(start + _JSD_BLOCK_ROWS, n)
+        mixture = 0.5 * (prob[start:stop, None, :] + prob[None, :, :])
+        mixture_entropy[start:stop] = _entropy_bits(mixture)
+
+    jsd = mixture_entropy - 0.5 * (row_entropy[:, None] + row_entropy[None, :])
+    # Floating-point error can push an identical pair a hair below 0 or a disjoint pair a
+    # hair above 1, and the square root downstream would turn the former into a NaN.
+    return np.clip(jsd, 0.0, 1.0)
+
+
+def _jsd_to_similarity(jsd: np.ndarray) -> np.ndarray:
+    """
+    Jensen-Shannon divergence in bits to a 0-100 similarity, 100 * (1 - sqrt(JSD)).
+
+    The square root is the Jensen-Shannon DISTANCE, a true metric, so the result behaves
+    like a proper distance for any downstream model consuming it as a feature. It also
+    expands the near-zero region where the observed values bunch, which keeps usable
+    variance instead of saturating at 100.
+    """
+    return 100.0 * (1.0 - np.sqrt(jsd))
+
+
+def _empirical_pair_null(similarity: np.ndarray, counts: np.ndarray,
+                         neighbors: int = None) -> np.ndarray:
+    """
+    Standardize each pair's similarity against OTHER REAL PAIRS of comparable expert
+    counts, returning the square (n, n) array of z-scores.
+
+    The reference set matters more than the arithmetic. An earlier version drew both
+    profiles from the pooled global layer profile, which is a null of no word-specific
+    layer structure whatsoever. Real words do have idiosyncratic profiles, so every real
+    pair scored far below that baseline (mean z about -12 on Qwen3 at AP 0.6) and the
+    sign of z carried no information about the pair. The question the metric is asked is
+    "do these two words agree on depth MORE THAN TWO ARBITRARY WORDS of these sizes do",
+    so the comparison set has to be arbitrary words, not synthetic draws.
+
+    Each pair is placed at (log min(n_a, n_b), log max(n_a, n_b)), which is symmetric in
+    the pair by construction, and compared against its ``neighbors`` nearest pairs in that
+    space, excluding itself. A k-nearest-neighbour reference rather than a fixed grid
+    because the count distribution is heavily skewed: a grid would leave the sparse
+    high-count corner with too few pairs to estimate a standard deviation from, while
+    kNN adapts its bandwidth to the local density automatically and needs no interpolation
+    or empty-cell handling.
+    """
+    n = len(counts)
+    z = np.full((n, n), np.nan)
+    iu = np.triu_indices(n, k=1)
+    pair_values = similarity[iu]
+    n_a, n_b = counts[iu[0]], counts[iu[1]]
+
+    usable = np.isfinite(pair_values) & (n_a >= MIN_PROFILE_EXPERTS) & (n_b >= MIN_PROFILE_EXPERTS)
+    # A standard deviation over a handful of neighbours is not worth reporting.
+    if usable.sum() < 2 * NULL_NEIGHBORS_MIN:
+        return z
+
+    values = pair_values[usable]
+    coords = np.stack([np.log(np.minimum(n_a, n_b)[usable]),
+                       np.log(np.maximum(n_a, n_b)[usable])], axis=1)
+
+    if neighbors is None:
+        neighbors = int(np.clip(round(NULL_NEIGHBOR_FRACTION * len(values)),
+                                NULL_NEIGHBORS_MIN, NULL_NEIGHBORS_MAX))
+    k = min(neighbors, len(values) - 1)
+    _, idx = cKDTree(coords).query(coords, k=k + 1)
+
+    # Drop each pair from its own reference set, so a pair never helps define the mean it
+    # is measured against. Identity is matched rather than position, because many pairs
+    # share exact count coordinates and the self-match need not land in column 0. Where
+    # duplicates are numerous enough to push the self-match out of the neighbourhood
+    # entirely, the last (furthest) column is dropped instead, which keeps every row at
+    # exactly k references.
+    self_match = idx == np.arange(len(values))[:, None]
+    drop = self_match & (self_match.cumsum(axis=1) == 1)
+    drop[~self_match.any(axis=1), -1] = True
+    keep = idx[~drop].reshape(len(values), k)
+
+    reference = values[keep]
+    mu = reference.mean(axis=1)
+    sigma = reference.std(axis=1, ddof=1)
+
+    with np.errstate(divide="ignore", invalid="ignore"):
+        pair_z = np.where(sigma > 0, (values - mu) / sigma, np.nan)
+
+    filled = np.full(len(pair_values), np.nan)
+    filled[usable] = pair_z
+    z[iu] = filled
+    z.T[iu] = filled
+    return z
+
+
+def _layer_profiles(expert_allocation_df: pd.DataFrame, items: list) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Row-normalized layer profiles and expert counts for ``items``, in the given order.
+
+    build_layer_probability_matrix groups by concept, so a word with no expert rows never
+    enters its index; reindexing to ``items`` turns that absence into the NaN row this
+    module treats as "no usable profile".
+    """
+    count_matrix, prob_matrix = build_layer_probability_matrix(expert_allocation_df)
+    prob = prob_matrix.reindex(items).to_numpy(dtype=np.float64)
+    counts = count_matrix.reindex(items).sum(axis=1).to_numpy(dtype=np.float64)
+    return prob, counts
+
+
+def layer_profile_matrices(expert_allocation_df: pd.DataFrame, items: list, *,
+                           null_neighbors: int = None) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Pairwise layer-profile agreement for every pair of ``items``, as three square (n, n)
+    arrays: (jsd_bits, similarity_pct, z).
+
+    jsd_bits is the Jensen-Shannon divergence between the two words' layer profiles, in
+    bits, 0 for identical profiles and 1 for disjoint ones. similarity_pct is
+    100 * (1 - sqrt(jsd_bits)), on the same scale and direction as Jaccard, with a
+    diagonal of 100. z standardizes similarity_pct against OTHER REAL PAIRS of comparable
+    expert counts (see _empirical_pair_null): positive means the two words agree in layer
+    allocation more than two arbitrary words of those sizes do, negative means less.
+    Read z, not similarity_pct, when asking whether a pair carries signal.
+
+    The reason is that raw similarity is very largely a readout of expert-set size. On
+    synthetic data where every word is drawn from one shared global profile, so that no
+    pair has any true agreement at all, raw similarity still correlates with the pair's
+    smaller expert count at Spearman 0.965. Removing that confound is the entire purpose
+    of the z column.
+
+    Because z is defined relative to the pairs actually present, it is a WITHIN-RUN
+    ranking: its mean over all pairs is near 0 by construction, so it answers "which pairs
+    agree more than comparable pairs" and not "do words agree on depth in absolute terms".
+    Comparisons of z across AP thresholds or across scopes are therefore comparisons of
+    relative structure, not of level.
+
+    Rows and columns of words holding fewer than MIN_PROFILE_EXPERTS experts are NaN in
+    all three arrays, as is the z diagonal (a word against itself has no meaningful null).
+
+    Every caller must pass the SAME item list, since the null's reference set is drawn
+    from the pairs of ``items``, so a shorter list would change the z of a given pair.
+    """
+    prob, counts = _layer_profiles(expert_allocation_df, items)
+    n = len(items)
+    usable = np.isfinite(counts) & (counts >= MIN_PROFILE_EXPERTS) & np.isfinite(prob).all(axis=1)
+
+    jsd = np.full((n, n), np.nan)
+    similarity = np.full((n, n), np.nan)
+    z = np.full((n, n), np.nan)
+    if usable.sum() < 2:
+        return jsd, similarity, z
+
+    idx = np.flatnonzero(usable)
+    block = np.ix_(idx, idx)
+    jsd[block] = _profile_jsd_matrix(prob[idx])
+    similarity[block] = _jsd_to_similarity(jsd[block])
+
+    z = _empirical_pair_null(similarity, counts, null_neighbors)
+    np.fill_diagonal(z, np.nan)
+    return jsd, similarity, z
+
+
+def pair_layer_profile_vectors(expert_allocation_df: pd.DataFrame, items: list,
+                               **kwargs) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Layer-profile similarity and its null z-score for every unordered pair of ``items``,
+    as two flat vectors aligned with np.triu_indices(len(items), k=1), mirroring
+    pair_similarity_vector. Keyword arguments pass through to layer_profile_matrices.
+    """
+    _, similarity, z = layer_profile_matrices(expert_allocation_df, items, **kwargs)
+    iu = np.triu_indices(len(items), k=1)
+    return similarity[iu], z[iu]
 
 
 # ---------------------------------------------------------------------------

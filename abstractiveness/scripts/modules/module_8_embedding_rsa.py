@@ -43,7 +43,8 @@ from utils.helpers import (save_dataframe, pair_similarity_vector, pair_shared_c
                            embedding_rdm, spearman_rdm_mantel, bootstrap_rdm_rho_ci, spearman_brown,
                            layer_slice, filter_expert_data_to_sublayer, _offdiag)
 from utils.plot_helpers import (_plot_heatmap_with_leaders, build_category_color_map,
-                                fig_width_for, apply_rotated_leader_labels)
+                                fig_width_for, apply_rotated_leader_labels,
+                                plot_hexbin_with_trends)
 
 log = logging.getLogger(__name__)
 
@@ -593,43 +594,6 @@ def _scatter_rankrank(x: np.ndarray, y: np.ndarray, out_path, layer_name: str) -
     plt.close(fig)
 
 
-def _scatter_hexbin(x: np.ndarray, y: np.ndarray, same: np.ndarray, out_path, layer_name: str) -> None:
-    """Fixed hexbin (perceptually-uniform colormap instead of grey), split into same vs
-    different category panels with a binned-median trend, a straight OLS fit, and a
-    LOWESS smooth in each, so a reader sees the non-parametric trend against the fit a
-    naive linear correlation would draw."""
-    fig, axes = plt.subplots(1, 2, figsize=(13, 6), sharey=True)
-    hb = None
-    for ax, mask, title in [(axes[0], same, "Same category"), (axes[1], ~same, "Different category")]:
-        if not mask.any():
-            continue
-        hb = ax.hexbin(x[mask], y[mask], gridsize=45, bins="log", cmap="magma", mincnt=1)
-        order = np.argsort(x[mask])
-        xb, yb = x[mask][order], y[mask][order]
-        edges = np.quantile(xb, np.linspace(0, 1, 11))
-        centers = 0.5 * (edges[:-1] + edges[1:])
-        meds = [np.median(yb[(xb >= lo) & (xb <= hi)]) if ((xb >= lo) & (xb <= hi)).any() else np.nan
-                for lo, hi in zip(edges[:-1], edges[1:])]
-        ax.plot(centers, meds, color="#ffa600", linewidth=2, label="Binned median")
-        if xb.std() > 0:
-            pearson_r = stats.pearsonr(xb, yb).statistic
-            slope, intercept = np.polyfit(xb, yb, 1)
-            xs_line = np.array([xb.min(), xb.max()])
-            ax.plot(xs_line, intercept + slope * xs_line, color="#2f2f2f", linestyle="--",
-                    linewidth=1.6, label=f"OLS (r={pearson_r:.2f})")
-            smoothed = lowess(yb, xb, frac=0.4, return_sorted=True)
-            ax.plot(smoothed[:, 0], smoothed[:, 1], color="#00b3b3", linestyle=":",
-                    linewidth=2.2, label="LOWESS")
-        ax.set_title(title)
-        ax.set_xlabel("Expert Jaccard")
-        ax.legend(loc="upper left")
-    axes[0].set_ylabel(f"Embedding similarity ({layer_name})")
-    if hb is not None:
-        fig.colorbar(hb, ax=axes, label="Concept pairs (log)")
-    plt.savefig(out_path, dpi=300, bbox_inches="tight")
-    plt.close(fig)
-
-
 def _scatter_binned(shared: np.ndarray, y: np.ndarray, same: np.ndarray, out_path, layer_name: str) -> None:
     """Median embedding similarity (with IQR band) binned by raw shared-expert count,
     shown separately for same- and different-category pairs, each with a straight OLS
@@ -699,7 +663,8 @@ def plot_rsa_scatter(expert_similarity: np.ndarray, embedding_similarity: np.nda
     base = out_path.with_suffix("")
     _scatter_binned(shared_counts, y, same, base.with_name(base.name + "_binned.png"), layer_name)
     _scatter_rankrank(x, y, base.with_name(base.name + "_rankrank.png"), layer_name)
-    _scatter_hexbin(x, y, same, base.with_name(base.name + "_hexbin.png"), layer_name)
+    plot_hexbin_with_trends(x, y, same, base.with_name(base.name + "_hexbin.png"),
+                            "Expert Jaccard", f"Embedding similarity ({layer_name})")
 
 
 # ---------------------------------------------------------------------------

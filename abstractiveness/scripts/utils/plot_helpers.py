@@ -1,7 +1,9 @@
 import matplotlib.pyplot as plt
 from matplotlib.patches import Patch
+import numpy as np
 import pandas as pd
 import seaborn as sns
+from scipy import stats
 
 sns.set_theme(style="whitegrid")
 
@@ -240,6 +242,55 @@ def plot_comparison_violin(values_by_group: dict, y_label: str, title: str, out_
     plt.tight_layout()
     plt.savefig(out_path, dpi=300, bbox_inches='tight')
     plt.close()
+
+
+def plot_hexbin_with_trends(x, y, same, out_path, x_label: str, y_label: str,
+                            colorbar_label: str = "Concept pairs (log)") -> None:
+    """
+    Density hexbin of tens of thousands of concept pairs, split into same-category and
+    different-category panels, each carrying a binned median, a straight OLS fit, and a
+    LOWESS smooth. Showing the OLS line against the LOWESS smooth is the point: it lets a
+    reader see the true (often saturating) trend next to the straight line a naive linear
+    correlation would draw.
+
+    ``same`` is the boolean same-category mask over the same flat pair ordering as x and y.
+
+    Shared by module 8's RSA scatter and module 4's all-pairs panels. statsmodels is
+    imported inside the function because it costs about a second at import time and every
+    module in the pipeline imports this file, while only two of them draw this plot.
+    """
+    from statsmodels.nonparametric.smoothers_lowess import lowess
+
+    fig, axes = plt.subplots(1, 2, figsize=(13, 6), sharey=True)
+    hb = None
+    for ax, mask, title in [(axes[0], same, "Same category"), (axes[1], ~same, "Different category")]:
+        if not mask.any():
+            continue
+        hb = ax.hexbin(x[mask], y[mask], gridsize=45, bins="log", cmap="magma", mincnt=1)
+        order = np.argsort(x[mask])
+        xb, yb = x[mask][order], y[mask][order]
+        edges = np.quantile(xb, np.linspace(0, 1, 11))
+        centers = 0.5 * (edges[:-1] + edges[1:])
+        meds = [np.median(yb[(xb >= lo) & (xb <= hi)]) if ((xb >= lo) & (xb <= hi)).any() else np.nan
+                for lo, hi in zip(edges[:-1], edges[1:])]
+        ax.plot(centers, meds, color="#ffa600", linewidth=2, label="Binned median")
+        if xb.std() > 0:
+            pearson_r = stats.pearsonr(xb, yb).statistic
+            slope, intercept = np.polyfit(xb, yb, 1)
+            xs_line = np.array([xb.min(), xb.max()])
+            ax.plot(xs_line, intercept + slope * xs_line, color="#2f2f2f", linestyle="--",
+                    linewidth=1.6, label=f"OLS (r={pearson_r:.2f})")
+            smoothed = lowess(yb, xb, frac=0.4, return_sorted=True)
+            ax.plot(smoothed[:, 0], smoothed[:, 1], color="#00b3b3", linestyle=":",
+                    linewidth=2.2, label="LOWESS")
+        ax.set_title(title)
+        ax.set_xlabel(x_label)
+        ax.legend(loc="upper left")
+    axes[0].set_ylabel(y_label)
+    if hb is not None:
+        fig.colorbar(hb, ax=axes, label=colorbar_label)
+    plt.savefig(out_path, dpi=300, bbox_inches="tight")
+    plt.close(fig)
 
 
 _WHOLE_MODEL_BAR_COLOR = "#1f2d3d"

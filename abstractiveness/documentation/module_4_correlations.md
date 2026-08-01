@@ -26,6 +26,7 @@ with the two-sided p-value obtained from the exact null distribution used by `sc
 | typicality_vs_jaccard | $t_c$ | $J_c$ | more typical concepts share more experts with their category |
 | typicality_vs_overlap | $t_c$ | $O_c$ | the typicality–alignment link survives switching to the containment-based similarity (module 3's overlap coefficient), which ignores the category set's larger size |
 | frequency_vs_jaccard | $\tilde{f}_c$ | $J_c$ | more frequent words share more experts with their category |
+| jaccard_vs_layer_profile | $J_c$ | $S_c$ | sharing neurons with the category and allocating experts to the same depths as the category are the same thing, or two different things (module 3, subchapter 3.2) |
 
 Every panel runs through a single shared helper (`_run_regression_panel`) that drops missing values for the relevant pair, saves the cleaned subset to CSV, draws the scatter plot and saves the PNG, all within one call, so every panel's CSV and PNG are always written together regardless of how much data survived.
 
@@ -253,6 +254,32 @@ Example (head of `AP_0.6/4_correlations/shannon_entropy_vs_expert_count.csv` in 
 
 - `shannon_entropy_vs_expert_count.png`, a **scatter plot with a linear regression line** over the pooled sample, x: `shannon_entropy` ($H(c)$), y: `experts_count` ($n_c$), with concepts drawn as small dots and category labels as larger diamonds, and the pooled Pearson $r$/$p$ in the title.
 
+### 4.5 Jaccard vs. layer-profile agreement over all word pairs
+
+**Research question.** Modules 3 and 5 now describe a word pair in two ways: the Jaccard index, which asks which neurons the two words share, and the layer-profile similarity of module 3, subchapter 3.2, which asks whether they spread their experts over the layers in the same proportions. This subchapter asks how much those two readings actually differ. If they are near-equivalent, the second carries little beyond the first. If they diverge, then two words can share neurons without agreeing on depth, or agree on depth while sharing no neuron, and the two are complementary descriptions.
+
+Subchapter 4.1's `jaccard_vs_layer_profile` panel answers this on the 147 concept-to-parent pairs, the population every other panel of the module uses. This subchapter answers it on **every unordered pair of the $|\mathcal{C}|$ words**, $\binom{204}{2} = 20{,}706$ pairs on the Richie-HSJ set, which is the population any downstream model consuming both quantities as pairwise features would see.
+
+**Mathematical formulation.** Both quantities are read off the flat pair vectors in $\texttt{triu}(|\mathcal{C}|, k=1)$ order, the Jaccard index from `pair_similarity_vector` and the two layer-profile readings from `pair_layer_profile_vectors`. Two panels are drawn, one against the raw similarity $S$ and one against its null z-score $z$, because $S$ is largely a readout of expert-set size while $z$ is what survives conditioning on it.
+
+Spearman's $\rho$ is the headline statistic here rather than Pearson's $r$, and both are reported. The relation is expected to be monotone but not linear: the Jaccard index is strongly zero-inflated, with most pairs sharing no expert at all, while the layer-profile similarity saturates toward its ceiling, so a linear coefficient understates an association that the ranks capture cleanly. Writing $d_i$ for the difference in ranks of pair $i$ under the two measures, over $n$ pairs with no ties,
+
+$$\rho = 1 - \frac{6\sum_{i=1}^{n} d_i^2}{n(n^2 - 1)} \in [-1, 1].$$
+
+**Coverage.** The concept-level coverage gate of subchapter 4.1 does not apply, because the population is pairs rather than concepts. Instead `n_total_relevant` holds the total number of unordered pairs and `n_points` the number finite on both axes, so `coverage_pct` keeps its meaning: the share of pairs that could in principle have contributed and did. Pairs are lost only when a word holds fewer than 2 experts, which leaves it without a usable layer profile.
+
+**Generated data structures.** Two CSVs and two PNGs. Each CSV holds the per-pair values actually plotted, with a `same_category` flag, so the pair-level data behind the correlation is inspectable and reusable:
+
+- `jaccard_vs_layer_profile_allpairs.csv`, columns `jaccard_pct`, `layer_profile_similarity_pct`, `same_category`.
+- `jaccard_vs_layer_profile_z_allpairs.csv`, columns `jaccard_pct`, `layer_profile_z`, `same_category`.
+
+At twenty thousand points a scatter plot is a solid block of ink, so both PNGs use the density treatment module 8 established for the same problem: a log-scaled **hexbin** split into same-category and different-category panels, each carrying a binned median, a straight OLS fit, and a LOWESS smooth. Showing the OLS line against the LOWESS smooth is the point, since it puts the true, often saturating, trend next to the straight line a naive linear correlation would draw.
+
+- `jaccard_vs_layer_profile_allpairs.png`, x: `jaccard_pct` ($J_{cd}$), y: `layer_profile_similarity_pct` ($S(c,d)$).
+- `jaccard_vs_layer_profile_z_allpairs.png`, x: `jaccard_pct` ($J_{cd}$), y: `layer_profile_z` ($z(c,d)$).
+
+Both add a row to `correlation_summary.csv`, which for these rows also carries the `spearman_rho` and `spearman_p` columns (left empty on every concept-level panel).
+
 ## Results
 
 *Scope note.* Every figure in this section comes from the runs that predate the whole-model refactor, so it describes the **analysis sublayer** (`mlp.c_fc` for GPT-2, `mlp.gate_proj` for Qwen3), which is now one scope among several rather than the only one. Those numbers still stand, they are reproduced byte for byte by the corresponding `sublayers/<rank>_<sublayer>/` outputs. Whole-model and other-sublayer figures land here once the sweep is re-run.
@@ -312,6 +339,28 @@ Typicality-vs-Jaccard is significant across AP 0.5 to 0.8 in Qwen3 and across AP
 
 **Overlap and entropy panels.** Human-Typicality-vs-Overlap (run for Qwen3) matches typicality-vs-Jaccard at every threshold (AP=0.5 both 0.381, AP=0.8 overlap 0.304 versus Jaccard 0.342), consistent with the typicality-alignment link being independent of Jaccard's size sensitivity. Shannon-entropy-vs-expert-count is near zero at the lenient thresholds (Qwen3 r=0.114 at AP=0.5, r=0.021 at AP=0.6) and rises to r=0.233 (p=8e-4) by AP=0.8 as counts fall toward the $\log_2 n_c$ ceiling. Module 2's entropy contrasts are therefore count-independent at AP 0.5 to 0.6 but not at strict thresholds.
 
+### Jaccard vs layer-profile agreement (subchapter 4.5)
+
+Whole-model scope, Qwen3 on Richie-HSJ, over all 20,706 word pairs:
+
+| AP | pairs used | coverage | Spearman $\rho$, $J$ vs $S$ | Pearson $r$, $J$ vs $S$ | Spearman $\rho$, $J$ vs $z$ |
+|---|---|---|---|---|---|
+| 0.5 | 20,706 | 100% | 0.440 | 0.368 | 0.386 |
+| 0.6 | 20,706 | 100% | 0.379 | 0.281 | 0.332 |
+| 0.7 | 20,706 | 100% | 0.330 | 0.213 | 0.261 |
+| 0.8 | 20,301 | 98% | 0.296 | 0.171 | 0.210 |
+| 0.9 | 17,391 | 84% | 0.146 | 0.102 | 0.114 |
+
+The two metrics are **positively but weakly related, and they diverge further as the AP threshold tightens**, from $\rho = 0.44$ to $\rho = 0.15$. Sharing neurons and allocating experts to the same depths are therefore largely different things, which is precisely what makes the layer-profile reading worth computing rather than a restatement of the Jaccard index. At the loosest threshold the shared rank variance is about 19 percent, at the strictest about 2 percent.
+
+Pearson sits consistently below Spearman, by 0.07 to 0.10, which is the expected signature of the non-linearity that motivated reporting the rank statistic as the headline. The hexbin panels show its source directly. The Jaccard axis is heavily zero-inflated, so a dense column of pairs sits at $J = 0$ spanning the entire range of layer-profile similarity, from roughly 30% to 80% at AP=0.6. Those are pairs that share no expert at all, which the Jaccard index cannot tell apart, and which the layer-profile metric separates across nearly its whole range. Above $J = 0$ the LOWESS smooth flattens well below the OLS line, so the linear fit substantially overstates the association at high Jaccard.
+
+The same-category and different-category panels differ sharply. At AP=0.6 the within-panel OLS gives $r = 0.34$ while the across-panel gives $r = 0.18$, and the across-panel LOWESS is nearly flat above $J \approx 2\%$. For pairs drawn from different categories the two metrics are close to unrelated.
+
+Substituting $z$ for $S$ lowers the correlation slightly at every threshold, by 0.03 to 0.07, so the small shared component between the Jaccard index and the layer profile is partly a common dependence on expert-set size, and removing that dependence makes the two readings more nearly independent still.
+
+The concept-to-parent panel of subchapter 4.1 agrees in magnitude on its much smaller population, giving Pearson $r$ of 0.44, 0.28, 0.30 and 0.19 at AP=0.5 through 0.8, on 196, 196, 196 and 167 pairs respectively. At AP=0.9 coverage falls to 23% of categorized concepts, far below the 75% floor, so the correlation is withheld and the scatter is drawn unfitted, as designed.
+
 ## Conclusions
 
 - Human Typicality is positively associated with category alignment in both models (typicality-vs-Jaccard r = 0.30 to 0.38 at AP=0.5), significant across the lenient-to-moderate thresholds, and this association is independent of both frequency (partial correlation unchanged) and Jaccard's set-size sensitivity (matched under the overlap coefficient).
@@ -319,3 +368,4 @@ Typicality-vs-Jaccard is significant across AP 0.5 to 0.8 in Qwen3 and across AP
 - Concept expert count is negatively associated with Jaccard alignment (r = -0.28 to -0.38), but this is an arithmetic property of the Jaccard index for a fixed smaller comparison set and vanishes under the overlap coefficient, so it does not reflect a size-dependent tendency in category alignment.
 - The model-derived Cosine Typicality tracks Jaccard alignment only at the most lenient threshold and decays with AP, unlike Human Typicality.
 - Shannon entropy and expert count are decorrelated at AP 0.5 to 0.6, supporting module 2's use of entropy contrasts at those thresholds, and become correlated at strict thresholds.
+- The Jaccard index and layer-profile agreement are only weakly related over all word pairs (Spearman 0.44 at AP=0.5 falling to 0.15 at AP=0.9), so which neurons two words share and how they distribute those neurons over depth are largely independent descriptions. The layer-profile reading is therefore a genuine addition to the pairwise feature set rather than a restatement of the Jaccard index, and the two diverge most exactly where module 5 shows the Jaccard index losing its category signal.

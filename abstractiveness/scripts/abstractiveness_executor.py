@@ -5,12 +5,14 @@ import numpy as np
 
 from utils.helpers import (set_folder_log, load_experts_data, init_global_layer_mapping,
                            load_concept_embeddings, save_dataframe, build_analysis_scopes,
-                           load_or_build_sublayer_rank, filter_expert_data_to_sublayer)
+                           load_or_build_sublayer_rank, filter_expert_data_to_sublayer,
+                           scope_out_dir)
 from utils.plot_helpers import plot_sublayer_comparison_bars
 from modules import (module_1_layer_distribution, module_2_shannon_entropy, module_3_similarities,
                      module_4_correlations, module_5_heatmaps, module_6_jensen_shannon_divergence,
                      module_7_cosine_typicality)
-from modules.module_1_layer_distribution import execute_module_1_layer_expert_distribution
+from modules.module_1_layer_distribution import (execute_module_1_layer_expert_distribution,
+                                                 save_expert_counts_metadata)
 from modules.module_2_shannon_entropy import execute_module_2_shannon_entropy
 from modules.module_3_similarities import execute_module_3_category_concept_similarities
 from modules.module_4_correlations import execute_module_4_correlations, execute_module_4b_jaccard_vs_cosine_typicality
@@ -25,6 +27,13 @@ np.random.seed(42)
 # the sublayer expert-count ranking, where every sublayer still has experts to rank.
 AP_THRESHOLDS = [0.5, 0.6, 0.7, 0.8, 0.9]
 REFERENCE_AP = min(AP_THRESHOLDS)
+
+# Which modules to run. Narrow this while iterating on one module so a verification run
+# costs seconds instead of the full sweep, e.g. {3, 4, 5}. Modules 1, 2 and 7 feed module
+# 4, and disabling any of them silently drops the panels that depend on it (see the
+# dependency handling in the scope loop), so a narrowed run is for verification, never for
+# producing the results anyone reads. Restore to the full set before a real sweep.
+ENABLED_MODULES = {3, 4, 5}
 
 # Which columns each module's cross-scope comparison plot draws. Each module owns its own
 # list so the metric names stay next to the code that computes them.
@@ -91,7 +100,7 @@ MODEL_CONFIGS = {
         "metadata_file": "metadata_Richie_HSJ.json",
         "layer_mapping_file": "layer_mapping_Qwen3_1-7B.csv",
         "typicality_column": "typicality_HSJ_pairwise",
-        "output_subdir": "research_plots_qwen_richie_hsj_with_sub_folders",
+        "output_subdir": "research_plots_qwen_richie_hsj_with_distribution",
         "sublayer_filter": "mlp.gate_proj",
         "embedding_cache_file": "concept_embeddings_qwen3_richie_hsj.npz",
     },
@@ -104,7 +113,7 @@ MODEL_CONFIGS = {
         "metadata_file": "metadata_Richie_HSJ.json",
         "layer_mapping_file": "layer_mapping_GPT2.csv",
         "typicality_column": "typicality_HSJ_pairwise",
-        "output_subdir": "research_plots_gpt2_richie_hsj_with_sub_folders",
+        "output_subdir": "research_plots_gpt2_richie_hsj_with_distribution",
         "sublayer_filter": "mlp.c_fc",
         "embedding_cache_file": "concept_embeddings_gpt2_richie_hsj.npz",
     },
@@ -193,39 +202,65 @@ if __name__ == "__main__":
             summaries = {module: [] for module in module_dirs}
 
             for scope in scopes:
+                rows = {}
+                empty = pd.DataFrame()
+
                 # Module 1: Layer Expert Distribution
-                merged_meta, row_1 = execute_module_1_layer_expert_distribution(
-                    scope, concept_metadata, module_dirs[1], analysis_sublayer_df=analysis_sublayer_df)
+                if 1 in ENABLED_MODULES:
+                    merged_meta, rows[1] = execute_module_1_layer_expert_distribution(
+                        scope, concept_metadata, module_dirs[1], analysis_sublayer_df=analysis_sublayer_df)
+                else:
+                    # Module 4 needs module 1's expert-count table. Build just that, skipping
+                    # the per-concept plots and the Mantel permutation sweep, which are the
+                    # expensive parts and the reason for disabling the module in the first place.
+                    merged_meta = (save_expert_counts_metadata(scope.expert_df, concept_metadata,
+                                                               scope_out_dir(module_dirs[1], scope))
+                                   if 4 in ENABLED_MODULES else empty)
 
                 # Module 2: Shannon Entropy Analysis and Peak/Average Layer Distributions
-                concept_entropy_df, category_entropy_df, row_2 = execute_module_2_shannon_entropy(
-                    scope, concept_metadata, module_dirs[2])
+                if 2 in ENABLED_MODULES:
+                    concept_entropy_df, category_entropy_df, rows[2] = execute_module_2_shannon_entropy(
+                        scope, concept_metadata, module_dirs[2])
+                else:
+                    # plot_correlations already guards on an empty entropy frame and drops
+                    # its entropy panel with a warning.
+                    concept_entropy_df, category_entropy_df = empty, empty
 
                 # Module 3: Category-Concept Similarities
-                similarity_metrics_df, row_3 = execute_module_3_category_concept_similarities(
-                    scope, concept_metadata, module_dirs[3])
+                if 3 in ENABLED_MODULES:
+                    similarity_metrics_df, rows[3] = execute_module_3_category_concept_similarities(
+                        scope, concept_metadata, module_dirs[3])
+                else:
+                    similarity_metrics_df = empty
 
                 # Module 4: Correlations (uses module 2's entropy tables for the entropy panel)
-                row_4 = execute_module_4_correlations(
-                    scope, merged_meta, similarity_metrics_df, concept_entropy_df,
-                    category_entropy_df, concept_metadata, module_dirs[4])
+                if 4 in ENABLED_MODULES:
+                    rows[4] = execute_module_4_correlations(
+                        scope, merged_meta, similarity_metrics_df, concept_entropy_df,
+                        category_entropy_df, concept_metadata, module_dirs[4])
 
                 # Module 5: Heatmaps
-                row_5 = execute_module_5_heatmaps(scope, concept_metadata, module_dirs[5])
+                if 5 in ENABLED_MODULES:
+                    rows[5] = execute_module_5_heatmaps(scope, concept_metadata, module_dirs[5])
 
                 # Module 6: Dual Category Definitions (JSD)
-                _, _, row_6 = execute_module_6_dual_category_jsd(scope, concept_metadata, module_dirs[6])
+                if 6 in ENABLED_MODULES:
+                    _, _, rows[6] = execute_module_6_dual_category_jsd(scope, concept_metadata, module_dirs[6])
 
                 # Module 7: Empirical Cosine Typicality
-                global_typicality_df, _, row_7 = execute_module_7_empirical_cosine_typicality(
-                    scope, concept_metadata, module_dirs[7])
+                if 7 in ENABLED_MODULES:
+                    global_typicality_df, _, rows[7] = execute_module_7_empirical_cosine_typicality(
+                        scope, concept_metadata, module_dirs[7])
+                else:
+                    # execute_module_4b guards on an empty frame and returns {}.
+                    global_typicality_df = empty
 
                 # Module 4b: Jaccard vs. Cosine Typicality (needs module 7's output, so it runs here)
-                row_4.update(execute_module_4b_jaccard_vs_cosine_typicality(
-                    scope, similarity_metrics_df, global_typicality_df, concept_metadata, module_dirs[4]))
+                if 4 in ENABLED_MODULES:
+                    rows[4].update(execute_module_4b_jaccard_vs_cosine_typicality(
+                        scope, similarity_metrics_df, global_typicality_df, concept_metadata, module_dirs[4]))
 
-                for module, row in ((1, row_1), (2, row_2), (3, row_3), (4, row_4),
-                                    (5, row_5), (6, row_6), (7, row_7)):
+                for module, row in rows.items():
                     summaries[module].append(row)
 
             # One cross-scope comparison table per module: the readable summary of a sweep
@@ -243,12 +278,13 @@ if __name__ == "__main__":
             # Module 8: Expert set vs embedding semantics (second-order RSA). It sweeps
             # sublayers internally, so it runs once outside the scope loop. The embedding
             # cache is AP-independent and is loaded once above, outside this loop.
-            execute_module_8_embedding_rsa(
-                analysis_sublayer_df, concept_metadata, module_dirs[8],
-                embedding_cache, global_layer_mapping,
-                sublayer_filter=cfg.get("sublayer_filter"),
-                full_expert_df=formatted_expert_allocation_df,
-                sublayer_rank=rank_by_sublayer)
+            if 8 in ENABLED_MODULES:
+                execute_module_8_embedding_rsa(
+                    analysis_sublayer_df, concept_metadata, module_dirs[8],
+                    embedding_cache, global_layer_mapping,
+                    sublayer_filter=cfg.get("sublayer_filter"),
+                    full_expert_df=formatted_expert_allocation_df,
+                    sublayer_rank=rank_by_sublayer)
 
             log.info(f"  All analysis outputs cleanly structured in {out_path}")
         else:
