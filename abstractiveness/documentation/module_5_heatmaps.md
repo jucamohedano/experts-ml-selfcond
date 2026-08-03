@@ -129,41 +129,53 @@ A note on coverage. Words holding fewer than 2 experts have no usable layer prof
 
 ## Results
 
-*Scope note.* Every figure in this section comes from the runs that predate the whole-model refactor, so it describes the **analysis sublayer** (`mlp.c_fc` for GPT-2, `mlp.gate_proj` for Qwen3), which is now one scope among several rather than the only one. Those numbers still stand, they are reproduced byte for byte by the corresponding `sublayers/<rank>_<sublayer>/` outputs. Whole-model and other-sublayer figures land here once the sweep is re-run.
+*Scope note.* All values are **whole-model scope** from the corrected `_sensefix` runs, 197 concepts with a defined category. Per-sublayer replications sit in `sublayers/<rank>_<sublayer>/`, and the cross-scope contrast is summarised in `sublayer_comparison.csv`.
 
-At AP=0.6, the same-category effect is strong in relative terms. Splitting all 13,366 concept pairs into same category (619 pairs) and different category (12,747 pairs), within-category pairs average **3.46%** Jaccard against **0.52%** across categories, a factor of **6.6**, and **10.29%** overlap against **1.93%**, a factor of **5.3**. Same-category concepts share disproportionately many specific (layer, unit) experts, whereas a random different-category pair shares almost none. In absolute terms, even within-category similarity is small, with a mean of 3.5% Jaccard, the largest off-diagonal pair at 33%, and the 99th percentile at just 6.8%.
+At AP=0.6, the same-category effect is strong in relative terms. Within-category pairs average **5.04%** Jaccard against **0.44%** across categories in Qwen3, a factor of **11.4**, and **3.42%** against **0.37%** in GPT-2, a factor of **9.3**. Same-category concepts share disproportionately many specific (layer, unit) experts, whereas a random different-category pair shares almost none. In absolute terms even within-category similarity is small, which is why the effect is far clearer in the tabulated ratio than in the rendered heatmap.
 
 This absolute smallness is the reason the effect is clearer in the tabulated ratio than in the rendered heatmaps. On a 0 to 100 color scale the diagonal, which is 100 by construction, occupies the top of the color range, and nearly every off-diagonal cell, including the elevated same-category ones, falls in the bottom few percent of the scale and appears near-black. The relative signal is therefore evident in the numbers but faint in the image.
 
 ### Across AP thresholds
 
-| AP | Jaccard within / across | Jaccard ratio | Overlap within / across | Overlap ratio |
+| Model | AP | experts | Jaccard within / across | Jaccard ratio |
 |---|---|---|---|---|
-| 0.5 | 5.53% / 1.16% | 4.76x | 14.96% / 3.73% | 4.01x |
-| 0.6 | 3.46% / 0.52% | 6.61x | 10.29% / 1.93% | 5.32x |
-| 0.7 | 2.00% / 0.23% | 8.80x | 6.65% / 1.00% | 6.68x |
-| 0.8 | 1.12% / 0.07% | 16.64x | 4.15% / 0.37% | 11.08x |
-| 0.9 | 0.18% / 0.01% | 18.29x | 0.65% / 0.05% | 13.75x |
+| GPT-2 | 0.5 | 216,555 | 5.89% / 0.93% | 6.3x |
+| GPT-2 | 0.6 | 76,416 | 3.42% / 0.37% | 9.3x |
+| GPT-2 | 0.7 | 28,983 | 1.84% / 0.14% | 13.1x |
+| GPT-2 | 0.8 | 9,222 | 0.85% / 0.04% | 19.8x |
+| GPT-2 | 0.9 | 1,417 | 0.15% / 0.001% | 141.6x |
+| Qwen3 | 0.5 | 1,188,772 | 7.00% / 1.02% | 6.8x |
+| Qwen3 | 0.6 | 418,529 | 5.04% / 0.44% | 11.4x |
+| Qwen3 | 0.7 | 165,497 | 3.27% / 0.19% | 17.5x |
+| Qwen3 | 0.8 | 59,797 | 1.68% / 0.08% | 20.3x |
+| Qwen3 | 0.9 | 12,212 | 0.43% / 0.02% | 19.6x |
 
-The pattern is consistent and monotone. The *relative* within-versus-across-category effect strengthens markedly as AP tightens, from 4.8x to 18.3x for Jaccard and from 4.0x to 13.8x for overlap, while the *absolute* similarities shrink toward zero, from 5.53% to 0.18% within-category Jaccard. In other words, the experts that survive strict AP filtering are increasingly *category-specific*, so that a pair of same-category concepts at AP=0.9 shares 18x more of its expert sets than a cross-category pair does. This is the strongest evidence in the whole analysis suite that the expert space is organized along category lines. The effect lives in the ratio rather than in the raw magnitudes, and it is more evident in the tabulated within-versus-across ratio than in the rendered heatmaps, where the values compress toward the bottom of the color scale.
+The pattern is consistent and monotone in both architectures. The *relative* within-versus-across-category effect strengthens markedly as AP tightens, from about 6x to 20x, while the *absolute* similarities shrink toward zero. The experts that survive strict AP filtering are increasingly *category-specific*. The GPT-2 AP=0.9 figure of 141x should not be read as a stronger effect than Qwen3's 19.6x, since its denominator is an across-category mean of 0.001% computed over only 1,417 surviving experts, so the ratio is dominated by how close to zero the denominator has fallen rather than by any gain within categories.
+
+This is the strongest evidence in the analysis suite that the expert space is organized along category lines. The effect lives in the ratio rather than in the raw magnitudes, and it is more evident in the tabulated ratio than in the rendered heatmaps, where the values compress toward the bottom of the color scale.
 
 ### Layer-profile agreement (subchapter 5.2)
 
-Whole-model scope, Qwen3 on Richie-HSJ. The ratio table above is expressed in absolute percentages, which the layer-profile metric cannot be compared against directly, so all three matrices are reduced here to the rank-based category alignment ROC-AUC, which is on one scale and where 0.5 is chance:
+The ratio table above is expressed in absolute percentages, which the layer-profile metric cannot be compared against directly, so all three matrices are reduced here to the rank-based category alignment ROC-AUC, which is on one scale and where 0.5 is chance:
 
-| AP | experts | Jaccard AUC | layer-profile AUC | layer-profile $z$ AUC |
+| Model | AP | Jaccard AUC | layer-profile AUC | layer-profile $z$ AUC |
 |---|---|---|---|---|
-| 0.5 | 1,177,386 | 0.939 | 0.699 | 0.693 |
-| 0.6 | 414,089 | 0.931 | 0.692 | 0.690 |
-| 0.7 | 163,231 | 0.905 | 0.690 | 0.694 |
-| 0.8 | 58,460 | 0.751 | 0.688 | 0.701 |
-| 0.9 | 11,490 | 0.540 | 0.671 | 0.691 |
+| GPT-2 | 0.5 | 0.934 | 0.618 | 0.610 |
+| GPT-2 | 0.6 | 0.890 | 0.610 | 0.620 |
+| GPT-2 | 0.7 | 0.742 | 0.596 | 0.629 |
+| GPT-2 | 0.8 | 0.571 | 0.594 | 0.618 |
+| GPT-2 | 0.9 | 0.506 | 0.566 | 0.553 |
+| Qwen3 | 0.5 | 0.958 | 0.716 | 0.710 |
+| Qwen3 | 0.6 | 0.952 | 0.707 | 0.707 |
+| Qwen3 | 0.7 | 0.924 | 0.709 | 0.713 |
+| Qwen3 | 0.8 | 0.768 | 0.709 | 0.724 |
+| Qwen3 | 0.9 | 0.546 | 0.685 | 0.706 |
 
 Two readings, and the second is the important one.
 
-At lenient thresholds the Jaccard index is the far better category detector, 0.939 against 0.699 at AP=0.5. Which specific neurons two concepts share is simply more diagnostic of category membership than how they distribute those neurons over depth, and this is the expected result.
+At lenient thresholds the Jaccard index is the far better category detector, 0.958 against 0.716 for Qwen3 at AP=0.5. Which specific neurons two concepts share is simply more diagnostic of category membership than how they distribute those neurons over depth, and this is the expected result.
 
-**The ordering reverses at strict thresholds.** Jaccard's AUC collapses from 0.939 to 0.540 across the sweep, and 0.540 is very close to chance: by AP=0.9 the expert sets are so thinned that shared-neuron identity carries almost no category information, which is the mirror image of the ratio table above, where the surviving *relative* effect rests on within-category similarities of 0.18% and across-category similarities of 0.01%, that is, on a handful of pairs sharing anything at all. Layer-profile agreement is nearly flat over the same range, 0.699 down to 0.671, and its $z$ form is flatter still, 0.693 to 0.691. At AP=0.9 the layer-profile reading is therefore the stronger category signal by a wide margin, 0.671 against 0.540.
+**The ordering reverses at strict thresholds, in both architectures.** Jaccard's AUC collapses to 0.506 (GPT-2) and 0.546 (Qwen3) by AP=0.9, both essentially chance: the expert sets are so thinned that shared-neuron identity carries almost no category information, which is the mirror image of the ratio table above, where the surviving relative effect rests on a handful of pairs sharing anything at all. Layer-profile agreement is nearly flat over the same range, 0.618 to 0.566 in GPT-2 and 0.716 to 0.685 in Qwen3, and its $z$ form is flatter still. The crossover happens earlier in GPT-2, at AP 0.8 (0.594 profile against 0.571 Jaccard), than in Qwen3, at AP 0.9 (0.685 against 0.546), consistent with GPT-2's expert sets thinning faster at every threshold.
 
 The interpretation is that depth allocation is the more robust carrier of category structure. Two same-category concepts continue to place their experts at similar depths even once the AP filter has stripped away nearly every shared neuron, so the categorical organization of the expert space survives in the layer profile after it has effectively vanished from set identity.
 

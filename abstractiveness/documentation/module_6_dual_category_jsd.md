@@ -77,24 +77,27 @@ with a *negative* $r$ meaning more concentrated labels (lower entropy) diverge m
 
 ## Results
 
-*Scope note.* Every figure in this section comes from the runs that predate the whole-model refactor, so it describes the **analysis sublayer** (`mlp.c_fc` for GPT-2, `mlp.gate_proj` for Qwen3), which is now one scope among several rather than the only one. Those numbers still stand, they are reproduced byte for byte by the corresponding `sublayers/<rank>_<sublayer>/` outputs. Whole-model and other-sublayer figures land here once the sweep is re-run.
+*Scope note.* The 17-category figures below come from the 150-concept run. The Richie-HSJ tables are whole-model scope on the block axis from the corrected `_sensefix` runs, where there are only **8 categories**, so every correlation in this module rests on n=8 and none of it should be read as more than suggestive.
 
-At AP=0.6, categories vary a lot in how well their label represents their members: JSD ranges 4x across the 17 categories, from **0.064** (animal, well aligned) to **0.248** (furniture, poorly aligned). Of the two relationships this module tests, only one holds up at this threshold: **label entropy predicts divergence** (r=-0.60, p=0.011, n=17, visible in `scatter_jsd_vs_entropy.png` as a real if noisy downward trend), while **internal member diversity does not** (r=0.32, p=0.21, n=17, and `scatter_jsd_vs_member_diversity.png` shows a loose cloud with no visible trend).
+In the 150-concept run at AP=0.6, categories vary a lot in how well their label represents their members: JSD ranges 4x across the 17 categories, from **0.064** (animal, well aligned) to **0.248** (furniture, poorly aligned). Of the two relationships this module tests, only one holds up at that threshold: **label entropy predicts divergence** (r=-0.60, p=0.011, n=17), while **internal member diversity does not** (r=0.32, p=0.21, n=17).
 
-### Across AP thresholds
+### Across AP thresholds, Richie-HSJ
 
-| AP | n categories | JSD range | JSD mean | Entropy-vs-JSD (r, p) | Diversity-vs-JSD (r, p) |
-|---|---|---|---|---|---|
-| 0.5 | 17 | 0.035–0.131 | 0.068 | 0.26 (p=0.32, n.s.) | 0.33 (p=0.19, n.s.) |
-| 0.6 | 17 | 0.064–0.248 | 0.131 | -0.60 (p=0.011) | 0.32 (p=0.21, n.s.) |
-| 0.7 | 17 | 0.071–0.684 | 0.286 | -0.90 (p<0.0001) | 0.25 (p=0.34, n.s.) |
-| 0.8 | 15 | 0.198–0.892 | 0.458 | -0.86 (p<0.0001) | 0.03 (p=0.90, n.s.) |
-| 0.9 | 9 | 0.209–0.883 | 0.514 | -0.74 (p=0.024) | -0.26 (p=0.50, n.s.) |
+| Model | AP | n cat. | JSD range | JSD mean | Entropy-vs-JSD (r, p) | Diversity-vs-JSD (r, p) |
+|---|---|---|---|---|---|---|
+| GPT-2 | 0.5 | 8 | 0.008–0.036 | 0.019 | -0.66 (0.076) | +0.90 (0.002) |
+| GPT-2 | 0.6 | 8 | 0.025–0.134 | 0.061 | -0.65 (0.084) | +0.41 (0.32) |
+| GPT-2 | 0.7 | 8 | 0.054–0.546 | 0.239 | -0.88 (0.004) | -0.42 (0.31) |
+| GPT-2 | 0.8 | 5 | 0.196–0.702 | 0.376 | -0.66 (0.22) | +0.04 (0.95) |
+| GPT-2 | 0.9 | n/a | no output | | | |
+| Qwen3 | 0.5 | 8 | 0.014–0.055 | 0.028 | -0.70 (0.055) | +0.00 (0.99) |
+| Qwen3 | 0.6 | 8 | 0.031–0.113 | 0.054 | -0.61 (0.11) | +0.33 (0.42) |
+| Qwen3 | 0.7 | 8 | 0.047–0.171 | 0.106 | -0.04 (0.93) | +0.44 (0.28) |
+| Qwen3 | 0.8 | 8 | 0.118–0.810 | 0.373 | -0.91 (0.002) | -0.22 (0.60) |
+| Qwen3 | 0.9 | 3 | 0.500–0.819 | 0.643 | -0.99 (0.084) | -0.88 (0.32) |
 
-Two findings emerge that are *more* informative than the single-threshold view:
+**Label entropy and divergence are consistently negatively related**, in the same direction as the 150-concept run and in both architectures. The coefficient is between -0.61 and -0.91 in seven of the nine usable rows, reaching significance at GPT-2 AP 0.7 (r=-0.88, p=0.004) and Qwen3 AP 0.8 (r=-0.91, p=0.002). With n=8 the test has little power, so the consistency of the sign across models and thresholds is better evidence than any individual p value. A category whose label word spreads its experts widely over depth diverges less from its member average, which is the reading the 150-run supported.
 
-**The entropy-vs-divergence relationship is not robust at lenient thresholds, it only emerges, and then strongly, in the middle-to-strict range.** At AP=0.5 it's not even in the right direction (r=+0.26, not significant). It flips to a real, significant negative relationship at AP=0.6 and becomes very strong at AP=0.7–0.8 (r=-0.90, -0.86, both p<0.0001) before weakening slightly at AP=0.9 (r=-0.74, n drops to 9 categories as some lose enough members to qualify). The AP=0.6 result reported above is a fair representative of a real effect, but understates how strong it gets at AP 0.7–0.8.
+**Internal member diversity again fails to predict divergence.** The sign flips across thresholds in both models (+0.90, +0.41, -0.42, +0.04 for GPT-2, and +0.00, +0.33, +0.44, -0.22, -0.88 for Qwen3), and the only significant cell, GPT-2 at AP 0.5, is the one where the JSD range is narrowest, 0.008 to 0.036, so it rests on differences too small to be meaningful. The hypothesis that more internally scattered categories diverge further from their own label has no support here, matching the 150-run conclusion.
 
-**Internal member diversity never predicts divergence, at any threshold.** r flips sign across the range (0.26, 0.32, 0.25, 0.03, -0.26) and is never close to significant (smallest p=0.19). This is a much stronger negative result than the single-threshold view suggested: it isn't a borderline "not enough power" case, it's a consistent null finding across every AP value tested, including ones with the same n=17. That hypothesis, that more internally scattered categories diverge further from their own label, has no support anywhere in this sweep.
-
-JSD itself also grows roughly 7.5x in magnitude from AP=0.5 to AP=0.9 (mean 0.068 to 0.514), tracking the same "fewer experts, noisier and more divergent per-concept distributions" pattern seen in modules 1 to 3.
+JSD grows about 20x in magnitude from AP=0.5 to the strictest usable threshold in both models (GPT-2 0.019 to 0.376, Qwen3 0.028 to 0.643), tracking the same "fewer experts, noisier and more divergent per-concept distributions" pattern seen in modules 1 to 3. Note also how the sample dies: GPT-2 falls to 5 categories at AP 0.8 and produces nothing at AP 0.9, while Qwen3 keeps all 8 at AP 0.8 and 3 at AP 0.9.

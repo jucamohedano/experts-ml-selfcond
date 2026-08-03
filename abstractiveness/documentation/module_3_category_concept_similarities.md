@@ -103,9 +103,9 @@ The same quantities are computed for every pair of words, not only concept-to-pa
 
 ## Results
 
-*Scope note.* Every figure in this section comes from the runs that predate the whole-model refactor, so it describes the **analysis sublayer** (`mlp.c_fc` for GPT-2, `mlp.gate_proj` for Qwen3), which is now one scope among several rather than the only one. Those numbers still stand, they are reproduced byte for byte by the corresponding `sublayers/<rank>_<sublayer>/` outputs. Whole-model and other-sublayer figures land here once the sweep is re-run.
+*Scope note.* The 150-concept figures in this subsection describe the **analysis sublayer** only. The Richie-HSJ tables below are whole-model scope from the corrected `_sensefix` runs.
 
-At AP=0.6, across the 147 concept-category pairs, Jaccard similarity is consistently low: mean 4.0%, median 2.5%, and 90% of pairs fall below 10%. By the more forgiving overlap-coefficient measure (which ignores how much larger the category's expert set is), the picture improves but is still modest: mean 15.2%, median 10.0%.
+At AP=0.6, across the 147 concept-category pairs of the 150-concept run, Jaccard similarity is consistently low: mean 4.0%, median 2.5%, and 90% of pairs fall below 10%. By the more forgiving overlap-coefficient measure (which ignores how much larger the category's expert set is), the picture improves but is still modest: mean 15.2%, median 10.0%.
 
 So a concept's expert set is, on average, far from identical to its category's expert set (low Jaccard), and even by the containment reading only a limited minority of the smaller set's experts are shared with the other (overlap near 15% on average). The bar charts make the pair-to-pair variation visible, but on their own they do not establish whether this is more than chance. Module 5's pairwise heatmaps test whether within-category pairs are systematically higher than across-category pairs, which is the sharper version of this question and the place where the categorical signal is clearest.
 
@@ -113,30 +113,43 @@ So a concept's expert set is, on average, far from identical to its category's e
 
 Both metrics decline steadily as the AP threshold tightens:
 
-| AP | n pairs | Jaccard mean / median | Overlap mean / median | % pairs with jaccard < 10% |
-|---|---|---|---|---|
-| 0.5 | 147 | 5.6% / 4.1% | 17.4% / 15.3% | 85% |
-| 0.6 | 147 | 4.0% / 2.5% | 15.2% / 10.0% | 90% |
-| 0.7 | 147 | 2.6% / 0.8% | 13.2% / 4.8% | 95% |
-| 0.8 | 128 | 1.6% / 0.0% | 7.6% / 0.0% | 95% |
-| 0.9 | 59 | 0.6% / 0.0% | 4.5% / 0.0% | 97% |
+| Model | AP | n pairs | Jaccard mean / median | Overlap mean / median | % pairs with jaccard < 10% |
+|---|---|---|---|---|---|
+| GPT-2 | 0.5 | 197 | 8.0% / 7.3% | 23.4% / 23.4% | 68% |
+| GPT-2 | 0.6 | 197 | 5.2% / 3.8% | 20.6% / 17.1% | 83% |
+| GPT-2 | 0.7 | 197 | 3.1% / 0.3% | 15.6% / 5.0% | 90% |
+| GPT-2 | 0.8 | 111 | 1.7% / 0.0% | 7.7% / 0.0% | 92% |
+| GPT-2 | 0.9 | n/a | no output, too few surviving pairs | | |
+| Qwen3 | 0.5 | 197 | 9.0% / 8.2% | 28.3% / 28.5% | 64% |
+| Qwen3 | 0.6 | 197 | 7.9% / 6.1% | 28.9% / 28.2% | 70% |
+| Qwen3 | 0.7 | 197 | 5.6% / 2.6% | 23.6% / 18.1% | 82% |
+| Qwen3 | 0.8 | 197 | 1.9% / 0.2% | 13.9% / 3.6% | 95% |
+| Qwen3 | 0.9 | 71 | 0.2% / 0.0% | 2.5% / 0.0% | 100% |
 
-Concept-to-own-category identity overlap is low at *every* threshold: even at the most lenient AP=0.5, the median pair shares only 4.1% Jaccard, and 85% of pairs sit below 10%. By AP=0.8 and 0.9, **the median concept-category pair shares zero experts at all** (median = 0.0% on both metrics). Part of the decline is mechanical, since stricter AP keeps fewer experts per concept overall, shrinking every set and therefore every intersection, and n also shrinks at AP=0.8/0.9 because some concepts have too few retained experts to compute a set-based similarity at all. The overall conclusion is that a concept and its category-label word recruit largely *different* specific neurons at every threshold tested. The hierarchical relationship, to the extent modules 4 and 5 detect one, is carried by a modest shared minority of experts rather than by set identity.
+(The 150-concept sublayer-only figures this table previously carried are superseded. Whole-model scope roughly doubles every similarity, because a concept and its label can now share experts in any projection type rather than only in the FFN expansion.)
+
+Concept-to-own-category identity overlap is low at *every* threshold: even at the most lenient AP=0.5, the median pair shares only 7.3% (GPT-2) or 8.2% (Qwen3) Jaccard, and roughly two thirds of pairs sit below 10%. By AP=0.8 the median concept-category pair shares essentially nothing (median 0.0% GPT-2, 0.2% Qwen3), and at AP=0.9 GPT-2 has too few surviving pairs to produce the table at all. Part of the decline is mechanical, since stricter AP keeps fewer experts per concept overall, shrinking every set and therefore every intersection, and n also shrinks at AP=0.8/0.9 because some concepts have too few retained experts to compute a set-based similarity at all. The overall conclusion is that a concept and its category-label word recruit largely *different* specific neurons at every threshold tested. The hierarchical relationship, to the extent modules 4 and 5 detect one, is carried by a modest shared minority of experts rather than by set identity.
 
 ### Layer-profile agreement (subchapter 3.2)
 
-Whole-model scope, Qwen3 on Richie-HSJ, all 196 concept-to-parent pairs:
+Whole-model scope, both models on Richie-HSJ, 197 concept-to-parent pairs:
 
-| AP | n | mean Jaccard | mean $S$ | median $S$ | mean $z$ | % of pairs with $z > 0$ |
-|---|---|---|---|---|---|---|
-| 0.5 | 196 | 8.1% | 63.7% | 63.5% | +0.05 | 50.5% |
-| 0.6 | 196 | 6.5% | 53.9% | 53.8% | -0.04 | 46.9% |
-| 0.7 | 196 | 3.9% | 42.7% | 41.9% | +0.07 | 51.5% |
-| 0.8 | 196 | 1.2% | 23.9% | 24.1% | -0.14 | 44.9% |
-| 0.9 | 69 | 0.2% | 16.1% | 16.6% | +0.02 | 55.6% |
+| Model | AP | n | mean Jaccard | mean $S$ | median $S$ | mean $z$ | % of pairs with $z > 0$ |
+|---|---|---|---|---|---|---|---|
+| GPT-2 | 0.5 | 197 | 8.0% | 71.1% | 72.7% | +0.30 | 63% |
+| GPT-2 | 0.6 | 197 | 5.2% | 53.8% | 54.2% | +0.13 | 55% |
+| GPT-2 | 0.7 | 197 | 3.1% | 32.8% | 33.0% | +0.44 | 66% |
+| GPT-2 | 0.8 | 111 | 1.7% | 29.2% | 26.0% | +1.09 | 86% |
+| Qwen3 | 0.5 | 197 | 9.0% | 64.3% | 64.1% | +0.13 | 52% |
+| Qwen3 | 0.6 | 197 | 7.9% | 54.7% | 55.2% | +0.03 | 51% |
+| Qwen3 | 0.7 | 197 | 5.6% | 44.5% | 43.8% | +0.16 | 55% |
+| Qwen3 | 0.8 | 197 | 1.9% | 29.3% | 31.5% | +0.14 | 56% |
+| Qwen3 | 0.9 | 71 | 0.2% | 16.3% | 16.6% | +0.12 | 62% |
 
-Raw $S$ looks far more encouraging than the Jaccard index, 53.9% against 6.5% at AP=0.6, but that comparison is exactly the one the subchapter warns against, since $S$ is measured against a ceiling every pair approaches for reasons that have nothing to do with the pair. The interpretable column is $z$, and it is flat at zero: the mean sits between $-0.14$ and $+0.07$ at every threshold, and the share of pairs above zero stays near half.
+Raw $S$ looks far more encouraging than the Jaccard index, 54.7% against 7.9% for Qwen3 at AP=0.6, but that comparison is exactly the one the subchapter warns against, since $S$ is measured against a ceiling every pair approaches for reasons that have nothing to do with the pair. The interpretable column is $z$.
 
-**A concept and its own category label therefore agree on layer allocation no more than two arbitrary words of the same expert counts do.** That is a genuine negative result, and it strengthens subchapter 3.1's conclusion rather than softening it. The natural objection to a low Jaccard, that a concept and its category might occupy the same depths through different neurons, is testable and does not hold here. On this pairing the two words are unrelated on both readings.
+On Qwen3 it is flat at zero, mean between $+0.03$ and $+0.16$ with the share of pairs above zero within a few points of half, so **a concept and its own category label agree on layer allocation no more than two arbitrary words of the same expert counts do**. That is a genuine negative result and it strengthens subchapter 3.1's conclusion rather than softening it: the natural objection to a low Jaccard, that a concept and its category might occupy the same depths through different neurons, is testable and does not hold.
+
+On GPT-2 the picture is weakly positive and grows with the threshold ($z$ = +0.30, +0.13, +0.44, +1.09 across AP 0.5 to 0.8, with 86% of pairs above zero at AP 0.8). The AP 0.8 figure should not be read as a strengthening effect: only 111 of 197 pairs survive there, and the survivors are the words with the most experts, whose profiles are the best estimated. Treat the GPT-2 column as a mild positive at lenient thresholds and as selection at strict ones. The two architectures do not agree here, so the safe statement is the Qwen3 one, that this pairing carries no reliable depth agreement.
 
 This does not mean the metric is uninformative, only that the concept-to-label pairing is the wrong place to look for the effect. Module 5 computes the same quantity over all word pairs and finds that same-category concept *pairs* do agree on depth well above chance, with a category alignment ROC-AUC near 0.69 at every threshold. The two results together say the category-label word behaves unlike its own members, which is the same dissociation module 6 reports between the category prototype and its exemplar average.

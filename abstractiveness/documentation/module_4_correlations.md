@@ -282,31 +282,31 @@ Both add a row to `correlation_summary.csv`, which for these rows also carries t
 
 ## Results
 
-*Scope note.* Every figure in this section comes from the runs that predate the whole-model refactor, so it describes the **analysis sublayer** (`mlp.c_fc` for GPT-2, `mlp.gate_proj` for Qwen3), which is now one scope among several rather than the only one. Those numbers still stand, they are reproduced byte for byte by the corresponding `sublayers/<rank>_<sublayer>/` outputs. Whole-model and other-sublayer figures land here once the sweep is re-run.
-
-Values are from the two Richie-HSJ sublayer runs, GPT-2 on `mlp.c_fc` (`research_plots_gpt2_richie_hsj_with_sublayer_analysis`) and Qwen3-1.7B on `mlp.gate_proj` (`research_plots_qwen_richie_hsj_with_sublayer_analysis`), each with 204 concepts, 8 category labels, and 196 concepts with a defined category.
+*Scope note.* All values below are **whole-model scope** from the corrected `_sensefix` runs, 205 words = 197 concepts with a defined category (including `squash`) plus 8 category labels. Per-sublayer replications sit in each panel's `sublayers/<rank>_<sublayer>/` folder.
 
 **Main correlations, AP=0.5.**
 
-| Relationship | GPT-2 (mlp.c_fc) r, p | Qwen3 (mlp.gate_proj) r, p |
+| Relationship | GPT-2 r, p | Qwen3 r, p |
 |---|---|---|
-| Frequency vs. Expert Count | -0.203, p=3.6e-3 | -0.176, p=1.2e-2 |
-| Human Typicality vs. Expert Count | 0.036, p=0.62 (n.s.) | 0.007, p=0.92 (n.s.) |
+| Frequency vs. Expert Count | -0.195, p=5e-3 | -0.267, p=1e-4 |
+| Human Typicality vs. Expert Count | 0.021, p=0.77 (n.s.) | 0.052, p=0.47 (n.s.) |
 | Frequency vs. Human Typicality | -0.026, p=0.72 (n.s.) | -0.026, p=0.72 (n.s.) |
-| Human Typicality vs. Jaccard | 0.300, p=2.0e-5 | 0.381, p=3.5e-8 |
-| Human Typicality vs. Overlap | (not run for GPT-2) | 0.381, p=3.7e-8 |
-| Frequency vs. Jaccard | 0.059, p=0.41 (n.s.) | -0.060, p=0.40 (n.s.) |
+| Human Typicality vs. Jaccard | 0.320, p=5e-6 | 0.452, p=3e-11 |
+| Human Typicality vs. Overlap | 0.284, p=5e-5 | 0.433, p=2e-10 |
+| Frequency vs. Jaccard | 0.194, p=6e-3 | 0.136, p=0.06 |
 
-Human-Typicality-vs-Jaccard is positive and significant in both models (r = 0.30 to 0.38), indicating that more typical concepts share more experts with their category label. Frequency-vs-expert-count is negative and modest (r ≈ -0.20, about 4% of variance). The remaining pairs are non-significant at AP=0.5, including frequency-vs-Jaccard (r ≈ 0.06 in GPT-2, r ≈ -0.06 in Qwen3).
+Human-Typicality-vs-Jaccard is positive and significant in both models (r = 0.32 to 0.45), indicating that more typical concepts share more experts with their category label, and it holds under the overlap coefficient too (0.28 and 0.43). Frequency-vs-expert-count is negative and modest (r = -0.20 to -0.27). Typicality-vs-expert-count and frequency-vs-typicality remain null.
+
+**Frequency-vs-Jaccard is no longer null.** This panel was reported as null at every threshold in the previous, sublayer-restricted runs. On whole-model expert sets it is positive and significant in GPT-2 at AP 0.5 to 0.7 (r = 0.194, 0.236, 0.255) and in Qwen3 at AP 0.6 to 0.8 (r = 0.221, 0.290, 0.204), with the Qwen3 AP 0.5 row just short of the bar (r = 0.136, p = 0.06). The effect is small, about 4 to 8 percent of variance, and it is not independent of the typicality result, since frequency and typicality are themselves uncorrelated here (r = -0.026) while both relate positively to alignment. The honest reading is that more frequent words share somewhat more experts with their category label, an effect the single-sublayer view did not have the resolution to detect.
 
 **Concept expert count vs category alignment.** Using the raw expert-set sizes stored by module 3 alongside each Jaccard value:
 
 | Relationship (concept's own expert set size vs alignment) | GPT-2 AP0.5 | GPT-2 AP0.6 | Qwen3 AP0.5 | Qwen3 AP0.6 |
 |---|---|---|---|---|
-| concept expert count vs Jaccard | -0.280, p=6.9e-5 | -0.334, p=1.8e-6 | -0.292, p=3.3e-5 | -0.378, p=4.7e-8 |
-| concept expert count vs Overlap coefficient | 0.149, p=0.037 | 0.118, p=0.10 (n.s.) | 0.022, p=0.76 (n.s.) | 0.006, p=0.94 (n.s.) |
+| concept expert count vs Jaccard | -0.293, p=2.9e-5 | -0.337, p=1.3e-6 | -0.372, p=7.7e-8 | -0.419, p=9.0e-10 |
+| concept expert count vs Overlap coefficient | 0.169, p=0.02 | 0.089, p=0.21 (n.s.) | 0.085, p=0.24 (n.s.) | 0.029, p=0.69 (n.s.) |
 
-Concept expert count and Jaccard are negatively correlated in both models (r = -0.28 to -0.38, p < 1e-4), so a larger expert set is associated with lower Jaccard. The relationship is essentially unchanged when controlling for frequency (GPT-2 -0.288 to -0.282, Qwen3 -0.321 to -0.347), so it is not frequency-mediated.
+Concept expert count and Jaccard are negatively correlated in both models (r = -0.29 to -0.42, p < 1e-4), so a larger expert set is associated with lower Jaccard.
 
 This inverse relationship is a property of the Jaccard index rather than a semantic effect. Jaccard is $J = |A \cap B| / |A \cup B|$ with $A$ the concept's expert set and $B$ the category label's, and here the category label is the smaller and roughly fixed set (labels hold fewer experts than concepts). As the concept set $A$ grows, the union in the denominator grows with it while the intersection stays capped by the small label set $B$, so Jaccard falls by dilution. The overlap coefficient $|A \cap B| / \min(|A|, |B|)$, which normalizes the set-size disparity, shows no relationship with concept count (r = 0.0 to 0.15, non-significant), confirming the effect is arithmetic. The diagnostic figure `count_vs_jaccard_overlap.png` (produced separately, not part of the standard module output) shows the downward Jaccard trend in the left column flattening under the overlap coefficient in the right column, for both models.
 
@@ -316,42 +316,54 @@ This inverse relationship is a property of the Jaccard index rather than a seman
 
 Frequency-vs-expert-count and the three null relationships, both models:
 
-| AP | GPT-2 Freq-ExpCount | Qwen3 Freq-ExpCount | GPT-2 Freq-Jaccard | Qwen3 Freq-Jaccard | Freq-Typ (both) |
-|---|---|---|---|---|---|
-| 0.5 | -0.203 (p=4e-3) | -0.176 (p=1e-2) | 0.059 (p=0.41, n.s.) | -0.060 (p=0.40, n.s.) | -0.026 (p=0.72, n.s.) |
-| 0.6 | -0.262 (p=2e-4) | -0.215 (p=2e-3) | 0.106 (p=0.14, n.s.) | -0.020 (p=0.78, n.s.) | -0.026 (n.s.) |
-| 0.7 | -0.302 (p=1e-5) | -0.229 (p=1e-3) | 0.123 (p=0.08, n.s.) | 0.040 (p=0.58, n.s.) | -0.026 (n.s.) |
-| 0.8 | -0.297 (p=3e-5) | -0.203 (p=4e-3) | 0.238 (p=1e-2, n<75%) | -0.053 (p=0.46, n.s.) | -0.044 (n.s.) |
-| 0.9 | -0.225 (p=2e-2, n<75%) | -0.037 (p=0.61, n.s.) | dropped (coverage) | dropped (coverage) | dropped (coverage) |
+| AP | GPT-2 Freq-ExpCount | Qwen3 Freq-ExpCount | GPT-2 Freq-Jaccard | Qwen3 Freq-Jaccard |
+|---|---|---|---|---|
+| 0.5 | -0.195 (5e-3) | -0.267 (1e-4) | 0.194 (6e-3) | 0.136 (0.06, n.s.) |
+| 0.6 | -0.247 (4e-4) | -0.303 (1e-5) | 0.236 (8e-4) | 0.221 (2e-3) |
+| 0.7 | -0.286 (3e-5) | -0.321 (3e-6) | 0.255 (3e-4) | 0.290 (4e-5) |
+| 0.8 | -0.277 (9e-5) | -0.300 (1e-5) | gated, 56% coverage | 0.204 (4e-3) |
+| 0.9 | gated, 56% coverage | -0.160 (3e-2) | gated | gated, 36% coverage |
 
-Frequency-vs-Jaccard is non-significant at every threshold in both models. The single nominal exception, GPT-2 at AP=0.8 (r=0.238, p=0.012), rests on 110 of 196 categorized concepts (56% coverage), below the 75% reporting bar, and is not reported under the coverage rule. Frequency-vs-typicality is constant at -0.026 across all thresholds within each model, since neither variable depends on the expert data and the threshold only changes which concepts survive the join.
+Frequency-vs-expert-count is negative in both models at every reported threshold, peaking near AP 0.7 at about -0.29 to -0.32 and weakening at AP 0.9 where only the highest-count words survive. Frequency-vs-Jaccard, discussed above, is now positive and significant across the mid range in both models. Frequency-vs-typicality is constant at -0.026 across all thresholds within each model, since neither variable depends on the expert data and the threshold only changes which concepts survive the join.
+
+The gated cells are the coverage rule working as intended: GPT-2 retains only 111 of 197 categorized concepts at AP 0.8 (56%) and Qwen3 71 of 197 at AP 0.9 (36%), both below the 75% floor, so those correlations are withheld rather than computed on a survivor-biased subset.
 
 The typicality-alignment panels, both models:
 
 | AP | GPT-2 Typ-Jaccard | GPT-2 partial (ctrl freq) | GPT-2 Jaccard-CosineTyp | Qwen3 Typ-Jaccard | Qwen3 partial | Qwen3 Jaccard-CosineTyp |
 |---|---|---|---|---|---|---|
-| 0.5 | 0.300 (2e-5) | 0.302 (1.7e-5) | 0.527 (2e-15) | 0.381 (3e-8) | 0.381 (4e-8) | 0.641 (5e-24) |
-| 0.6 | 0.301 (2e-5) | 0.305 (1.4e-5) | 0.343 (8e-7) | 0.376 (6e-8) | 0.376 (6e-8) | 0.568 (4e-18) |
-| 0.7 | 0.206 (4e-3) | 0.211 (3e-3) | 0.155 (0.03) | 0.329 (2e-6) | 0.331 (2e-6) | 0.400 (7e-9) |
-| 0.8 | 0.056 (0.56, n<75%) | 0.123 (0.20, n<75%) | 0.231 (0.02, n<75%) | 0.342 (9e-7) | 0.341 (1e-6) | 0.031 (0.67, n.s.) |
+| 0.5 | 0.320 (5e-6) | 0.331 (2e-6) | 0.647 (1e-24) | 0.452 (3e-11) | 0.460 (1e-11) | 0.639 (5e-24) |
+| 0.6 | 0.291 (3e-5) | 0.306 (1e-5) | 0.543 (2e-16) | 0.395 (9e-9) | 0.411 (2e-9) | 0.686 (9e-29) |
+| 0.7 | 0.209 (3e-3) | 0.223 (2e-3) | 0.450 (3e-11) | 0.328 (3e-6) | 0.350 (5e-7) | 0.689 (4e-29) |
+| 0.8 | gated (56%) | gated (56%) | gated (56%) | 0.345 (7e-7) | 0.358 (2e-7) | 0.456 (2e-11) |
+| 0.9 | n/a | n/a | n/a | gated (36%) | gated (36%) | gated (36%) |
 
-Typicality-vs-Jaccard is significant across AP 0.5 to 0.8 in Qwen3 and across AP 0.5 to 0.7 in GPT-2 (its AP=0.8 row rests on 110 concepts, below the coverage bar). The partial correlation controlling for frequency matches the raw value at every threshold, so frequency contributes negligibly. Qwen3 shows a stronger and more stable effect than GPT-2 across thresholds. The Jaccard-vs-Cosine-Typicality panel is high at AP=0.5 (r=0.53 GPT-2, 0.64 Qwen3) and decays with threshold, weak or absent by AP 0.7 to 0.8, so the model-derived centroid typicality tracks category alignment only at the most lenient threshold.
+Typicality-vs-Jaccard is significant across AP 0.5 to 0.8 in Qwen3 and AP 0.5 to 0.7 in GPT-2, the remaining cells being withheld by the coverage rule rather than non-significant. The partial correlation controlling for frequency slightly *exceeds* the raw value at every threshold in both models, so the modest positive frequency-alignment link now present is a mild suppressor here rather than the driver of the typicality effect. Qwen3 shows the stronger and more stable effect.
 
-**Overlap and entropy panels.** Human-Typicality-vs-Overlap (run for Qwen3) matches typicality-vs-Jaccard at every threshold (AP=0.5 both 0.381, AP=0.8 overlap 0.304 versus Jaccard 0.342), consistent with the typicality-alignment link being independent of Jaccard's size sensitivity. Shannon-entropy-vs-expert-count is near zero at the lenient thresholds (Qwen3 r=0.114 at AP=0.5, r=0.021 at AP=0.6) and rises to r=0.233 (p=8e-4) by AP=0.8 as counts fall toward the $\log_2 n_c$ ceiling. Module 2's entropy contrasts are therefore count-independent at AP 0.5 to 0.6 but not at strict thresholds.
+The Jaccard-vs-Cosine-Typicality panel is high in both models and holds up much better than previously reported: GPT-2 falls from 0.647 to 0.450 across AP 0.5 to 0.7, while Qwen3 stays near 0.64 to 0.69 through AP 0.7 before dropping to 0.456 at AP 0.8. Model-derived centroid typicality therefore tracks category alignment across the usable threshold range, not only at the most lenient cut.
+
+**Overlap and entropy panels.** Human-Typicality-vs-Overlap tracks typicality-vs-Jaccard closely in both models (GPT-2 0.284 against 0.320 at AP 0.5, Qwen3 0.433 against 0.452), consistent with the typicality-alignment link being independent of Jaccard's size sensitivity.
+
+Shannon-entropy-vs-expert-count behaves very differently in the two architectures, and this matters for how module 2 is read. In Qwen3 it is near zero at lenient thresholds (r = 0.109 at AP 0.5, -0.012 at AP 0.6, 0.011 at AP 0.7) and only becomes substantial at strict ones (0.192 at AP 0.8, 0.490 at AP 0.9), exactly the $H \le \log_2 n_c$ ceiling effect subchapter 4.4 predicts. In GPT-2 it is strong at *every* threshold (0.655, 0.647, 0.561, 0.545). GPT-2 words hold far fewer experts than Qwen3 words at the same AP, so GPT-2 sits in the count-limited regime from the start. Module 2's entropy contrasts are therefore count-independent for Qwen3 at AP 0.5 to 0.7, but for GPT-2 an entropy difference between two groups is partly a count difference at any threshold, and the level-1 versus level-2 entropy gap there should be read with the label-versus-concept count gap in view.
 
 ### Jaccard vs layer-profile agreement (subchapter 4.5)
 
-Whole-model scope, Qwen3 on Richie-HSJ, over all 20,706 word pairs:
+Whole-model scope, over all 20,910 word pairs:
 
-| AP | pairs used | coverage | Spearman $\rho$, $J$ vs $S$ | Pearson $r$, $J$ vs $S$ | Spearman $\rho$, $J$ vs $z$ |
+| Model | AP | pairs used | Spearman $\rho$, $J$ vs $S$ | Pearson $r$, $J$ vs $S$ | Spearman $\rho$, $J$ vs $z$ |
 |---|---|---|---|---|---|
-| 0.5 | 20,706 | 100% | 0.440 | 0.368 | 0.386 |
-| 0.6 | 20,706 | 100% | 0.379 | 0.281 | 0.332 |
-| 0.7 | 20,706 | 100% | 0.330 | 0.213 | 0.261 |
-| 0.8 | 20,301 | 98% | 0.296 | 0.171 | 0.210 |
-| 0.9 | 17,391 | 84% | 0.146 | 0.102 | 0.114 |
+| GPT-2 | 0.5 | 20,910 | 0.40 | 0.337 | 0.29 |
+| GPT-2 | 0.6 | 20,910 | 0.42 | 0.276 | 0.28 |
+| GPT-2 | 0.7 | 20,910 | 0.37 | 0.189 | 0.20 |
+| GPT-2 | 0.8 | 16,836 | 0.25 | 0.155 | 0.13 |
+| GPT-2 | 0.9 | 3,916 | 0.10 | 0.100 | 0.08 |
+| Qwen3 | 0.5 | 20,910 | 0.45 | 0.369 | 0.40 |
+| Qwen3 | 0.6 | 20,910 | 0.39 | 0.288 | 0.34 |
+| Qwen3 | 0.7 | 20,910 | 0.34 | 0.230 | 0.28 |
+| Qwen3 | 0.8 | 20,503 | 0.31 | 0.191 | 0.23 |
+| Qwen3 | 0.9 | 18,145 | 0.16 | 0.104 | 0.12 |
 
-The two metrics are **positively but weakly related, and they diverge further as the AP threshold tightens**, from $\rho = 0.44$ to $\rho = 0.15$. Sharing neurons and allocating experts to the same depths are therefore largely different things, which is precisely what makes the layer-profile reading worth computing rather than a restatement of the Jaccard index. At the loosest threshold the shared rank variance is about 19 percent, at the strictest about 2 percent.
+The two metrics are **positively but weakly related, and they diverge further as the AP threshold tightens**, from $\rho \approx 0.4$ down to $\rho \approx 0.1$. Sharing neurons and allocating experts to the same depths are therefore largely different things, which is precisely what makes the layer-profile reading worth computing rather than a restatement of the Jaccard index. At the loosest threshold the shared rank variance is about 16 to 20 percent, at the strictest about 1 to 3 percent. The pair count itself is worth noting: GPT-2 drops from 20,910 usable pairs to 3,916 by AP 0.9 while Qwen3 still has 18,145, the same thinning documented in module 1.
 
 Pearson sits consistently below Spearman, by 0.07 to 0.10, which is the expected signature of the non-linearity that motivated reporting the rank statistic as the headline. The hexbin panels show its source directly. The Jaccard axis is heavily zero-inflated, so a dense column of pairs sits at $J = 0$ spanning the entire range of layer-profile similarity, from roughly 30% to 80% at AP=0.6. Those are pairs that share no expert at all, which the Jaccard index cannot tell apart, and which the layer-profile metric separates across nearly its whole range. Above $J = 0$ the LOWESS smooth flattens well below the OLS line, so the linear fit substantially overstates the association at high Jaccard.
 
@@ -359,13 +371,13 @@ The same-category and different-category panels differ sharply. At AP=0.6 the wi
 
 Substituting $z$ for $S$ lowers the correlation slightly at every threshold, by 0.03 to 0.07, so the small shared component between the Jaccard index and the layer profile is partly a common dependence on expert-set size, and removing that dependence makes the two readings more nearly independent still.
 
-The concept-to-parent panel of subchapter 4.1 agrees in magnitude on its much smaller population, giving Pearson $r$ of 0.44, 0.28, 0.30 and 0.19 at AP=0.5 through 0.8, on 196, 196, 196 and 167 pairs respectively. At AP=0.9 coverage falls to 23% of categorized concepts, far below the 75% floor, so the correlation is withheld and the scatter is drawn unfitted, as designed.
+The concept-to-parent panel of subchapter 4.1 agrees in magnitude on its much smaller population. Qwen3 gives Pearson $r$ of 0.367, 0.361, 0.518 and 0.389 at AP 0.5 through 0.8 (197, 197, 197 and 168 pairs), and GPT-2 gives 0.575, 0.417 and 0.593 at AP 0.5 through 0.7 before its coverage falls to 44% at AP 0.8 and the correlation is withheld. At AP 0.9 both models fall far below the 75% floor, so the scatter is drawn unfitted, as designed.
 
 ## Conclusions
 
-- Human Typicality is positively associated with category alignment in both models (typicality-vs-Jaccard r = 0.30 to 0.38 at AP=0.5), significant across the lenient-to-moderate thresholds, and this association is independent of both frequency (partial correlation unchanged) and Jaccard's set-size sensitivity (matched under the overlap coefficient).
-- Frequency has at most a modest negative association with expert count (r ≈ -0.20 at AP=0.5, strengthening toward mid thresholds) and no association with category alignment or typicality.
-- Concept expert count is negatively associated with Jaccard alignment (r = -0.28 to -0.38), but this is an arithmetic property of the Jaccard index for a fixed smaller comparison set and vanishes under the overlap coefficient, so it does not reflect a size-dependent tendency in category alignment.
-- The model-derived Cosine Typicality tracks Jaccard alignment only at the most lenient threshold and decays with AP, unlike Human Typicality.
-- Shannon entropy and expert count are decorrelated at AP 0.5 to 0.6, supporting module 2's use of entropy contrasts at those thresholds, and become correlated at strict thresholds.
-- The Jaccard index and layer-profile agreement are only weakly related over all word pairs (Spearman 0.44 at AP=0.5 falling to 0.15 at AP=0.9), so which neurons two words share and how they distribute those neurons over depth are largely independent descriptions. The layer-profile reading is therefore a genuine addition to the pairwise feature set rather than a restatement of the Jaccard index, and the two diverge most exactly where module 5 shows the Jaccard index losing its category signal.
+- Human Typicality is positively associated with category alignment in both models (typicality-vs-Jaccard r = 0.32 GPT-2 and 0.45 Qwen3 at AP=0.5), significant across the lenient-to-moderate thresholds, and this association is independent of both frequency (the partial correlation slightly exceeds the raw value) and Jaccard's set-size sensitivity (matched under the overlap coefficient).
+- Frequency has a modest negative association with expert count (r = -0.20 to -0.32, strongest near AP 0.7) and, on whole-model expert sets, a modest *positive* association with category alignment (r = 0.14 to 0.29). The latter reverses the previous null and is the clearest change from the sublayer-restricted runs.
+- Concept expert count is negatively associated with Jaccard alignment (r = -0.29 to -0.42), but this is an arithmetic property of the Jaccard index for a fixed smaller comparison set and vanishes under the overlap coefficient, so it does not reflect a size-dependent tendency in category alignment.
+- The model-derived Cosine Typicality tracks Jaccard alignment across the usable threshold range in both models (GPT-2 0.65 to 0.45 over AP 0.5 to 0.7, Qwen3 near 0.64 to 0.69 through AP 0.7), rather than only at the most lenient cut.
+- Shannon entropy and expert count are decorrelated in Qwen3 at AP 0.5 to 0.7, supporting module 2's use of entropy contrasts there, but are strongly correlated in GPT-2 at every threshold (r ≈ 0.55 to 0.66), so GPT-2 entropy contrasts always carry a count component.
+- The Jaccard index and layer-profile agreement are only weakly related over all word pairs (Spearman about 0.4 at AP=0.5 falling to about 0.1 at AP=0.9 in both models), so which neurons two words share and how they distribute those neurons over depth are largely independent descriptions. The layer-profile reading is therefore a genuine addition to the pairwise feature set rather than a restatement of the Jaccard index, and the two diverge most exactly where module 5 shows the Jaccard index losing its category signal.

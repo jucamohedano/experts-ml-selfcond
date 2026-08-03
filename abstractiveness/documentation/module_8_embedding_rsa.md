@@ -94,41 +94,59 @@ A single AP 0.5 GPT-2 verification run illustrates the confound cleanly. `mlp.c_
 
 ## Results across AP thresholds
 
-Both models were run across the full sweep, with the analysis-sublayer-only comparison described in sections 8.1 to 8.4. GPT-2 on Richie-HSJ, 196 concepts, headline layer `27.L.6.mlp.c_fc` (block 6 of 12, derived as `n_blocks // 2`).
+Both models were run across the full sweep on the corrected `_sensefix` data, 197 concepts. GPT-2 headline layer `27.L.6.mlp.c_fc` (block 6 of 12, derived as `n_blocks // 2`).
 
-| AP | Expert units | $\rho$ at middle layer | 95% CI | Mantel p | Peak layer | Density association | Middle minus outer (p) |
-|---|---|---|---|---|---|---|---|
-| 0.5 | 25,549 | 0.636 | [0.597, 0.673] | 1e-4 | 3.L.0 | 0.97 | -0.034 (1.00) |
-| 0.6 | 16,052 | 0.486 | [0.447, 0.529] | 1e-4 | 3.L.0 | 0.90 | -0.023 (1.00) |
-| 0.7 | 9,260 | 0.339 | [0.301, 0.378] | 1e-4 | 7.L.1 | 0.84 | -0.005 (0.84) |
-| 0.8 | 4,037 | 0.189 | [0.155, 0.226] | 1e-4 | 11.L.2 | 0.65 | +0.002 (0.27) |
-| 0.9 | 791 | 0.067 | [0.039, 0.094] | 1e-4 | 15.L.3 | 0.60 | +0.001 (0.29) |
+| AP | $\rho$ at middle layer | 95% CI | $\rho$ leave-one-out | Peak $\rho$ | Density association | Middle minus outer |
+|---|---|---|---|---|---|---|
+| 0.5 | 0.641 | [0.605, 0.678] | 0.637 | 0.695 | 0.95 | -0.034 |
+| 0.6 | 0.494 | [0.456, 0.532] | 0.491 | 0.543 | 0.87 | -0.021 |
+| 0.7 | 0.340 | [0.304, 0.376] | 0.338 | 0.357 | 0.87 | -0.006 |
+| 0.8 | 0.189 | [0.156, 0.224] | 0.185 | 0.193 | 0.43 | +0.003 |
+| 0.9 | 0.067 | [0.040, 0.094] | 0.067 | 0.069 | 0.50 | +0.002 |
 
-The noise ceiling is 0.98 and the embedding depth stability is 0.933 at every threshold, both being properties of the embedding side alone, which does not depend on $\tau$.
+The noise ceiling is 0.981 at every threshold, being a property of the embedding side alone, which does not depend on $\tau$.
 
 Qwen3-1.7B on the same dataset, headline layer `103.L.14.mlp.gate_proj` (block 14 of 28).
 
-| AP | Expert units | $\rho$ at middle layer | 95% CI | Peak layer | Plateau layers | Density association | Middle minus outer (p) |
-|---|---|---|---|---|---|---|---|
-| 0.5 | 98,634 | 0.653 | [0.618, 0.688] | 173.L.24 | 17 of 28 | 0.65 | -0.030 (0.97) |
-| 0.6 | 61,823 | 0.546 | [0.508, 0.581] | 187.L.26 | 24 of 28 | 0.71 | -0.029 (0.99) |
-| 0.7 | 38,890 | 0.452 | [0.419, 0.488] | 187.L.26 | 27 of 28 | 0.75 | -0.021 (1.00) |
-| 0.8 | 21,743 | 0.327 | [0.293, 0.360] | 5.L.0 | 28 of 28 | 0.88 | -0.016 (1.00) |
-| 0.9 | 6,889 | 0.146 | [0.118, 0.175] | 5.L.0 | 28 of 28 | 0.79 | -0.006 (1.00) |
+| AP | $\rho$ at middle layer | 95% CI | $\rho$ leave-one-out | Peak $\rho$ | Density association | Middle minus outer |
+|---|---|---|---|---|---|---|
+| 0.5 | 0.660 | [0.624, 0.695] | 0.660 | 0.748 | 0.66 | -0.030 |
+| 0.6 | 0.553 | [0.517, 0.590] | 0.553 | 0.629 | 0.74 | -0.031 |
+| 0.7 | 0.462 | [0.429, 0.496] | 0.462 | 0.517 | 0.78 | -0.023 |
+| 0.8 | 0.336 | [0.305, 0.370] | 0.336 | 0.380 | 0.92 | -0.016 |
+| 0.9 | 0.156 | [0.127, 0.185] | n/a | 0.171 | 0.77 | -0.006 |
 
-Its noise ceiling is 0.979 and its depth stability 0.913, both again constant across thresholds.
+Its noise ceiling is 0.979, again constant across thresholds. The leave-one-out column is unavailable at Qwen3 AP 0.9, where too few concepts retain experts for the control to be computed.
 
 The two architectures agree on every qualitative point. Agreement is strong at permissive thresholds and decays as the threshold tightens, the middle third never beats the outer thirds, the peak plateau covers most or all of the network, and the depth curve tracks expert density. Qwen3 degrades more gracefully at the strict end, holding $\rho = 0.15$ at AP 0.9 against GPT-2's 0.07, which is consistent with its larger expert pool leaving more structure intact after thresholding. Its depth curve is also visibly flatter, spanning roughly 0.65 to 0.75 across all 28 blocks, so the depth-invariance conclusion is if anything stronger for the larger model.
 
-**The expert set does recover the model's semantic geometry.** At AP 0.5 the two systems agree at $\rho = 0.64$ against a ceiling of 0.98, from a comparison in which one side is a binary set-membership pattern and the other a continuous activation geometry. This is the module's main result and it supports the validity of the expert-set methodology.
+**The expert set does recover the model's semantic geometry.** At AP 0.5 the two systems agree at $\rho = 0.641$ (GPT-2) and $\rho = 0.660$ (Qwen3) against ceilings of 0.981 and 0.979, from a comparison in which one side is a binary set-membership pattern and the other a continuous activation geometry. This is the module's main result and it supports the validity of the expert-set methodology. The leave-one-out control changes the value by at most 0.004, so the agreement is not carried by any single concept.
 
-**Agreement falls steeply as the threshold tightens**, from 0.64 to 0.07. This is expected and is not a failure: at AP 0.9 only 791 expert units survive across the whole sublayer, most concept pairs share no experts at all, and a nearly empty Jaccard matrix cannot track a full geometry. It does set a practical ceiling on how strict a threshold can be before the expert set stops describing the model, which is useful alongside module 1's zero-expert findings.
+**Agreement falls steeply as the threshold tightens**, from 0.64 to 0.07 in GPT-2 and 0.66 to 0.16 in Qwen3. This is expected and is not a failure: at strict thresholds most concept pairs share no experts at all, and a nearly empty Jaccard matrix cannot track a full geometry. It does set a practical ceiling on how strict a threshold can be before the expert set stops describing the model, which is useful alongside module 1's zero-expert findings.
 
 **The middle layer is not better than the rest.** The middle-third contrast never reaches significance at any threshold, and is slightly negative at the permissive end. This does not refute the layer-probing literature, which concerns downstream task performance rather than representational geometry, and it should not be read as evidence against it. The reason it cannot adjudicate the question is the stability measure above: with cross-layer similarity at 0.93 there is barely any depth variation for a middle-layer advantage to show up in. For this comparison the choice of layer is close to immaterial, which is itself a useful negative result, and it means the pipeline's use of one analysis sublayer costs nothing here.
 
-**The peak drifts toward the middle as the threshold tightens**, from block 0 at AP 0.5 to block 3 at AP 0.9, while the density association weakens from 0.97 to 0.60. The more selective the expert set, the less its depth profile is governed by raw expert counts. This is suggestive rather than established, since the differences between layers sit well inside the bootstrap intervals at every threshold.
+**The density association weakens as the threshold tightens in GPT-2**, from 0.95 at AP 0.5 to 0.43 and 0.50 at AP 0.8 and 0.9, so the more selective the expert set, the less its depth profile is governed by raw expert counts. Qwen3 does not show this: its density association is lower to begin with (0.66) and rises rather than falls (0.92 at AP 0.8). The pattern is therefore architecture-specific and should not be stated as a general property of thresholding.
 
-A full re-run of the per-sublayer comparison of section 8.5 across every AP threshold, for both models, has not yet been performed, so the `sublayer_comparison.csv` numbers reported in section 8.5 are from a single AP 0.5 GPT-2 verification run and are not yet a validated thesis result.
+### Per-sublayer comparison (section 8.5), both models at AP 0.5
+
+| Model | Sublayer | Expert units | $\rho$ full | $\rho$ count-matched |
+|---|---|---|---|---|
+| GPT-2 | mlp.c_fc | 25,251 | 0.641 | 0.308 |
+| GPT-2 | attn.c_attn | 17,659 | 0.583 | 0.307 |
+| GPT-2 | attn.c_proj | 6,064 | 0.563 | 0.445 |
+| GPT-2 | mlp.c_proj | 5,556 | 0.241 | 0.241 |
+| Qwen3 | mlp.gate_proj | 97,400 | 0.660 | 0.325 |
+| Qwen3 | mlp.up_proj | 91,665 | 0.651 | 0.370 |
+| Qwen3 | self_attn.o_proj | 35,521 | 0.491 | 0.360 |
+| Qwen3 | self_attn.v_proj | 12,442 | 0.450 | 0.423 |
+| Qwen3 | self_attn.k_proj | 10,662 | 0.443 | 0.443 |
+| Qwen3 | self_attn.q_proj | 19,710 | 0.429 | 0.341 |
+| Qwen3 | mlp.down_proj | 29,226 | 0.263 | 0.154 |
+
+The count-matched column is the one to read, and it changes the ranking substantially. On raw $\rho$ the analysis sublayer leads in both models, but once every sublayer is cut to the same number of experts (`k` set by the smallest sublayer, 13,482 for GPT-2 and 32,483 for Qwen3) the lead disappears: GPT-2's `mlp.c_fc` falls from 0.641 to 0.308, below `attn.c_proj` at 0.445, and Qwen3's `mlp.gate_proj` falls from 0.660 to 0.325, below `self_attn.k_proj` at 0.443 and `v_proj` at 0.423. **Most of the analysis sublayer's apparent advantage in this module is expert density rather than representational fidelity.** The one robust conclusion that survives matching is that the FFN output projection is genuinely worst in both architectures (GPT-2 `mlp.c_proj` 0.241, Qwen3 `mlp.down_proj` 0.154), which agrees with module 1's category-alignment ranking and module 5's contrast.
+
+Note that this does not undermine the `sublayer_filter` choice, which was made on category alignment (module 1) and expert share, not on RSA fidelity. It does mean module 8's sublayer ranking should be cited from the count-matched column only.
 
 ## Outputs
 

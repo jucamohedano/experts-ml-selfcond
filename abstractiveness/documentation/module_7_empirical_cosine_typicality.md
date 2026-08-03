@@ -121,25 +121,48 @@ the Pearson correlation (computed only when both variables have nonzero variance
 
 ## Results
 
-*Scope note.* Every figure in this section comes from the runs that predate the whole-model refactor, so it describes the **analysis sublayer** (`mlp.c_fc` for GPT-2, `mlp.gate_proj` for Qwen3), which is now one scope among several rather than the only one. Those numbers still stand, they are reproduced byte for byte by the corresponding `sublayers/<rank>_<sublayer>/` outputs. Whole-model and other-sublayer figures land here once the sweep is re-run.
+*Scope note.* The 150-concept figures below use 17 categories and the analysis sublayer only. The Richie-HSJ tables are whole-model scope from the corrected `_sensefix` runs, 197 concepts across 8 categories, with `typicality_HSJ_pairwise` as the human measure.
 
-At AP=0.6, pooled across all 147 concept-category rows, ignoring which category each concept belongs to, the correlation between Human Typicality and global Cosine Typicality is **r=-0.001, p=0.99, no relationship at all**. Per-category correlations show real heterogeneity. The categories **weapon** (r=0.88, p<0.001, n=8) and **vehicle** (r=0.74, p=0.006, n=12) are strong and positive, whereas **jewelry** (r=-0.98), **container** (r=-0.74, p=0.01), and **drink** (r=-0.72, p=0.03) are significantly *negative*. Only 9 of 17 categories have a positive r at all, and only 2 of 17 are both positive and significant.
+**The two datasets give opposite answers, and this is the most consequential disagreement in the analysis suite.** Both are reported here rather than reconciling them, since the difference is real and its cause is not isolated to one factor.
 
-### Across AP thresholds
+### The 150-concept run, 17 categories, analysis sublayer
 
-| AP | Pooled r | Pooled p | n | Positive / 17 cat. | Sig. positive | Sig. negative |
-|---|---|---|---|---|---|---|
-| 0.5 | 0.091 | 0.27 (n.s.) | 147 | 10 | 2 | 2 |
-| 0.6 | -0.001 | 0.99 (n.s.) | 147 | 9 | 2 | 3 |
-| 0.7 | -0.101 | 0.22 (n.s.) | 147 | 7 | 1 | 3 |
-| 0.8 | -0.149 | 0.073 (n.s.) | 146 | 5 | 1 | 2 |
-| 0.9 | -0.242 | **0.011 (sig.)** | 110 | 4 | 0 | 3 |
+At AP=0.6, pooled across all 147 concept-category rows, the correlation between Human Typicality and global Cosine Typicality is **r=-0.001, p=0.99, no relationship at all**, and the pooled value moves monotonically from weakly positive to significantly negative as AP tightens (0.091, -0.001, -0.101, -0.149, -0.242 across AP 0.5 to 0.9), the last being significant at p=0.011. The number of categories with any positive correlation shrinks steadily (10, 9, 7, 5, 4 of 17), and by AP=0.9 zero categories are significantly positive while 3 are significantly negative. `weapon` is positive and significant at every AP from 0.5 to 0.8 (r=0.87 to 0.79), while `container` is negative and significant at every AP (r=-0.68 to -0.96).
 
-This sweep reveals a clear and somewhat damning trend that the single-threshold view hides: the pooled correlation doesn't just hover near zero. It **moves monotonically from weakly positive to significantly negative** as AP tightens (0.091, -0.001, -0.101, -0.149, and -0.242 across AP 0.5 to 0.9). At the strictest threshold, the pooled relationship is the *opposite* of the hypothesis, and is itself statistically significant. The number of categories with any positive correlation also shrinks steadily (10, 9, 7, 5, and 4 out of 17), and by AP=0.9 **zero** categories show a significant positive relationship while 3 show significant negative ones.
+### The Richie-HSJ runs, 8 categories, whole model
 
-Two categories are worth calling out specifically because they're consistent across every threshold tested, which is rare in this analysis:
+| Model | AP | n | Pooled r | p | Positive / 8 | Sig. positive | Sig. negative |
+|---|---|---|---|---|---|---|---|
+| GPT-2 | 0.5 | 197 | +0.248 | <0.001 | 7 | 3 | 0 |
+| GPT-2 | 0.6 | 197 | +0.198 | 0.005 | 7 | 4 | 0 |
+| GPT-2 | 0.7 | 197 | +0.145 | 0.043 | 7 | 2 | 0 |
+| GPT-2 | 0.8 | 188 | +0.141 | 0.054 | 7 | 2 | 0 |
+| GPT-2 | 0.9 | 114 | +0.055 | 0.56 | 4 | 0 | 1 |
+| Qwen3 | 0.5 | 197 | +0.454 | <0.001 | 8 | 4 | 0 |
+| Qwen3 | 0.6 | 197 | +0.393 | <0.001 | 7 | 6 | 0 |
+| Qwen3 | 0.7 | 197 | +0.307 | <0.001 | 7 | 6 | 0 |
+| Qwen3 | 0.8 | 197 | +0.211 | 0.003 | 6 | 4 | 0 |
+| Qwen3 | 0.9 | 192 | +0.060 | 0.41 | 5 | 1 | 0 |
 
-- **`weapon` is positive and significant at every single AP from 0.5 to 0.8** (r=0.87, 0.88, 0.85, 0.79), the most reliable piece of evidence anywhere in this module that the hypothesis can hold. It's notably absent from the AP=0.9 "significant categories" list only because the per-category n shrinks too far to reach significance at that threshold, not because the relationship reverses.
-- **`container` is negative and significant at every single AP from 0.5 to 0.9** (r=-0.68, -0.74, -0.81, -0.84, -0.96), an equally reliable finding in the *wrong* direction. `drink` follows a similar pattern from AP=0.6 onward (r=-0.72 to -0.79).
+Here the pooled correlation is **positive and significant in both models across AP 0.5 to 0.8**, reaching r=0.454 for Qwen3 at AP 0.5, and there is not a single significantly negative category anywhere in the sweep except one GPT-2 cell at AP 0.9. The decay toward zero at AP 0.9 is the familiar thinning effect rather than a reversal.
 
-So the honest summary, strengthened by the threshold sweep rather than weakened by it: this module does not show that the model's expert-allocation geometry recovers human typicality judgments in general, and the strictest, most selective AP threshold makes that conclusion worse, not better. A small number of categories (weapon, and to a lesser extent vehicle) show a real, repeatable positive relationship, whereas a small number of others (container, drink) show an equally real, repeatable relationship in the opposite direction. Any claim about "the expert representation captures psychologically plausible structure" needs to be scoped to specific categories, not stated as a general result, and should note that the relationship gets worse, not better, as the expert-selection criterion is tightened.
+Per-category correlations (AP 0.5 / 0.6 / 0.7 / 0.8, asterisk marks p<0.05):
+
+| Category | GPT-2 | Qwen3 |
+|---|---|---|
+| professions | +0.68* +0.65* +0.61* +0.51* | +0.62* +0.62* +0.65* +0.65* |
+| sports | +0.40* +0.46* +0.50* +0.60* | +0.34 +0.41* +0.49* +0.50* |
+| vegetables | +0.12 +0.26 +0.43 +0.33 | +0.54* +0.51* +0.62* +0.47* |
+| fruit | +0.31 +0.45* +0.35 +0.33 | +0.68* +0.70* +0.60* +0.41 |
+| clothing | +0.50* +0.43* +0.25 +0.01 | +0.62* +0.62* +0.52* +0.18 |
+| vehicles | +0.27 +0.15 +0.07 +0.09 | +0.38 +0.49* +0.55* +0.47* |
+| birds | -0.07 +0.03 +0.01 +0.06 | +0.24 +0.30 +0.17 -0.00 |
+| furniture | +0.02 -0.19 -0.30 -0.31 | +0.26 -0.02 -0.13 -0.19 |
+
+`professions` and `sports` are positive in both architectures at every threshold, and `furniture` is the one category that trends negative in both, though never significantly.
+
+### Reading the disagreement
+
+Three things differ between the two runs at once, so the reversal cannot be attributed to any single one: the stimulus set (150 concepts across 17 categories versus Richie-HSJ's 197 across 8), the analysis scope (single sublayer versus whole model), and the human measure (`typicality` versus `typicality_HSJ_pairwise`). The Richie-HSJ result additionally benefits from the word-sense correction documented in `fixes.md`, which raised category alignment across the board.
+
+The defensible statement is therefore narrower than either run alone suggests: **on the Richie-HSJ norms, with whole-model expert sets, model-derived cosine typicality does recover human typicality judgments at a modest but reliable level in both architectures**, and the earlier negative result should be scoped to the 150-concept dataset and its single-sublayer view rather than treated as the general finding. A direct test of which factor drives the difference would require rerunning the 150-concept dataset at whole-model scope, which has not been done.
