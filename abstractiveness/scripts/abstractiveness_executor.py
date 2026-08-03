@@ -10,7 +10,7 @@ from utils.helpers import (set_folder_log, load_experts_data, init_global_layer_
 from utils.plot_helpers import plot_sublayer_comparison_bars
 from modules import (module_1_layer_distribution, module_2_shannon_entropy, module_3_similarities,
                      module_4_correlations, module_5_heatmaps, module_6_jensen_shannon_divergence,
-                     module_7_cosine_typicality)
+                     module_7_cosine_typicality, module_9_typicality_prediction)
 from modules.module_1_layer_distribution import (execute_module_1_layer_expert_distribution,
                                                  save_expert_counts_metadata)
 from modules.module_2_shannon_entropy import execute_module_2_shannon_entropy
@@ -20,6 +20,7 @@ from modules.module_5_heatmaps import execute_module_5_heatmaps
 from modules.module_6_jensen_shannon_divergence import execute_module_6_dual_category_jsd
 from modules.module_7_cosine_typicality import execute_module_7_empirical_cosine_typicality
 from modules.module_8_embedding_rsa import execute_module_8_embedding_rsa
+from modules.module_9_typicality_prediction import execute_module_9_typicality_prediction
 
 np.random.seed(42)
 
@@ -33,7 +34,7 @@ REFERENCE_AP = min(AP_THRESHOLDS)
 # 4, and disabling any of them silently drops the panels that depend on it (see the
 # dependency handling in the scope loop), so a narrowed run is for verification, never for
 # producing the results anyone reads. Restore to the full set before a real sweep.
-ENABLED_MODULES = {3, 4, 5}
+ENABLED_MODULES = {1, 2, 3, 4, 5, 6, 7, 8, 9}
 
 # Which columns each module's cross-scope comparison plot draws. Each module owns its own
 # list so the metric names stay next to the code that computes them.
@@ -46,6 +47,7 @@ MODULE_SUMMARY_LABELS = {
     6: module_6_jensen_shannon_divergence.SUMMARY_LABELS,
     7: module_7_cosine_typicality.SUMMARY_LABELS,
     8: {},
+    9: module_9_typicality_prediction.SUMMARY_LABELS,
 }
 
 log = logging.getLogger(__name__)
@@ -100,7 +102,7 @@ MODEL_CONFIGS = {
         "metadata_file": "metadata_Richie_HSJ.json",
         "layer_mapping_file": "layer_mapping_Qwen3_1-7B.csv",
         "typicality_column": "typicality_HSJ_pairwise",
-        "output_subdir": "research_plots_qwen_richie_hsj_with_distribution",
+        "output_subdir": "research_plots_qwen_richie_hsj_sensefix",
         "sublayer_filter": "mlp.gate_proj",
         "embedding_cache_file": "concept_embeddings_qwen3_richie_hsj.npz",
     },
@@ -113,7 +115,7 @@ MODEL_CONFIGS = {
         "metadata_file": "metadata_Richie_HSJ.json",
         "layer_mapping_file": "layer_mapping_GPT2.csv",
         "typicality_column": "typicality_HSJ_pairwise",
-        "output_subdir": "research_plots_gpt2_richie_hsj_with_distribution",
+        "output_subdir": "research_plots_gpt2_richie_hsj_sensefix",
         "sublayer_filter": "mlp.c_fc",
         "embedding_cache_file": "concept_embeddings_gpt2_richie_hsj.npz",
     },
@@ -178,6 +180,7 @@ if __name__ == "__main__":
             6: out_path / "6_dual_category_jsd",
             7: out_path / "7_typicality_analysis",
             8: out_path / "8_embedding_rsa",
+            9: out_path / "9_typicality_prediction",
         }
         for d in module_dirs.values():
             d.mkdir(parents=True, exist_ok=True)
@@ -254,6 +257,11 @@ if __name__ == "__main__":
                 else:
                     # execute_module_4b guards on an empty frame and returns {}.
                     global_typicality_df = empty
+
+                # Module 9: exploratory typicality prediction from module 3's pair features
+                if 9 in ENABLED_MODULES:
+                    _, rows[9] = execute_module_9_typicality_prediction(
+                        scope, similarity_metrics_df, concept_metadata, module_dirs[9])
 
                 # Module 4b: Jaccard vs. Cosine Typicality (needs module 7's output, so it runs here)
                 if 4 in ENABLED_MODULES:
