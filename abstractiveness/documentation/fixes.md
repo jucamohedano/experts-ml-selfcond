@@ -62,12 +62,47 @@ Three supporting corrections landed with it. WordNet synsets are resolved lazily
 
 The audit is a screen rather than a proof. It catches errors that cross a category boundary, such as a bird described as a person, but not errors within a category, such as a railway van described instead of a road van, since both talk about vehicles. For those the report prints the currently chosen gloss beside each concept, which makes the mismatch readable even when the similarity ranking is clean.
 
-### Status
+### What the correction changed
 
-The correction is in the generator only. Regenerating the sixteen concepts requires LM calls against a paid endpoint, so at the time of writing the dataset still holds the wrong-sense sentences and all published results were computed from them. When the regeneration runs, only those concepts and their negatives are rebuilt, every other concept file stays byte identical, and the model responses need recomputing for the sixteen plus `squash` only.
+The sixteen concepts were regenerated with the corrected glosses, their negatives redrawn from the full corrected pool, and responses and expertise recomputed for those sixteen plus `squash` in both models. The other 188 concept files were never rewritten, so their cached responses stayed valid and untouched.
+
+Two checks confirm the recompute did what it was supposed to and nothing else. First, the audit went from nine flagged concepts to zero, with the three remaining rank-two rows being the known benign neighbours (`cycling` and `sailing` resembling vehicles, `skateboard` resembling sports). Second, comparing the new module 3 table against the old one, exactly twenty-five untouched concepts moved, and all twenty-five are members of `sports`, which is correct: `sports` is a level 1 label that was itself regenerated, so every sports member's similarity to its parent necessarily changes. All 156 concepts in the other seven categories are identical to the previous run.
+
+The per-concept effect is large for the words whose sense was grossly wrong. On GPT-2 at AP 0.5 in the `mlp.c_fc` scope, Jaccard with the category label:
+
+| Concept | Before | After |
+|---|---|---|
+| fencing | 0.90 | 20.43 |
+| handball | 6.03 | 15.28 |
+| gloves | 1.16 | 10.09 |
+| date | 0.00 | 7.32 |
+| trailer | 1.24 | 7.49 |
+| cushion | 1.97 | 6.15 |
+| cuckoo | 0.29 | 3.77 |
+
+`date` is the clearest case, it previously shared exactly zero expert units with `fruit`, which is what placed it outside the fruit block in the module 5 heatmap where the problem was first noticed. The four judgment calls barely moved, and two moved slightly down (`carriage` 10.67 to 7.28, `secretary` 10.52 to 9.92), which is expected: their old senses were still members of the assigned category, so there was no gross mismatch to repair.
+
+At the corpus level the correction improves category alignment in both architectures. Within-category similarity rises while across-category similarity stays flat, which is the signature of removing mislabelled items rather than of inflating all similarities:
+
+| Model, AP 0.5, whole model | Within | Across | Contrast | AUC |
+|---|---|---|---|---|
+| GPT-2 before | 6.718 | 1.032 | 5.686 | 0.9143 |
+| GPT-2 after | 7.135 | 1.017 | 6.118 | 0.9328 |
+| Qwen3 before | 6.538 | 1.022 | 5.516 | 0.9388 |
+| Qwen3 after | 6.999 | 1.024 | 5.974 | 0.9576 |
+
+(The GPT-2 rows are the `mlp.c_fc` scope, the only scope its previous run recorded.) On Qwen3, where a like-for-like baseline exists at every threshold, the alignment AUC improves at all five: 0.9388 to 0.9576 at AP 0.5, 0.9315 to 0.9516 at 0.6, 0.9048 to 0.9245 at 0.7, 0.7513 to 0.7675 at 0.8, and 0.5402 to 0.5460 at 0.9.
+
+In other words the wrong-sense words were not a cosmetic blemish, they were suppressing the central result. A bird described as a police informer shares its experts with `professions`, which raises the across-category term and lowers the within-category one at the same time.
+
+Results from the corrected data live in `results/research_plots_<model>_richie_hsj_sensefix/`, with the previous runs left in place as the before comparison.
 
 ## Squash restored to the dataset
 
 `squash` appears twice in the Richie and Bhatia table, once under vegetables and once under sports, and the collision meant it entered neither model. Both sets of sentences were generated correctly and sit on disk as `squash__vegetables.json` and `squash__sports.json`, but the two metadata rows are held under underscore-prefixed keys that exclude them from the pipeline, so the concept is missing from the responses of both models.
 
-The word is admitted once, under the vegetables sense, because vegetables is the smaller category, 19 member concepts against 27 for sports, so placing it there costs the smaller category less imbalance than removing it would. The sports row is dropped, and with the name no longer duplicated the storage key becomes the plain `squash`. This is pending together with the regeneration above, since the new concept needs responses computed in both models.
+The word is admitted once, under the vegetables sense, because vegetables is the smaller category, 19 member concepts against 27 for sports, so placing it there costs the smaller category less imbalance than removing it would. The sports row is dropped, and with the name no longer duplicated the storage key becomes the plain `squash`.
+
+The rename matters more than it looks. `compute_responses.py` locates a concept's sentences at `<group>/<concept>.json`, reading the `concept` column of `concept_list.csv` rather than the `storage_key` column, so it looked for `squash.json`, found nothing, and skipped the concept without any error. That silent skip, not the metadata exclusion alone, is why `squash` is absent from the responses of both models.
+
+The dataset side is done: `metadata_Richie_HSJ.json` and the dataset config both carry 205 concepts aligned one to one, `custom/squash.json` holds the vegetables sentences, the sports files are parked under `excluded_senses/` so their sentences cannot leak into any other concept's negative pool, and `prepare_metadata_richie_hsj.py` now carries an `EXCLUDED_SENSES` set so regenerating the metadata does not reintroduce the sports row. What remains is computing responses and expertise for `squash` in both models, together with the regeneration above.

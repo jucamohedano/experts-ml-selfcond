@@ -25,6 +25,16 @@ RICHIE_TO_THINGS_CATEGORY = {
     "professions": None,
 }
 
+# (concept, category) pairs kept out of the metadata. The Richie and Bhatia table lists
+# "squash" twice, once as a vegetable and once as a sport, and a single word cannot carry
+# two sets of expert units, since the sentences describing one sense would be negatives for
+# the other. The word is admitted under vegetables because that is the smaller category,
+# 19 members against 27 for sports, so placing it there costs the smaller category less
+# imbalance than dropping it would. See documentation/fixes.md.
+EXCLUDED_SENSES = {
+    ("squash", "sports"),
+}
+
 
 def load_frequencies_from_file(file_path):
     """Load word frequencies from Wikipedia count file."""
@@ -100,6 +110,10 @@ def prepare_metadata(wordlist_path, freq_path, typ_path, out_json_path):
         things_category = RICHIE_TO_THINGS_CATEGORY.get(cat_name_lower)
         for concept in concepts:
             concept_lower = concept.lower()
+
+            if (concept_lower, cat_name_lower) in EXCLUDED_SENSES:
+                print(f"Skipping {concept_lower} under {cat_name_lower}, excluded sense.")
+                continue
 
             # Fetch typicality only when the word is rated under the THINGS
             # category matching this word-list's category; round to 3

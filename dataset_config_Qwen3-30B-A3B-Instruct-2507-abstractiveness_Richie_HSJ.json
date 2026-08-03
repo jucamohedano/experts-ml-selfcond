@@ -1,7 +1,7 @@
 {
   "base_url": "https://robertosavi--qwen3-30b-cot-serve.modal.run/v1",
   "model": "openai/Qwen/Qwen3-30B-A3B-Instruct-2507",
-  "dataset_name": "Qwen3-30B-A3B-Instruct-2507_Richie_HSJ_cot",
+  "dataset_name": "Qwen3-30B-A3B-Instruct-2507_abstractiveness_Richie_HSJ_cot",
   "concepts": [
     "furniture",
     "bed",
@@ -129,7 +129,6 @@
     "sailing",
     "skiing",
     "soccer",
-    "squash",
     "surfing",
     "swimming",
     "tennis",
