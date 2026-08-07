@@ -117,6 +117,50 @@ Fewer than `MIN_RANK_PAIRS = 200` usable pairs skips the subchapter.
 
 **Generated data structures.** `typicality_ranker_comparison.csv`, one row per feature set with `accuracy`, `accuracy_clear`, `regression_accuracy`, `accuracy_sd_across_categories`, `n_pairs`, and on the headline row `delta_accuracy_vs_jaccard`, `categories_improved`, `categories_tested` and `paired_t_p`. `typicality_ranker_per_category.csv`, one row per (feature set, held-out category). `typicality_ranker_comparison.png`, accuracy per feature set with the regression baseline beside it and a chance line at 50 percent, plus the per-category detail for the headline pair.
 
+Three diagnostic figures accompany them, each answering a question the aggregate accuracy cannot.
+
+- `ranker_category_dumbbell.png` joins the Jaccard accuracy of each held-out category to its Jaccard-plus-profile accuracy, sorted by the change. A mean that rests on one or two categories looks identical to a uniform small gain in the summary table and completely different here.
+- `ranker_accuracy_by_gap.png` plots accuracy against how far apart the two human ratings are, generalising the single `RANK_MARGIN` cutoff into a curve. A model that has learned the construct is near chance where the raters were undecided and accurate where they were decisive, so a flat line would show the accuracy is not tracking the rating at all.
+- `ranker_pair_errors.png` shows, per category, a concept-by-concept grid of which pairs were misranked, with concepts ordered by human typicality. Errors scattered near the diagonal mean the model confuses adjacent neighbours, which is expected. A contiguous block means the ordering is systematically inverted, which is a different problem with a different cause.
+
+### 9.3 Measuring against the category centroid rather than the label word
+
+**Research question.** Subchapters 9.1 and 9.2 measure each concept against its category **label word**, treating the word "bird" as the category's representative. Module 6 established that a label word behaves unlike the average of its members, so the two are not interchangeable. This subchapter measures against the **other members** instead, which is the family-resemblance formulation in its classic form: is a typical bird the one most like the word "bird", or the one most like the other birds?
+
+**Mathematical formulation.** For concept $c$ in category $k$ with members $M_k$, every reference is built from $M_k \setminus \{c\}$. Leaving the concept out is not optional: in a twenty-member category a concept otherwise supplies five percent of the object it is scored against, the inflation is larger in smaller categories, and the feature becomes part self-similarity.
+
+The set-based feature is the mean Jaccard to the other members,
+
+$$\text{mean\_jaccard\_to\_members}(c) = \frac{100}{|M_k| - 1} \sum_{m \in M_k \setminus \{c\}} \frac{|E_c \cap E_m|}{|E_c \cup E_m|},$$
+
+which is the model counterpart of how the human typicality proxy was built, since that averaged each word's row of the human similarity matrix.
+
+The distribution-based feature is the layer-profile similarity to the leave-one-out centroid $\bar{p}_{-c} = \frac{1}{|M_k| - 1}\sum_{m \neq c} p_m$, using module 3's transform so it lands on the same scale as the label-word feature it is compared against,
+
+$$\text{layer\_profile\_similarity\_to\_centroid}(c) = 100\left(1 - \sqrt{\mathrm{JSD}(p_c,\ \bar{p}_{-c})}\right).$$
+
+The third feature contrasts the own centroid against the seven foreign ones,
+
+$$\text{centroid\_margin}(c) = \text{sim}(p_c, \bar{p}_{-c}) - \frac{1}{7}\sum_{j \neq k} \text{sim}(p_c, \bar{p}_j).$$
+
+`centroid_margin` replaces the count-matched $z$ used for pairs elsewhere in this pipeline. That construction does not transfer, because a centroid is an average of many profiles and has no expert count of its own, so there is nothing to match against. The margin controls the same nuisance, that some concepts have generically central profiles close to everything, and reads directly as "closer to its own category than to the others".
+
+Profiles are taken on the block axis, matching both module 6's centroid and subchapter 9.2's `__profile__` feature.
+
+**Comparability.** The label-word and member-average feature sets are run against each other in `FEATURE_SETS`, and both are fitted on identical rows through the single shared `dropna` over every candidate feature. A per-model `dropna` would give one reference more training data than the other and make the $R^2$ values incomparable.
+
+### 9.4 Predicting human pair similarity directly
+
+**Research question.** Subchapters 9.1 to 9.3 predict `typicality_HSJ_pairwise`, which is not a measured quantity. Richie and Bhatia elicited pairwise similarity only, and that column was derived by averaging each word's row of the resulting matrix. This subchapter predicts the ratings themselves.
+
+**What changes, and why it is not just a new column.** The ranker predicts a **direction**, which of two concepts is more typical, from the antisymmetric difference $\phi(a) - \phi(b)$ of per-concept features. Human pair similarity is a **value** attached to the pair and is symmetric in its two members, so the features must be symmetric too. They are therefore the pair quantities $J(a,b)$, $S(a,b)$ and $z(a,b)$, module 5's matrices, not module 3's concept-to-parent table. Predicting a symmetric target from antisymmetric features would be incoherent.
+
+This is consequently pairwise regression rather than ranking, evaluated by the Spearman correlation of predicted against actual, pooled and per category, each also divided by that category's noise ceiling.
+
+**No shortcut is available here.** Subchapter 9.1 had to guard against the category-identity shortcut, where a feature carrying a category-level component lets the model predict typicality by learning category averages. That cannot happen on this target: the category is constant within every pair, so a model given only category identity scores at chance. The guard is nonetheless kept, since categories are still held out whole by `GroupKFold`, and the property is asserted in `tests/check_pair_similarity_target.py`.
+
+**Generated data structures.** `pair_similarity_comparison.csv`, one row per feature set with `n_pairs`, `n_categories`, `group_cv_spearman` (pooled), `mean_category_spearman` (the headline), `noise_ceiling_mean`, `rho_over_ceiling`, `pooled_rho_over_ceiling` and `group_cv_r2`. `rho_over_ceiling` divides the **mean over categories** by the ceiling, not the pooled correlation, since dividing the pooled figure would propagate the between-category artefact described above into the normalised column as well. The pooled version is kept beside it as `pooled_rho_over_ceiling` so the discrepancy stays visible rather than being hidden. `pair_similarity_per_category.csv`, one row per (feature set, category), where `rho_over_ceiling` is that category's own correlation over its own ceiling and is unaffected.
+
 ## Results
 
 Whole-model scope, corrected `_sensefix` runs, 197 concepts across all 8 categories.
@@ -182,22 +226,74 @@ The mean again rests almost entirely on `fruit`, and `professions` moves 18 poin
 
 `vegetables` still sits **below chance** (36.8% to 40.0%) under every feature set and both formulations, and this is now on corrected data with `squash` present, so the earlier speculation that the regeneration might explain it is ruled out. Something is systematically inverted for that category and it needs investigating on its own terms.
 
+### 9.3 Label word against member average
+
+Whole-model scope, cross-validated $R^2$ with the held-out-category value beside it. `pF` is the partial $F$ p-value for adding the centroid layer profile to the centroid Jaccard.
+
+| Model | AP | label, Jaccard | members, Jaccard | members, both | pF |
+|---|---|---|---|---|---|
+| GPT-2 | 0.5 | +0.081 / -0.012 | +0.014 / -0.086 | +0.032 / -0.060 | 0.016 |
+| GPT-2 | 0.6 | +0.067 / -0.030 | -0.005 / -0.096 | +0.002 / -0.079 | 0.047 |
+| GPT-2 | 0.7 | +0.026 / -0.038 | -0.012 / -0.110 | -0.010 / -0.086 | 0.070 |
+| GPT-2 | 0.8 | -0.046 / -0.181 | -0.028 / -0.345 | -0.047 / -0.418 | 0.557 |
+| Qwen3 | 0.5 | +0.186 / +0.108 | +0.192 / +0.134 | **+0.209 / +0.151** | 0.009 |
+| Qwen3 | 0.6 | +0.139 / +0.057 | +0.098 / -0.012 | +0.133 / +0.002 | 0.002 |
+| Qwen3 | 0.7 | +0.090 / -0.012 | +0.031 / -0.071 | +0.053 / -0.070 | 0.010 |
+| Qwen3 | 0.8 | +0.078 / -0.031 | -0.004 / -0.086 | -0.014 / -0.109 | 0.441 |
+
+Two findings, and they point in different directions, so both have to be stated.
+
+**The member average does not generally beat the label word.** It wins in exactly one cell, Qwen3 at AP 0.5, where it leads on both the ordinary cross-validated $R^2$ (0.209 against 0.186) and the stricter held-out-category value (0.151 against 0.108). At every other threshold and throughout GPT-2 the label word is the better reference, sometimes by a wide margin. The classic family-resemblance intuition, that a typical bird is the one most like the other birds, is therefore not supported as a general claim by this data. It holds only in the largest model at the most lenient threshold, which is also the setting where the centroid is estimated from the most experts and is consequently least noisy.
+
+**The layer profile does add to the centroid reference, consistently.** The partial $F$ test clears 0.05 in five of the eight cells (Qwen3 at AP 0.5, 0.6 and 0.7, GPT-2 at AP 0.5 and 0.6), and the two failures are both at AP 0.8 where every model in the table has gone negative. This contrasts with the label-word reference, where the same feature never reaches significance. The layer profile is therefore not inert, it simply carries information about how a concept relates to the other members of its category rather than to the category's name, which is a different relation and was invisible to the earlier formulation.
+
+The contrast is drawn in `typicality_reference_comparison.png`, four bars covering both references under both cross-validation schemes, with the partial $F$ p-value for the added layer profile printed over each bar that includes it, so the significant centroid case and the non-significant label-word case are visible side by side.
+
+`centroid_margin` adds nothing anywhere (its own partial $F$ never approaches significance, p = 0.55 at Qwen3 AP 0.5), so the contrast against foreign centroids is not carrying signal beyond the own-centroid similarity.
+
+### 9.4 Predicting human pair similarity
+
+The headline column is `mean_category_spearman`, the mean of the per-category correlations, **not** the pooled `group_cv_spearman`.
+
+That distinction is not cosmetic here. Out-of-fold predictions for a held-out category are miscalibrated in level relative to the categories the model trained on, so pooling them across categories introduces a between-category component that can be strongly negative while every within-category ordering remains correct. At Qwen3 AP 0.8 the pooled figure is -0.167 against +0.493 per category. Reading the pooled column as the result would report failure where the model in fact works.
+
+| Model | AP | Jaccard | Jaccard + profile + z | profile alone (pooled) | n pairs |
+|---|---|---|---|---|---|
+| GPT-2 | 0.5 | 0.361 | 0.373 | -0.374 | 2,391 |
+| GPT-2 | 0.6 | 0.341 | 0.349 | -0.438 | 2,391 |
+| GPT-2 | 0.7 | 0.312 | 0.262 | -0.478 | 2,391 |
+| GPT-2 | 0.8 | 0.349 | 0.150 | -0.416 | 912 |
+| Qwen3 | 0.5 | 0.508 | **0.579** | -0.056 | 2,391 |
+| Qwen3 | 0.6 | 0.478 | 0.516 | -0.287 | 2,391 |
+| Qwen3 | 0.7 | 0.516 | 0.430 | -0.474 | 2,391 |
+| Qwen3 | 0.8 | 0.493 | 0.315 | -0.438 | 1,984 |
+
+**Expert similarity predicts human similarity with categories held out.** Qwen3 sits between 0.478 and 0.516 on Jaccard alone at every usable threshold, and GPT-2 between 0.312 and 0.361. These match subchapter 5.3's raw correlations almost exactly, which is the expected result: a monotone model of one feature preserves the within-category ordering, so cross-validating it can only reproduce what the feature already carries. The value of doing it here is that the model is fitted without ever seeing the test category.
+
+**Adding the layer profile helps at lenient thresholds and hurts at strict ones.** On Qwen3 it improves 0.508 to 0.579 at AP 0.5 and 0.478 to 0.516 at AP 0.6, then degrades the model from AP 0.7 onward. The crossover is where profiles start being estimated from very few experts, and a noisy feature added to a working model subtracts. Alone the profile is useless or actively inverted, from -0.056 down to -0.478.
+
+**AP 0.9 produces no output in either model**, since fewer than `MIN_PAIR_ROWS = 200` rated pairs survive once module 3's table has thinned, and the subchapter declines rather than reporting a correlation from a handful of pairs.
+
 ### Across scopes
 
 At AP 0.6, per sublayer:
 
-| Scope | CV $R^2$ J | CV $R^2$ J+prof | $\Delta$ | rank acc J | rank acc J+prof | $\Delta$ |
-|---|---|---|---|---|---|---|
-| whole model | 0.141 | 0.140 | -0.001 | 66.4% | 66.1% | +1.4 |
-| mlp.gate_proj | 0.156 | 0.183 | +0.027 | 67.3% | 66.0% | -0.8 |
-| mlp.up_proj | 0.152 | 0.159 | +0.008 | 65.7% | 66.2% | +2.0 |
-| self_attn.o_proj | 0.211 | 0.203 | -0.008 | 63.3% | 62.2% | -0.7 |
-| mlp.down_proj | -0.004 | -0.003 | +0.001 | 55.3% | 47.5% | -7.1 |
-| self_attn.q_proj | -0.028 | -0.023 | +0.005 | 52.1% | 47.1% | -4.9 |
-| self_attn.v_proj | 0.053 | 0.067 | +0.014 | 61.1% | 61.9% | +3.1 |
-| self_attn.k_proj | 0.028 | 0.028 | +0.001 | 58.2% | 53.2% | -3.6 |
+| Scope | n | CV $R^2$ J | CV $R^2$ J+prof | $\Delta$ | rank acc J | rank acc J+prof | pair sim $\rho$ |
+|---|---|---|---|---|---|---|---|
+| whole model | 197 | 0.139 | 0.141 | +0.001 | 66.6% | 65.6% | 0.516 |
+| mlp.gate_proj | 197 | 0.163 | 0.192 | +0.029 | 67.1% | 64.8% | 0.471 |
+| mlp.up_proj | 197 | 0.139 | 0.146 | +0.007 | 65.7% | 66.4% | 0.513 |
+| self_attn.o_proj | 197 | 0.188 | 0.180 | -0.008 | 63.6% | 62.0% | **0.553** |
+| mlp.down_proj | 147 | 0.001 | 0.019 | +0.018 | 58.2% | 51.1% | 0.242 |
+| self_attn.q_proj | 197 | -0.021 | -0.010 | +0.012 | 53.7% | 46.6% | 0.252 |
+| self_attn.v_proj | 197 | 0.061 | 0.072 | +0.011 | 60.1% | 60.5% | 0.330 |
+| self_attn.k_proj | 197 | 0.021 | 0.029 | +0.007 | 56.9% | 53.0% | 0.268 |
 
-The two formulations disagree about which sublayer is best. The regression favours `self_attn.o_proj` ($R^2$ 0.211 against the whole model's 0.141) while the ranker favours `mlp.gate_proj` (67.3%) and puts `o_proj` below the whole model. With eight scopes compared and no correction applied, neither ranking should be treated as established. The one consistent pattern is that both formulations place the FFN expansion projections and `o_proj` above the remaining attention projections, matching module 1's sublayer informativeness ordering.
+The three formulations do not agree on which sublayer is best. The regression and the human pair-similarity target both favour `self_attn.o_proj` (0.188 against the whole model's 0.139, and $\rho$ 0.553 against 0.516), while the ranker favours `mlp.gate_proj` at 67.1 percent and places `o_proj` below the whole model. With eight scopes compared and no correction applied, none of these orderings should be treated as established.
+
+Two patterns do hold across all three. Every formulation separates the FFN expansion projections and `o_proj` from the remaining attention projections, matching module 1's sublayer informativeness ordering. And `mlp.down_proj`, `self_attn.q_proj` and `self_attn.k_proj` are near-useless on every target, with the ranker at or below chance on two of them.
+
+The `pair sim` column is worth reading against subchapter 5.3's caution: `mlp.gate_proj` leads on category alignment but is only fourth here, while `o_proj` leads on human similarity. Recovering a category partition and reproducing graded human similarity are different tasks, and this table shows the same dissociation from the model side.
 
 ## Conclusions
 

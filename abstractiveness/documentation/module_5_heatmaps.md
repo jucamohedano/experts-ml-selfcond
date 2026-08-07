@@ -127,6 +127,28 @@ These two matrices are the intended source for any downstream model consuming pa
 
 A note on coverage. Words holding fewer than 2 experts have no usable layer profile and are empty throughout both matrices. When the cross-scope summary reduces a matrix to its category-alignment ROC-AUC, such words are dropped as whole concepts rather than as scattered pairs, because the alignment statistic derives its same-category mask from the concept list and permutes labels across concepts, both of which require the pair pool to remain a complete triangle over one consistent concept set.
 
+### 5.3 Validation against human similarity judgments
+
+**Research question.** Every result above compares the model against itself or against the category labels of the stimulus design. Subchapter 5.3 asks a different and harder question: does the similarity of two words' expert sets predict how similar *people* judge those two words to be?
+
+**The human data.** Richie and Bhatia's Study 1 collected pairwise similarity ratings on a 1 to 7 scale, higher meaning more similar, for every within-category pair of this exact word list. The files are per category under `assets/Richie_and_Bhatia-HSJ/study1_pairwise_data/data_individual_level/`, one row per subject. After excluding the `squash` pairs in sports, whose vegetables sense is the one this dataset admits, **2,391 pairs** remain across the 8 categories, with 19 to 39 raters each. `utils/human_similarity.py` loads them and is shared with module 9.
+
+**Why this is the harder test.** Humans rated within-category pairs only, so this comparison cannot use the large across-category contrast that gives the category alignment ROC-AUC its size. Telling a `robin` from a `truck` is not on the table. The question is whether, among birds alone, the expert sets know that a `chicken` is more like a `rooster` than a `crow` is like a `penguin`.
+
+**Mathematical formulation.** For a category $k$ with rated pairs $P_k$, let $m_{cd}$ be the model similarity of pair $(c,d)$ taken from one of the matrices above, and $h_{cd}$ the subject-averaged human rating. The agreement is the Spearman rank correlation
+
+$$\rho_k = \operatorname{corr_{Spearman}}\big(\{m_{cd}\}_{(c,d) \in P_k},\ \{h_{cd}\}_{(c,d) \in P_k}\big).$$
+
+Ranks rather than raw values, because the layer-profile metric is compressed into a narrow high band by construction (subchapter 5.2) and only its ordering is meaningful.
+
+**Significance.** Pairs sharing a concept are not independent, so an ordinary p-value over hundreds of pairs would be badly anticonservative. The permutation test shuffles **concept labels within the category** and rebuilds the model vector from the same matrix, which moves every pair containing a given concept together, exactly as the dependence in the observed data does. 999 permutations, giving a resolution of 0.001.
+
+**Noise ceiling.** Subjects are split into halves, each half averaged per pair, the two pair vectors correlated, and the result Spearman-Brown corrected to full-sample reliability. This is the largest correlation any model could achieve against ratings this noisy, and every $\rho_k$ is also reported divided by it. The measured ceilings run from 0.836 (birds) to 0.935 (vehicles). This is also what makes the uneven rater counts harmless: unequal $n$ attenuates a correlation rather than inflating it, so it biases toward missing an effect, and whatever attenuation remains is absorbed into the ceiling.
+
+**Two pooled figures, both reported.** `POOLED` is the rank correlation over all 2,391 pairs at once, which lets between-category differences in mean similarity contribute. `POOLED_MEAN` is the unweighted mean of the eight per-category values, which does not. The second is the conservative reading and is the one carried into `sublayer_comparison.csv`.
+
+**Generated data structures.** `human_similarity_validation.csv`, one row per (metric, category) plus the two pooled rows per metric, with columns `metric`, `category`, `n_pairs`, `rho`, `mantel_p`, `noise_ceiling`, `rho_over_ceiling`. Two figures: `human_vs_expert_similarity_<metric>.png`, one scatter panel per category with its own fit, and `human_similarity_by_category.png`, bars of $\rho$ over ceiling grouped by category.
+
 ## Results
 
 *Scope note.* All values are **whole-model scope** from the corrected `_sensefix` runs, 197 concepts with a defined category. Per-sublayer replications sit in `sublayers/<rank>_<sublayer>/`, and the cross-scope contrast is summarised in `sublayer_comparison.csv`.
@@ -153,6 +175,35 @@ This absolute smallness is the reason the effect is clearer in the tabulated rat
 The pattern is consistent and monotone in both architectures. The *relative* within-versus-across-category effect strengthens markedly as AP tightens, from about 6x to 20x, while the *absolute* similarities shrink toward zero. The experts that survive strict AP filtering are increasingly *category-specific*. The GPT-2 AP=0.9 figure of 141x should not be read as a stronger effect than Qwen3's 19.6x, since its denominator is an across-category mean of 0.001% computed over only 1,417 surviving experts, so the ratio is dominated by how close to zero the denominator has fallen rather than by any gain within categories.
 
 This is the strongest evidence in the analysis suite that the expert space is organized along category lines. The effect lives in the ratio rather than in the raw magnitudes, and it is more evident in the tabulated ratio than in the rendered heatmaps, where the values compress toward the bottom of the color scale.
+
+### Agreement with human similarity (subchapter 5.3)
+
+Whole-model scope, both models, over the 2,391 rated within-category pairs. `mean` is the unweighted average of the eight per-category Spearman correlations, which is the conservative reading, and `pooled` is the correlation over all pairs at once. The `significant` column counts categories whose within-category Mantel test clears p < 0.05.
+
+| Model | AP | pooled | mean | mean / ceiling | layer profile, mean | significant |
+|---|---|---|---|---|---|---|
+| GPT-2 | 0.5 | 0.345 | 0.361 | 0.405 | 0.123 | 5/8 |
+| GPT-2 | 0.6 | 0.261 | 0.341 | 0.382 | 0.102 | 6/8 |
+| GPT-2 | 0.7 | 0.193 | 0.312 | 0.350 | 0.073 | 6/8 |
+| GPT-2 | 0.8 | 0.236 | 0.279 | 0.313 | 0.144 | 6/8 |
+| GPT-2 | 0.9 | 0.109 | 0.126 | 0.141 | 0.199 | 5/8 |
+| Qwen3 | 0.5 | 0.613 | 0.508 | 0.570 | 0.066 | 8/8 |
+| Qwen3 | 0.6 | 0.538 | 0.478 | 0.536 | 0.070 | 7/8 |
+| Qwen3 | 0.7 | 0.503 | 0.516 | 0.579 | 0.104 | 8/8 |
+| Qwen3 | 0.8 | 0.480 | 0.508 | 0.571 | 0.121 | 8/8 |
+| Qwen3 | 0.9 | 0.302 | 0.312 | 0.350 | 0.100 | 7/8 |
+
+(The GPT-2 AP 0.9 mean is over the 6 categories that retain enough finite pairs to yield a correlation, `fruit` and `vegetables` having fallen below the floor.)
+
+**Expert-set overlap does predict human similarity judgments.** On Qwen3 the agreement reaches 0.508 at AP 0.5, which is 57 percent of what the raters themselves achieve, and every one of the eight categories is individually significant. Per category at AP 0.5 it runs from 0.26 for `vegetables` to 0.73 for `vehicles`. This is a within-category result, so none of it rests on the easy across-category contrast, and it is the most direct external validation of the expert-set methodology anywhere in this suite.
+
+**The agreement is far more robust to thresholding than category alignment is.** The category alignment ROC-AUC of subchapter 5.1 collapses to near chance by AP 0.9, 0.546 on Qwen3 and 0.506 on GPT-2, while human agreement over the same expert sets is still 0.312 and 0.126. Whatever survives strict filtering continues to carry graded similarity information after it has stopped carrying the category partition.
+
+**Layer-profile agreement does not transfer to human judgments.** It sits between 0.066 and 0.199 everywhere, an order below the Jaccard column, and is the weaker reading at every threshold in both models. This is consistent with module 9's finding that the layer profile carries no ordering information on its own.
+
+**The two architectures differ by more than a constant.** Qwen3 roughly doubles GPT-2 at every threshold. Since both were run on identical sentences and identical human ratings, the gap is a property of the models, and it goes the same way as the expert counts: the larger model has more units clearing the AP bar, so its expert sets are better estimated.
+
+**A caution for reading the sublayer table.** The sublayer with the best category alignment is not the one that best matches human judgment. At AP 0.5 on Qwen3, `mlp.gate_proj` leads on category alignment (AUC 0.956) but reaches only 0.468 against the human ratings, while `self_attn.o_proj` scores 0.949 and 0.580 respectively. Recovering a partition and reproducing graded similarity are different tasks and the same sublayer need not win both.
 
 ### Layer-profile agreement (subchapter 5.2)
 
