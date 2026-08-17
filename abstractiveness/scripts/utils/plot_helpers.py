@@ -293,6 +293,75 @@ def plot_hexbin_with_trends(x, y, same, out_path, x_label: str, y_label: str,
     plt.close(fig)
 
 
+# --- shared style for two-panel model-comparison figures -------------------------------
+# Module 9 draws the same figure shape several times: a left panel ranking feature sets on
+# one score, and a right panel resolving the winner per held-out category. They were styled
+# independently and drifted apart, so the grammar lives here once and every such figure
+# imports it. Subchapter 9.4's figure was the most developed of them and is the reference,
+# in particular its habit of printing each bar's value next to it together with the value
+# read against a fixed reference, since a bare correlation or accuracy is not interpretable
+# without knowing what the attainable maximum or the chance level is.
+COMPARISON_STYLE = {
+    "figsize": (14, 5.4),
+    "bar_height": 0.62,
+    "grouped_bar_height": 0.38,
+    "title_size": 12,
+    "label_size": 10,
+    "tick_size": 10,
+    "value_size": 9,
+    "legend_size": 9,
+}
+
+# Base is the reference/baseline series, accent the model under test, muted anything carried
+# as a diagnostic rather than a candidate, and reference the line marking a ceiling or a
+# chance level, which is deliberately the only green in the figure.
+COMPARISON_COLORS = {
+    "base": "#4B5A6A",
+    "accent": "#D96A5B",
+    "muted": "#9aa5b1",
+    "reference": "#1a7f37",
+    "zero": "#2f2f2f",
+}
+
+
+def comparison_legend(axis, ncol: int = 2) -> None:
+    """Legend below the axes, unframed, so it never covers a bar."""
+    axis.legend(loc="upper center", bbox_to_anchor=(0.5, -0.13),
+                fontsize=COMPARISON_STYLE["legend_size"], frameon=False, ncol=ncol)
+
+
+def annotate_barh_values(axis, values, formatter, pad: float = 0.012) -> None:
+    """
+    Print each horizontal bar's value at its tip, skipping missing ones.
+
+    ``formatter`` takes the value and returns the label, so the caller decides how to express
+    the reading against its own reference (fraction of a noise ceiling, points above chance).
+    """
+    for index, value in enumerate(values):
+        if pd.notna(value):
+            axis.text(value + pad, index, formatter(value), va="center", ha="left",
+                      fontsize=COMPARISON_STYLE["value_size"])
+
+
+def style_comparison_axis(axis, labels, title: str, xlabel: str, bold=()) -> None:
+    """Shared axis furniture: y ticks from ``labels``, no y grid, top-down order.
+
+    Names in ``bold`` are drawn heavier, which is how a headline feature set is marked when
+    colour is already carrying another meaning such as which series a bar belongs to.
+    """
+    positions = np.arange(len(labels))
+    axis.set_yticks(positions)
+    axis.set_yticklabels([str(label).replace("_", " ") for label in labels],
+                         fontsize=COMPARISON_STYLE["tick_size"])
+    for tick, label in zip(axis.get_yticklabels(), labels):
+        if label in bold:
+            tick.set_fontweight("bold")
+    axis.invert_yaxis()
+    axis.set_xlabel(xlabel, fontsize=COMPARISON_STYLE["label_size"])
+    axis.set_title(title, fontsize=COMPARISON_STYLE["title_size"])
+    axis.grid(axis="y", visible=False)
+
+
 _WHOLE_MODEL_BAR_COLOR = "#1f2d3d"
 _SUBLAYER_BAR_COLOR = "#2a78d6"
 

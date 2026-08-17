@@ -2,7 +2,7 @@ import logging
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from utils.helpers import save_dataframe, scope_out_dir, scope_summary_row, layer_profile_matrices
+from utils.helpers import save_dataframe, scope_out_dir, scope_summary_row, layer_profile_matrices, to_block_axis
 from utils.plot_helpers import _plot_bar_with_leaders, build_category_color_map, fig_width_for
 
 log = logging.getLogger(__name__)
@@ -44,7 +44,10 @@ def plot_hierarchy_similarities(expert_allocation_df: pd.DataFrame, concept_meta
     # count range across it and a different list would yield different z for the same pair.
     items = list(concept_metadata["concept"].unique())
     item_row = {item: i for i, item in enumerate(items)}
-    profile_jsd, profile_sim, profile_z = layer_profile_matrices(expert_allocation_df, items)
+    # Block axis: one bin per transformer block, so agreement reads as depth allocation
+    # and not as sublayer-type allocation, and the plug-in entropy bias is ~7x smaller
+    # on Qwen3. On a single-sublayer scope this is an identity relabel.
+    profile_jsd, profile_sim, profile_z = layer_profile_matrices(to_block_axis(expert_allocation_df), items)
 
     results = []
     for _, row in concept_metadata.dropna(subset=["category"]).iterrows():

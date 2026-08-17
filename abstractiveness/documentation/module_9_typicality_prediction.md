@@ -1,307 +1,242 @@
-# Module 9: Exploratory Human-Typicality Prediction
+# Module 9: Typicality Prediction and Human Pair Similarity
 
 ## Research question
 
-Module 4 establishes that a concept's human typicality rating tracks how much its expert set overlaps its category label's, at Pearson $r$ between 0.31 and 0.39 depending on the AP threshold. Module 3, subchapter 3.2 adds a second description of the same concept-to-parent pair, the layer-profile agreement, which measures whether the two words allocate their experts to the same depths rather than to the same neurons.
+Modules 3 and 5 describe a word pair in two ways. The Jaccard index asks which neurons the two words share, and the layer-profile agreement asks whether the two words spread their experts over depth in the same proportions. Module 4 establishes that the first of those tracks human typicality at Pearson $r$ between 0.21 and 0.45 depending on the model and the AP threshold, 0.320 for GPT-2 and 0.452 for Qwen3 at AP 0.5, falling to 0.209 and 0.328 by AP 0.7.
 
-Does that second description predict typicality better than the Jaccard index alone?
+Does the layer-profile agreement add predictive signal over the Jaccard index?
 
-The module is deliberately small. Linear models with one or two predictors over 196 concepts, because the question is whether a second feature carries signal the first lacks, not how well typicality can be predicted in general.
+The module asks that one question with two human targets rather than asking four loosely related questions in four subchapters. Study A predicts which of two same-category concepts humans rate as the more typical, and Study B predicts the measured human similarity of a concept pair. Both are fitted on one generated feature grid whose six cells carry the same names and the same meaning in either study, so a reader can confirm that the same model was asked the same question on both targets. The module is deliberately small, with at most three predictors over a couple of hundred concepts, because the question is whether a second feature carries signal the first lacks rather than how well typicality can be predicted in general.
 
 ## Analysis
 
-Notation. For concept $c$ with parent category $k$, let $t_c \in [0,1]$ be the human typicality rating, $J_c = J(c,k)$ the Jaccard index of module 3, subchapter 3.1, and $S_c = S(c,k)$ and $z_c = z(c,k)$ the layer-profile similarity and its count-matched z-score from subchapter 3.2. All four come from one row of `category_concept_similarity_metrics.csv` joined to the metadata rating.
+Notation. For a word $w$, let $E_w$ be its expert set and $n_w = |E_w|$ its expert count, and let $p_w$ be its layer profile, the row-normalized vector of expert counts per bin defined in module 3, subchapter 3.2. For a concept $c$ with parent category $k$, write $t_c$ for the human typicality rating, $J = J(c,k)$ for the Jaccard index of module 3, subchapter 3.1, $S = S(c,k)$ for the layer-profile agreement and $z = z(c,k)$ for its count-matched null score. The same three symbols apply to a concept pair $(a,b)$ in Study B and to a concept against its category centroid in Study A's second reference, and the resolution table below is the only place they mean anything different.
 
-**Analysis scopes.** This module consumes module 3's table, so it runs once per scope exactly as module 3 does, whole model first and then once per sublayer type. A cross-scope summary lands in `sublayer_comparison.csv` and `sublayer_comparison.png`.
+**Analysis scopes.** The module runs once per scope, whole model first and then once per sublayer type, and a cross-scope summary lands in `sublayer_comparison.csv` and `sublayer_comparison.png`. Unlike the earlier version it no longer consumes module 3's table. It computes every profile feature itself from `scope.expert_df`, calling the same helpers over the same item list, `concept_metadata['concept'].unique()`, so the default metric's label-word columns are identical to module 3's CSV by construction while a new profile metric needs no module 3 schema change. Module 3 does not have to be enabled for module 9 to run.
 
-### 9.1 Feature sets and model
+### The feature grid
 
-Five feature sets are fitted, of which the first and fourth are the comparison the module exists for. The single-feature layer-profile sets are carried because a gain over Jaccard is only interpretable next to what the new feature predicts on its own.
+One dictionary, six cells, generated per registered profile metric by `build_feature_grid(metrics)` rather than written out by hand.
 
-| Model | Predictors |
+| Cell | Features |
 |---|---|
-| jaccard | $J_c$ |
-| layer_profile | $S_c$ |
-| layer_profile_z | $z_c$ |
-| jaccard_plus_profile | $J_c$, $S_c$ |
-| jaccard_plus_profile_z | $J_c$, $z_c$ |
+| `jaccard` | $J$ |
+| `profile` | $S$ |
+| `profile_z` | $z$ |
+| `jaccard_profile` | $J$, $S$ |
+| `jaccard_profile_z` | $J$, $z$ |
+| `jaccard_profile_both` | $J$, $S$, $z$ |
 
-Each is an ordinary least-squares regression on standardized predictors,
+The grid is a nested design rather than a list. The three single-feature cells establish standalone power, without which a gain over Jaccard is uninterpretable. The two two-feature cells test each addition to Jaccard separately, and the last tests both together. Every partial $F$ test in the module is therefore a well-defined nested comparison between two rows of one table.
 
-$$\hat t_c = \beta_0 + \sum_{f} \beta_f \frac{x_{cf} - \bar{x}_f}{\sigma_f},$$
+The three symbols resolve to concrete columns per study and per reference as follows.
 
-so a coefficient reads as the change in typicality per standard deviation of that feature. Least squares rather than a regularized variant because with 196 concepts and at most two predictors there is nothing to regularize, and an unpenalized fit keeps the coefficients interpretable.
+| Symbol | Study A, `label_word` | Study A, `member_centroid` | Study B |
+|---|---|---|---|
+| $J$ | `jaccard_pct` | `mean_jaccard_to_members` | `jaccard_pct` of the pair |
+| $S$ | `profile_js_distance` | `centroid_profile_js_distance` | `profile_js_distance` of the pair |
+| $z$ | `profile_js_distance_z` | `centroid_profile_js_distance_z` | `profile_js_distance_z` of the pair |
 
-**Two design points that decide whether the comparison means anything.**
+The `js_distance` segment names the profile metric, see the metric registry below. Every comparison CSV carries a `metric` column naming the metric a row was built on, and the `jaccard` cell, which uses no profile metric, carries `metric = "none"` and appears once rather than once per metric. With one registered metric this reduces exactly to the tables above.
 
-*In-sample $R^2$ cannot answer the question.* Adding any predictor, including pure noise, never decreases it, so the two-feature model always appears to win. Every headline number here is therefore out of sample. `in_sample_r2` is still written to the CSV, but only as a reference value, and it must not be used for the comparison.
+**The identical-rows rule.** All cells within a study are fitted on identical rows, through a single `dropna` over every candidate feature of that study performed once before any model is fitted. This exists because $z$ is undefined for words below `MIN_PROFILE_EXPERTS = 2`, so a per-cell `dropna` would train the Jaccard cell on more concepts than the others and the accuracies would no longer be comparable. The scope of the rule is the study rather than the module. Study A drops over both references' columns including the centroid ones, because its two arms are compared against each other inside one figure. Study B does its real dropna somewhere else entirely, and this is easy to misread. It takes only `concept` and `category` off the design frame and recomputes every feature it fits as a symmetric PAIR quantity, so the frame-level `study_b_columns` list is `["jaccard_pct"]` alone and is a DEFENSIVE NO-OP, since the presence gate already guarantees a surviving row has a defined `jaccard_pct`. The identical-rows guarantee for Study B is enforced inside `run_pair_similarity`, by one shared dropna over the union of every PAIR column its six cells use, applied to the pair table before any cell is fitted. The list must not be "fixed" by adding the profile columns back. Those are concept-against-LABEL-WORD quantities Study B never reads, and gating on them deleted an entire category at AP 0.9, where the label word `vehicles` held one expert while all 22 of its concepts were fine, which took Study B to two categories and an empty result. The source carries the same warning at length. The two studies are never compared numerically against each other, so nothing is lost by letting their row sets differ. `check_pair_similarity_identical_rows.py` verifies the rule by counting the rows each cell actually sees.
 
-*All feature sets are fitted on identical rows.* $z_c$ is undefined for words below `MIN_PROFILE_EXPERTS`, so dropping missing values per model would train the Jaccard model on more concepts than the others and the $R^2$ values would no longer be comparable. The design frame drops rows missing any candidate feature, once, before any model is fitted.
+### Study A, typicality by pairwise ranking
 
-**Evaluation.** Two cross-validation schemes, answering different questions.
+**Target and unit.** `typicality_HSJ_pairwise`, a derived quantity. Richie and Bhatia elicited pairwise similarity, and this column was produced by averaging each word's row of the resulting matrix. The unit is the ordered within-category pair. Summing $\binom{n_k}{2}$ over the eight categories gives 2,391 pairs from 197 concepts. Cross-category pairs are excluded, since typicality is undefined between them, and exact ties are excluded, since they carry no direction to predict.
 
-`cv_r2_mean` and `cv_r2_sd` come from repeated 5-fold cross-validation, 20 shuffles. Within each shuffle the out-of-fold predictions are pooled and one $R^2$ is taken, so the reported spread describes how much the estimate moves with the fold split rather than the far noisier per-fold value on 39 test concepts.
-
-`group_cv_r2` holds out one entire category at a time, eight folds. This is the harder question, whether typicality can be predicted for a category the model never trained on. Random folds let a model lean on the category-level mean of its training concepts, and category identity alone explains $R^2 = 0.21$ of typicality variance on this dataset, so the two numbers together separate within-category signal from between-category signal.
-
-`cv_spearman` is the rank agreement between pooled out-of-fold predictions and the true ratings, reported because $R^2$ penalizes calibration errors that a ranking use would not care about.
-
-**Nested comparison.** For each of the two headline pairs, a partial $F$ test on the added term,
-
-$$F = \frac{(\mathrm{RSS}_{\text{reduced}} - \mathrm{RSS}_{\text{full}}) / (p_{\text{full}} - p_{\text{reduced}})}{\mathrm{RSS}_{\text{full}} / (n - p_{\text{full}} - 1)},$$
-
-referred to $F_{p_{\text{full}} - p_{\text{reduced}},\; n - p_{\text{full}} - 1}$. This complements the cross-validated gain rather than replacing it. The $F$ test asks whether the added feature explains significantly more variance in this sample, a question about the fitted coefficient, while the cross-validated gain asks whether it helps predict concepts the model has not seen. A feature can pass one and fail the other, so both are reported.
-
-Fewer than `MIN_TRAIN_CONCEPTS = 40` usable concepts skips the module for that scope with a warning.
-
-**Generated data structures.**
-
-`typicality_model_design.csv`, the exact rows fitted, one per concept, with columns `concept`, `category`, `human_typicality`, `jaccard_pct`, `layer_profile_similarity_pct`, `layer_profile_z`.
-
-`typicality_model_comparison.csv`, one row per feature set:
-
-| Column | Description |
-|---|---|
-| model, features, n_features | Identity of the feature set. |
-| n_concepts | Rows fitted, identical across all models by construction. |
-| cv_r2_mean, cv_r2_sd | Pooled out-of-fold $R^2$, mean and standard deviation over 20 shuffles. |
-| cv_spearman | Rank correlation of out-of-fold predictions with the true ratings. |
-| group_cv_r2 | Out-of-fold $R^2$ with whole categories held out. |
-| in_sample_r2 | Reference only, not comparable across feature sets. |
-| coef_* | Standardized coefficient per predictor. |
-| delta_cv_r2_vs_jaccard | Cross-validated gain over the Jaccard-only model, on the fuller model's row. |
-| partial_f, partial_f_p | Partial $F$ statistic and p-value for the added term. |
-
-Two plots. `typicality_model_comparison.png` shows out-of-sample $R^2$ per feature set in two panels, random folds and held-out categories, with the two headline models in distinct colors. `typicality_predicted_vs_actual.png` shows out-of-fold predictions against the true rating for those two models, colored by category, with the identity line.
-
-### 9.2 Within-category pairwise ranking
-
-**Motivation.** Subchapter 9.1 regresses an absolute rating per concept, which is a harder task than the data supports and than the question requires. Three problems it runs into, all of which this reframing removes.
-
-The rating is *relative to a category*, so the regression must simultaneously learn each category's level and the ordering within it. Category identity alone explains $R^2 = 0.21$ of the variance, so a model evaluated on random folds can score well by recovering the category and never learning anything about typicality. There are only 196 training examples. And the source column is `typicality_HSJ_pairwise`, meaning the human ratings were themselves derived from pairwise judgments, so an absolute-value regression is not the form the data was collected in.
-
-The reframing asks instead: given two concepts of the *same* category, which is the more typical?
-
-**Mathematical formulation.** For concepts $a$ and $b$ sharing category $k$, with per-concept feature vector $\varphi(\cdot)$, the model scores the ordered pair by
+**Model.** For concepts $a$ and $b$ sharing category $k$, with per-concept feature vector $\varphi(\cdot)$,
 
 $$f(a, b) = \sigma\big(w^{\top}(\varphi(a) - \varphi(b))\big),$$
 
-a logistic model on the feature *difference*, fitted with **no intercept**, predicting $\mathbb{1}[t_a > t_b]$.
+where $\sigma(x) = 1/(1 + e^{-x})$ is the logistic function and $w$ the fitted weight vector, a logistic model on the feature difference, fitted with no intercept, predicting $\mathbb{1}[t_a > t_b]$. Each pair enters twice, as $(a,b)$ labelled 1 and as $(b,a)$ labelled 0. Scaling uses `StandardScaler(with_mean=False)`.
 
-Three properties follow from that construction, and each addresses one of the problems above.
+Both the missing intercept and the uncentred scaling are required for the exact antisymmetry $f(b,a) = 1 - f(a,b)$, since either a constant term or a subtracted feature mean would let the model express a preference that does not flip when the pair is presented the other way round. `check_ranker_antisymmetry.py` pins this to numerical tolerance for every grid cell. One warning belongs with it, because it cost a round to find. A test fitted on the mirrored training set alone cannot see a violation, since that set is invariant under $(x, y) \mapsto (-x, 1-y)$, which forces the fitted intercept to exactly zero and the column means to exactly zero, so an intercept-bearing model passes at machine epsilon. The check therefore carries a second arm fitted on unmirrored imbalanced data, where an intercept moves the residual by seven to nine orders of magnitude above the tolerance.
 
-*Category terms cancel algebraically.* Any component of $\varphi$ shared by all members of a category, including the parent's own layer profile, disappears from $\varphi(a) - \varphi(b)$. Writing the layer-profile feature as a difference from the parent makes this explicit, $(p_a - p_k) - (p_b - p_k) = p_a - p_b$. The category-identity shortcut is therefore unavailable by construction rather than merely controlled for.
+**Why this form.** Any component of $\varphi$ shared by all members of a category disappears from $\varphi(a) - \varphi(b)$. Category identity alone explains $R^2 = 0.21$ of typicality variance on this dataset, so a per-concept model can score well by recovering the category and never learning anything about typicality. In the differenced form that shortcut is unavailable by construction rather than merely controlled for. The form also matches how the ratings were collected.
 
-*The model is exactly antisymmetric,* $f(b,a) = 1 - f(a,b)$. This requires both the missing intercept and scaling without centring, since either a constant term or a subtracted feature mean would let the model express a preference that does not flip when the pair is presented the other way round. Each training pair additionally enters twice, as $(a,b)$ labelled 1 and $(b,a)$ labelled 0.
+**The reference factor.** Every cell is fitted twice, once against the category label word and once against the leave-one-out member centroid, and each arm carries its own Jaccard baseline so no gain from a profile feature is ever credited to a change of reference. Scoring a concept against the mean of the other category members is the classic family-resemblance operationalization of typicality and is the one the psychological literature is built on, while scoring it against the category label word is the model-specific convenience. Carrying both as a factor of one study makes the comparison a main effect of the design rather than a separate chapter.
 
-*The sample grows by more than an order of magnitude.* Summing $\binom{n_k}{2}$ over the eight categories gives 2,372 within-category pairs from 196 concepts. Pairs across categories are excluded, since typicality is undefined between them, and exact ties are excluded, since they carry no direction to predict.
+**The regression baseline column.** Every cell additionally reports `regression_accuracy`, a per-concept CROSS-VALIDATED RIDGE regression on the same features, applied to exactly the same held-out pairs and ranking each pair by its two predicted ratings. The estimator is `make_pipeline(StandardScaler(), RidgeCV(alphas=np.logspace(-3, 4, 30)))`, so the penalty strength is chosen inside the training fold rather than fixed, and the baseline is a penalised fit and not an unpenalised least squares one. This puts the two formulations on one scale, accuracy against accuracy rather than accuracy against $R^2$, and it is why the per-concept regression that used to be a subchapter of its own is no longer one.
 
-**Feature sets.** Four, all differenced pairwise:
+For the Jaccard cell alone the two columns are identical, and the ridge penalty does not disturb that. Standardizing a single feature and shrinking its coefficient towards zero leaves the sign of the coefficient unchanged, so a single monotone feature induces the same ordering of predicted ratings under either fit. The table below shows the identity holding on both Jaccard rows, and it holds exactly in all sixteen per-category rows of `ranker_per_category.csv`, the eight held-out categories under each of the two references, not only in the pooled mean. Where several features are present the two formulations can diverge, and the divergence has two sources rather than one. The ranker optimizes the ordering of pairs directly while the regression optimizes squared error on the rating, and the ridge penalty additionally shrinks the regression's coefficients towards each other. The honest reading of the column is therefore that the differenced ranker beats its own regression baseline on every multi-feature cell while tying it exactly on the two Jaccard cells, and it does not on its own isolate the trading off of several features as the reason.
 
-| Model | $\varphi(c)$ |
-|---|---|
-| jaccard | $J_c$ |
-| jaccard_plus_profile | $J_c$, $S_c$, $z_c$ |
-| block_profile | the concept's own 28-bin block-axis layer distribution |
-| jaccard_plus_block_profile | $J_c$ and that distribution |
+**Evaluation.** `GroupKFold` over categories, holding out one whole category at a time, eight folds. Because every pair lies inside a single category, holding out a category removes every pair containing any of its concepts, so no concept ever appears in both halves. Three accuracies are reported per cell, `accuracy` over all held-out pairs, `accuracy_clear` over pairs whose ratings differ by at least `RANK_MARGIN = 0.10`, and `regression_accuracy` as above.
 
-The last two are diagnostics rather than candidates. Because pair differencing cancels the parent term, a distribution that still fails here cannot have been carrying depth information when it appeared to help a per-concept regression, and must instead have been acting as a category-identity proxy.
+**Significance.** A paired $t$ test against the `jaccard` cell of the same reference, taken over the eight per-category accuracies rather than over pairs. Thousands of pairs built from a couple of hundred concepts are not independent observations, so a test treating them as independent would badly overstate significance. The eight held-out categories are close to independent replicates and are the honest unit of analysis. The comparison is keyed on the triple of reference, metric and cell, so registering a second metric cannot pool two metrics' per-category accuracies into one delta.
 
-**Evaluation.** `GroupKFold` over categories, holding out one whole category at a time. Because every pair lies inside a single category, holding out a category removes every pair containing any of its concepts, so no concept ever appears in both halves and the model must generalize to a category it has not seen.
+**Guard.** Fewer than `MIN_RANK_PAIRS = 200` usable pairs skips the study for that scope.
 
-Three accuracies are reported. `accuracy` covers all held-out pairs. `accuracy_clear` covers only pairs whose ratings differ by at least `RANK_MARGIN = 0.10`, where the human data actually distinguishes the two concepts, since a model should not be penalized for missing a distinction the ratings barely make. `regression_accuracy` applies subchapter 9.1's per-concept ridge to exactly the same held-out pairs, ranking each pair by its two predicted ratings, so the two formulations are compared on one scale rather than accuracy against $R^2$.
+### Study B, human pair similarity by regression
 
-**Significance.** The headline comparison carries a paired $t$ test over the eight per-category accuracies, not over pairs. Pairs are not independent observations, since thousands of them are built from a couple of hundred concepts, so a test treating them as independent would badly overstate significance. The eight held-out categories are close to independent replicates of the same comparison and are the honest unit of analysis.
+**Target.** The elicited ratings themselves, Richie and Bhatia Study 1, on a 1 to 7 scale with higher meaning more similar, 2,391 within-category pairs over eight categories with 19 to 39 raters each, loaded by `utils/human_similarity.py`. This is external validation rather than a proxy, since the target is a number humans produced for that specific pair, and category is constant within every pair, so category identity alone scores at chance and the shortcut that haunts a per-concept target is closed by construction.
 
-Fewer than `MIN_RANK_PAIRS = 200` usable pairs skips the subchapter.
+**Why the model differs from Study A.** The ranker predicts a direction and is built from the antisymmetric difference $\varphi(a) - \varphi(b)$. Human pair similarity is a value attached to the pair and is symmetric in its two members, so the features must be symmetric too. They are the pair quantities $J(a,b)$, $S(a,b)$ and $z(a,b)$, which are module 5's matrices rather than module 3's concept-to-parent table. Predicting a symmetric target from antisymmetric features would be incoherent, so this is a regression and not a ranking. A pair has no parent either, so the reference factor of Study A does not arise here.
 
-**Generated data structures.** `typicality_ranker_comparison.csv`, one row per feature set with `accuracy`, `accuracy_clear`, `regression_accuracy`, `accuracy_sd_across_categories`, `n_pairs`, and on the headline row `delta_accuracy_vs_jaccard`, `categories_improved`, `categories_tested` and `paired_t_p`. `typicality_ranker_per_category.csv`, one row per (feature set, held-out category). `typicality_ranker_comparison.png`, accuracy per feature set with the regression baseline beside it and a chance line at 50 percent, plus the per-category detail for the headline pair.
+**Evaluation and the headline column.** `GroupKFold` over categories. The headline is `mean_category_spearman`, the mean of the per-category correlations, with the pooled `group_cv_spearman` reported beside it rather than in place of it. That distinction is load bearing. Out-of-fold predictions for a held-out category are miscalibrated in level relative to the categories the model trained on, so pooling them introduces a between-category component that can be strongly negative while every within-category ordering remains correct. On the run reported below the two columns differ by roughly 0.26 on the Jaccard cell alone, 0.3608 against 0.1007, and on the earlier Qwen3 AP 0.8 run the pooled figure was $-0.167$ against $+0.493$ per category. Reading the pooled column as the result would report failure where the model works.
 
-Three diagnostic figures accompany them, each answering a question the aggregate accuracy cannot.
+**Noise ceilings.** Each per-category correlation is also divided by that category's split-half Spearman-Brown ceiling, which runs from 0.836 for birds to 0.935 for vehicles. `rho_over_ceiling` divides the mean over categories by the mean ceiling and never the pooled correlation, since dividing the pooled figure would propagate the between-category artefact into the normalized column. `pooled_rho_over_ceiling` is kept beside it so the discrepancy stays visible rather than hidden by the normalization.
 
-- `ranker_category_dumbbell.png` joins the Jaccard accuracy of each held-out category to its Jaccard-plus-profile accuracy, sorted by the change. A mean that rests on one or two categories looks identical to a uniform small gain in the summary table and completely different here.
-- `ranker_accuracy_by_gap.png` plots accuracy against how far apart the two human ratings are, generalising the single `RANK_MARGIN` cutoff into a curve. A model that has learned the construct is near chance where the raters were undecided and accurate where they were decisive, so a flat line would show the accuracy is not tracking the rating at all.
-- `ranker_pair_errors.png` shows, per category, a concept-by-concept grid of which pairs were misranked, with concepts ordered by human typicality. Errors scattered near the diagonal mean the model confuses adjacent neighbours, which is expected. A contiguous block means the ordering is systematically inverted, which is a different problem with a different cause.
+**Nested tests.** Each cell reports a partial $F$ against every cell it extends by exactly one feature within the same metric, written into a `partial_f_vs_<reduced>` column pair. Three of the six cells have more than one reduced model, which is why the reduced cell's name is carried in the column name.
 
-### 9.3 Measuring against the category centroid rather than the label word
+**Guards.** The study needs at least `MIN_PAIR_CONCEPTS = 3` concepts to form a within-category pair at all, and fewer than `MIN_PAIR_ROWS = 200` rated pairs after the shared dropna skips the study.
 
-**Research question.** Subchapters 9.1 and 9.2 measure each concept against its category **label word**, treating the word "bird" as the category's representative. Module 6 established that a label word behaves unlike the average of its members, so the two are not interchangeable. This subchapter measures against the **other members** instead, which is the family-resemblance formulation in its classic form: is a typical bird the one most like the word "bird", or the one most like the other birds?
+### The block axis
 
-**Mathematical formulation.** For concept $c$ in category $k$ with members $M_k$, every reference is built from $M_k \setminus \{c\}$. Leaving the concept out is not optional: in a twenty-member category a concept otherwise supplies five percent of the object it is scored against, the inflation is larger in smaller categories, and the feature becomes part self-similarity.
+$S$ and $z$ are computed on the block-aggregated layer profile, 28 bins on Qwen3 and 12 on GPT-2, in place of the flat 196 and 48. Mechanically this wraps the expert frame at four call sites in modules 3, 4, 5 and 9 as `layer_profile_matrices(to_block_axis(df), items)`. Note that only the profile helper sees the aggregated frame. The Jaccard helpers keep the raw frame, because Jaccard reads neuron identity and relabelling blocks would collide units across sublayers and inflate every intersection.
 
-The set-based feature is the mean Jaccard to the other members,
+Two arguments motivate the change, and neither is about depth ordering. The Jensen-Shannon divergence
 
-$$\text{mean\_jaccard\_to\_members}(c) = \frac{100}{|M_k| - 1} \sum_{m \in M_k \setminus \{c\}} \frac{|E_c \cap E_m|}{|E_c \cup E_m|},$$
+$$\mathrm{JSD}(p, q) = H\!\left(\tfrac{p+q}{2}\right) - \tfrac{1}{2}\big(H(p) + H(q)\big)$$
 
-which is the model counterpart of how the human typicality proxy was built, since that averaged each word's row of the human similarity matrix.
+with $H(p) = -\sum_\ell p[\ell] \log_2 p[\ell]$ the Shannon entropy in bits, sums over bins independently and never touches bin adjacency, so it is permutation invariant and neither axis measures depth in the ordered sense.
 
-The distribution-based feature is the layer-profile similarity to the leave-one-out centroid $\bar{p}_{-c} = \frac{1}{|M_k| - 1}\sum_{m \neq c} p_m$, using module 3's transform so it lands on the same scale as the label-word feature it is compared against,
+What changes is what a bin means. On the block axis a bin is a transformer block and nothing else, so $S$ reads as agreement in depth allocation. On the flat axis a bin is a block crossed with a sublayer, since `build_layer_mapping_from_layers` numbers layers as `block * n_sublayers + sublayer_position + 1` and indices 1 to 7 are all block 0 on Qwen3, so $S$ there confounds allocating deep with allocating to a particular projection type.
 
-$$\text{layer\_profile\_similarity\_to\_centroid}(c) = 100\left(1 - \sqrt{\mathrm{JSD}(p_c,\ \bar{p}_{-c})}\right).$$
+What also changes is estimation noise. Plug-in entropy bias on a $K$-bin histogram estimated from $n$ samples is approximately $(K-1)/(2 n \ln 2)$ bits. Moving from $K = 196$ to $K = 28$ reduces it sevenfold, and because it scales as $1/n$ it falls hardest on small expert sets, which is exactly the confound $z$ exists to remove. The flat axis is the more contaminated of the two estimators.
 
-The third feature contrasts the own centroid against the seven foreign ones,
+**Blast radius.** Applying `to_block_axis` to a single-sublayer frame is an identity relabel, since such a frame already holds exactly one layer per block. Every `sublayers/` scope is therefore numerically unchanged, which is verified empirically rather than only argued, and block aggregation preserves each word's total expert count, so `MIN_PROFILE_EXPERTS` gating and the resulting row sets are unchanged as well.
 
-$$\text{centroid\_margin}(c) = \text{sim}(p_c, \bar{p}_{-c}) - \frac{1}{7}\sum_{j \neq k} \text{sim}(p_c, \bar{p}_j).$$
+**Sensitivity.** One line re-runs `jaccard_profile` on the flat axis in both studies, at `REFERENCE_AP` and in the whole-model scope only, written to `axis_sensitivity.csv` in each study folder. Its purpose is to show that the axis choice is not load bearing, not to characterize the flat axis, so it is not swept across thresholds or scopes and it is not a grid cell.
 
-`centroid_margin` replaces the count-matched $z$ used for pairs elsewhere in this pipeline. That construction does not transfer, because a centroid is an average of many profiles and has no expert count of its own, so there is nothing to match against. The margin controls the same nuisance, that some concepts have generically central profiles close to everything, and reads directly as "closer to its own category than to the others".
+### Centroid construction
 
-Profiles are taken on the block axis, matching both module 6's centroid and subchapter 9.2's `__profile__` feature.
+For concept $c$ in category $k$ with members $M_k$, every reference quantity is built from $M_k \setminus \{c\}$. Leaving the concept out is not optional. In a twenty-member category a concept otherwise supplies five percent of the object it is scored against, the inflation is larger in smaller categories, and the feature becomes part self-similarity. Members below `MIN_PROFILE_EXPERTS` are excluded from the member list, so a one-expert word neither receives a profile score nor contaminates its category's centroid.
 
-**Comparability.** The label-word and member-average feature sets are run against each other in `FEATURE_SETS`, and both are fitted on identical rows through the single shared `dropna` over every candidate feature. A per-model `dropna` would give one reference more training data than the other and make the $R^2$ values incomparable.
+The Jaccard counterpart is the mean Jaccard to the other members,
 
-### 9.4 Predicting human pair similarity directly
+$$J_{\text{mem}}(c) = \frac{100}{|M_k| - 1} \sum_{m \in M_k \setminus \{c\}} \frac{|E_c \cap E_m|}{|E_c \cup E_m|},$$
 
-**Research question.** Subchapters 9.1 to 9.3 predict `typicality_HSJ_pairwise`, which is not a measured quantity. Richie and Bhatia elicited pairwise similarity only, and that column was derived by averaging each word's row of the resulting matrix. This subchapter predicts the ratings themselves.
+which is also the model counterpart of how the human typicality proxy was built, since that averaged each word's row of the human similarity matrix.
 
-**What changes, and why it is not just a new column.** The ranker predicts a **direction**, which of two concepts is more typical, from the antisymmetric difference $\phi(a) - \phi(b)$ of per-concept features. Human pair similarity is a **value** attached to the pair and is symmetric in its two members, so the features must be symmetric too. They are therefore the pair quantities $J(a,b)$, $S(a,b)$ and $z(a,b)$, module 5's matrices, not module 3's concept-to-parent table. Predicting a symmetric target from antisymmetric features would be incoherent.
+The profile counterpart is the agreement with the leave-one-out centroid $\bar{p}_{-c} = \frac{1}{|M_k| - 1}\sum_{m \neq c} p_m$, using the same transform so it lands on the same scale as $S$,
 
-This is consequently pairwise regression rather than ranking, evaluated by the Spearman correlation of predicted against actual, pooled and per category, each also divided by that category's noise ceiling.
+$$S_{\text{cen}}(c) = 100\left(1 - \sqrt{\mathrm{JSD}(p_c,\ \bar{p}_{-c})}\right).$$
 
-**No shortcut is available here.** Subchapter 9.1 had to guard against the category-identity shortcut, where a feature carrying a category-level component lets the model predict typicality by learning category averages. That cannot happen on this target: the category is constant within every pair, so a model given only category identity scores at chance. The guard is nonetheless kept, since categories are still held out whole by `GroupKFold`, and the property is asserted in `tests/check_pair_similarity_target.py`.
+**The count-matched score $z_{\text{cen}}$.** This is the same construction as the label-word $z$, applied to the concept-by-category agreement matrix. Build $S_{\text{cen}}[c, j]$ for every concept and every category, leave-one-out on the diagonal only. Place each entry at the coordinate $(\log n_c,\ \log N_j)$ where $N_j$ is the pooled expert count of centroid $j$, then standardize each entry against its $k$ nearest entries in that space with itself excluded, reusing the pair null's neighbourhood rule of `NULL_NEIGHBOR_FRACTION = 0.01` clipped to $[40, 300]$. The reference set is dominated by foreign entries, exactly as the label-word $z$'s reference set is dominated by unrelated word pairs, and
 
-**Generated data structures.** `pair_similarity_comparison.csv`, one row per feature set with `n_pairs`, `n_categories`, `group_cv_spearman` (pooled), `mean_category_spearman` (the headline), `noise_ceiling_mean`, `rho_over_ceiling`, `pooled_rho_over_ceiling` and `group_cv_r2`. `rho_over_ceiling` divides the **mean over categories** by the ceiling, not the pooled correlation, since dividing the pooled figure would propagate the between-category artefact described above into the normalised column as well. The pooled version is kept beside it as `pooled_rho_over_ceiling` so the discrepancy stays visible rather than being hidden. `pair_similarity_per_category.csv`, one row per (feature set, category), where `rho_over_ceiling` is that category's own correlation over its own ceiling and is unaffected.
+$$z_{\text{cen}}(c) = \frac{S_{\text{cen}}[c, k] - \mu(\text{reference})}{\sigma(\text{reference})}.$$
+
+The coordinate is in FIXED ORDER, which is the one place this departs from the pair null. That function places a pair at $(\log \min(n_a, n_b),\ \log \max(n_a, n_b))$ because the two words of a pair are exchangeable and the coordinate has to be invariant to their order. A concept and a centroid are different kinds of object and are never exchanged, so the two counts enter in a fixed order and that order carries meaning. The coordinate construction is therefore a parameter of the shared `count_matched_z` helper rather than duplicated neighbourhood logic, and `check_centroid_features.py` pins per-row equality against a fixed-order rebuild on a fixture where the concept outweighs its centroid, so a symmetrized implementation fails visibly.
+
+**Why `centroid_margin` was retired.** The old `centroid_margin`, the own-centroid agreement minus the mean of the seven foreign ones, is removed. Its stated justification was that the count-matched construction cannot transfer to a centroid, because a centroid is an average of many profiles and has no expert count of its own. That reading does not survive scrutiny. The binding sample size in a concept-to-centroid comparison is $n_c$ alone, since the centroid pools the experts of every other member and is never the noisier side of the comparison, so the construction transfers directly once the coordinate is written in fixed order. The margin also had no counterpart anywhere else in the pipeline and added nothing in any cell. In the output tables the replacement is the `centroid_profile_<metric>_z` column, and $z_{\text{cen}}$ is the name of the construction rather than of a column. The two quantities are only moderately concordant and $z_{\text{cen}}$ should be read as a replacement rather than a refinement, which the Limitations section states with its numbers.
+
+### The metric registry
+
+`PROFILE_METRICS` in `utils/helpers.py` maps a metric name to a function taking a row-normalized profile matrix $P$ of shape $(n, K)$ and an optional second matrix $Q$ of shape $(m, K)$, returning the $(n, m)$ cross agreement matrix, or the square $(n, n)$ case when $Q$ is omitted, oriented so that higher always means more similar. The cross form is what lets the centroid features run through the same registry function instead of a private similarity helper.
+
+Orientation is the entire contract. Scale is deliberately not part of it, because every consumer either standardizes the feature or ranks it, and forcing each metric onto a percentage scale would manufacture false comparability between quantities with different geometry. `check_profile_metrics.py` iterates the registry and asserts the orientation on a fixture, so future metrics are covered without new test code.
+
+The registry holds one entry today, `js_distance`, defined as $100(1 - \sqrt{\mathrm{JSD}})$ exactly as module 3 defines it, and `DEFAULT_PROFILE_METRIC` names it. `layer_profile_matrices` takes a `metric` parameter defaulting to that name and dispatches through the registry. `ACTIVE_METRICS` in module 9 lists the metrics the grid is instantiated on, so registering a metric and appending its name there instantiates every cell of both studies on it and touches nothing else. The count-matched null is already metric-agnostic, since it standardizes whatever agreement matrix it is handed against count-matched reference entries, so every registered metric gets its $z$ column and its $z_{\text{cen}}$ column for free.
+
+The six planned metrics of the follow-up project are Wasserstein, cosine, Pearson, Spearman, the Jensen-Shannon divergence without the square root, and Hellinger. One metric-specific fact is worth recording now. Wasserstein is the only one of the six that reads the ORDER of the bins, every other one being permutation invariant like the Jensen-Shannon distance. It is therefore meaningful only on the block axis, where adjacent bins are adjacent depths, and would be meaningless on the flat axis, where adjacent bins are different sublayer types of the same block. The block-axis decision above is what makes the metric extension coherent at all.
+
+The metric a figure describes is never left implicit. `_display_metric` returns `SUMMARY_METRIC` whenever that metric is active, so the three diagnostic figures that can only draw one metric at a time, the per-category dumbbell, the accuracy-by-gap curve and the pair-error grid, draw exactly the metric the cross-scope summary row reports, whether a new metric is appended to `ACTIVE_METRICS` or prepended to it. The pair-similarity figure selects its rich cell on the `(model, metric)` pair for the same reason, rather than on whichever row of the grid order carries the model name first. Each of those titles or legends names the metric as soon as more than one is active, so a single-metric figure reads as it does today and a multi-metric one is unambiguous.
+
+### Design rationale, what the deleted diagnostics established
+
+Four raw-distribution feature sets and two subchapters were removed by the restructure, and their findings are the reason the design has the shape it has. Both numbers below come from the PRE-RESTRUCTURE flat-axis run on Qwen3 at AP 0.6 and are kept here as the historical record of why the module is built this way, not as current results. They are not comparable to the tables in the Results section, which come from a different model, a different threshold and the block axis.
+
+**The category-identity shortcut, which is why Study A is a ranker.** A per-concept regression on the profile difference from the parent appeared to help substantially, with the cross-validated $R^2$ rising from 0.115 to 0.312. Pair differencing cancels the parent term algebraically, and in the differenced form that same distribution scored 53.7 percent alone and dragged Jaccard down from 66.6 to 60.1 percent. A distribution that fails there cannot have been carrying depth information when it appeared to help the per-concept form. The general lesson, that any per-concept feature carrying a category-level component is suspect until it is tested with whole categories held out, is why the surviving typicality study is a ranker and why the per-concept regression is kept only as a baseline column beside it.
+
+**Resolution degrades the raw distribution rather than rescuing it, which is why no raw distribution is carried.** Raising the profile from 28 bins to 196 moved the standalone feature from 53.7 to 49.5 percent, which is chance, and the Jaccard combination from 60.1 to 52.8 percent, with a paired $t$ against Jaccard at $p = 0.048$. Since the finer axis is the one retaining sublayer identity, where module 1 locates the categorical signal, this is evidence that a concept's typicality is not written in where its experts sit even though category membership clearly is. Seven times the parameters on the same 2,391 pairs converted what little the coarse profile held into variance, so the grid carries the two scalar agreement measures and no raw distribution at all.
+
+### The whitened profile, considered and declined
+
+A defensible alternative confound control is the whitened profile, per-bin standardization of the layer distribution across words, which is standard in the representational similarity literature. It is recorded here as considered and DECLINED, with its reasoning, rather than silently omitted.
+
+Per-bin standardization across words targets the SHARED-BACKGROUND confound, that every word inherits the model's global density profile so two arbitrary words already agree substantially before any word-specific structure enters. The count-matched $z$ targets the COUNT confound, that a small expert set yields a spuriously spiky profile through plug-in entropy bias. Those are different nuisances, but they compete for the same slot in the design, since each is a normalization of the same agreement quantity intended to make it interpretable on its own. Carrying both would put two normalizations of one quantity in the grid, which is exactly the sprawl of near-duplicate feature sets this restructure removed. Adopting whitening instead of $z$ would additionally mean removing $z$ from modules 3, 4 and 5, a far larger change than this module. The declined option is therefore recorded rather than built.
+
+### Output layout
+
+```
+<scope>/
+├── typicality_model_design.csv          shared design frame, both studies
+├── 9.1_typicality_ranking/
+│   ├── study_a_design.csv               the rows Study A actually fitted
+│   ├── ranker_comparison.csv            12 rows, 6 cells x 2 references
+│   ├── ranker_per_category.csv
+│   ├── axis_sensitivity.csv             whole-model scope at REFERENCE_AP only
+│   ├── typicality_ranker_comparison.png
+│   ├── ranker_category_dumbbell.png
+│   ├── ranker_accuracy_by_gap.png
+│   └── ranker_pair_errors.png
+├── 9.2_pair_similarity/
+│   ├── study_b_design.csv               the rows Study B actually fitted
+│   ├── pair_similarity_comparison.csv   6 rows
+│   ├── pair_similarity_per_category.csv
+│   ├── axis_sensitivity.csv
+│   └── pair_similarity_comparison.png
+├── sublayer_comparison.csv              cross-scope, written by the executor
+└── sublayer_comparison.png
+```
+
+`typicality_model_design.csv` stays at the scope root because both studies are built from it. Its columns, in file order, are `concept`, `category`, `human_typicality`, `jaccard_pct`, then per registered metric the label-word pair `profile_<metric>` and `profile_<metric>_z`, then `mean_jaccard_to_members`, then per registered metric the centroid pair `centroid_profile_<metric>` and `centroid_profile_<metric>_z`. With one registered metric that is the nine columns `concept`, `category`, `human_typicality`, `jaccard_pct`, `profile_js_distance`, `profile_js_distance_z`, `mean_jaccard_to_members`, `centroid_profile_js_distance` and `centroid_profile_js_distance_z`. Each study additionally writes the post-dropna frame it fitted, so the identical-rows guarantee is inspectable rather than only asserted.
+
+`ranker_comparison.csv` carries a `reference` column taking `label_word` or `member_centroid` and a `metric` column naming the profile metric, and its `model` column takes the six grid names. Together those three key the table, so no row is ambiguous about which model it describes. `pair_similarity_comparison.csv` carries the same `model` and `metric` columns without `reference`. Sublayer scopes carry the same structure one level down under `sublayers/<rank>_<sublayer>/`.
 
 ## Results
 
-Whole-model scope, corrected `_sensefix` runs, 197 concepts across all 8 categories.
+**Provisional.** The numbers below come from a single smoke run, GPT-2 on the Richie-HSJ dataset at AP 0.5 only, whole-model scope, written to `results/research_plots_gpt2_richie_hsj_smoke_m9/`. That run existed to verify the restructure's regression invariants rather than to characterize the module, so it covers one architecture, one threshold and no sublayer comparison worth reporting. The full multi-threshold sweep over both architectures has not been run at the time of writing, and until it has, nothing in this section should be read as a result across AP thresholds. Numbers from the pre-restructure run are deliberately NOT carried over, since the block axis, the retired `centroid_margin` and Study B's own row set all changed what those tables measured.
 
-### 9.1 Per-concept regression
+What the smoke run does establish is that the restructure changed the data path rather than the numbers where it promised to. Every `sublayers/` scope of modules 3, 4 and 5 reproduces the pre-change tree byte for byte on 60 of 76 files, with the 16 exceptions falling into three declared classes, eight module 4 files absent because the modules they read were disabled in that configuration, four `human_similarity_validation.csv` files that gained the `coefficient` and `test` schema columns since the baseline was written, and four `correlation_summary.csv` files, of which exactly one carries a real numeric difference of one unit in the last place on `pearson_p` while the other three differ only by the two rows the disabled modules did not write. Each of the 16 still passes full value equality on every column and row the baseline wrote, at a relative tolerance of $10^{-13}$. Module 9's self-computed default-metric columns equal module 3's own CSV on the same run at a maximum absolute difference of 0.0 over all 197 concepts and all three shared columns. The Jaccard cells match the pre-restructure run exactly, 2,391 pairs and accuracy 0.614806 in Study A and mean per-category $\rho$ 0.3608 in Study B, which is the expected result since Jaccard does not depend on the profile axis.
 
-| Model | AP | CV $R^2$ Jaccard | CV $R^2$ Jaccard + profile | $\Delta$ | partial $F$ p |
-|---|---|---|---|---|---|
-| GPT-2 | 0.5 | 0.081 | 0.162 | +0.081 | <0.001 |
-| GPT-2 | 0.6 | 0.067 | 0.064 | -0.003 | 0.206 |
-| GPT-2 | 0.7 | 0.026 | 0.053 | +0.027 | 0.005 |
-| GPT-2 | 0.8 | -0.046 | -0.060 | -0.014 | 0.289 |
-| Qwen3 | 0.5 | 0.186 | 0.188 | +0.002 | 0.142 |
-| Qwen3 | 0.6 | 0.139 | 0.141 | +0.001 | 0.130 |
-| Qwen3 | 0.7 | 0.090 | 0.114 | +0.024 | 0.007 |
-| Qwen3 | 0.8 | 0.078 | 0.069 | -0.010 | 0.536 |
+### Study A, pairwise typicality ranking, provisional
 
-At AP 0.6 the single-feature models are `layer_profile` at $-0.019$ and `layer_profile_z` at $-0.023$ on Qwen3, both below zero, meaning each predicts less well on unseen concepts than simply returning the mean rating. Held-out-category $R^2$ tells the same story: Jaccard alone reaches $+0.057$ while adding the profile drops it to $-0.001$.
+GPT-2, AP 0.5, whole-model scope, 197 concepts and 2,391 within-category pairs over 8 held-out categories. `delta` is the mean per-category accuracy difference against the `jaccard` cell of the same reference, `cats` counts the categories that improved out of 8, and $p$ is the paired $t$ over those 8 categories.
 
-**The layer-profile feature still does not improve typicality prediction, but the picture is less clean than before.** Two cells now reach significance, GPT-2 at AP 0.5 ($\Delta$ = +0.081, p < 0.001) and both models at AP 0.7 ($\Delta$ = +0.027 and +0.024, p = 0.005 and 0.007). Three considerations argue against reading these as a real effect. They do not replicate across adjacent thresholds in the same model, GPT-2 going +0.081, -0.003, +0.027, -0.014 as the threshold rises. Eight scopes are tested per model, so nominal significance at p ≈ 0.005 in two of sixteen cells is close to what multiple testing produces on its own. And the held-out-category $R^2$, which is the honest generalization measure, does not improve in the significant cells either, GPT-2 AP 0.5 being the sole exception (-0.012 to +0.092). The pairwise formulation below, which is the better-posed test, finds nothing at any threshold.
-
-The Jaccard baseline behaves as module 4 reports, decaying with the threshold until at AP 0.9 both models fail outright.
-
-Worth noting how visible the in-sample trap is. The in-sample $R^2$ always rises when the layer-profile feature is added, since it must, while the out-of-sample $R^2$ generally falls. Reporting the in-sample number would have reversed the conclusion.
-
-### 9.2 Pairwise ranking
-
-Whole-model scope, Qwen3, AP 0.6, 2,391 within-category pairs over 8 held-out categories:
-
-| Feature set | accuracy | accuracy, clear pairs | regression on the same pairs |
-|---|---|---|---|
-| jaccard | **66.6%** | 71.1% | 66.6% |
-| jaccard + layer profile | 65.6% | 69.4% | 62.8% |
-| block_profile (28 bins) | 53.7% | 54.6% | 52.4% |
-| jaccard + block_profile | 60.1% | 62.9% | 59.8% |
-
-GPT-2 at AP 0.5 gives the same ordering on the same 2,391 pairs: jaccard 61.5%, jaccard + profile 62.9%, block_profile 49.9%, jaccard + block_profile 58.8%.
-
-Three readings, in order of confidence.
-
-**The ranking formulation is the better one.** On the same features, the ranker reaches 65.6% where the regression reaches 62.8%. For Jaccard alone the two are identical at 66.6%, as they must be, since a single monotone feature induces the same ordering either way, so the gain appears exactly when several features have to be traded off. The reason is that the regression must additionally fit absolute levels, which the ratings do not really determine, while the ranker only has to get orderings right.
-
-**Restricting to clear pairs helps by about 4 points** in every row (66.6% to 71.1% for Jaccard). Near-ties, where the two ratings differ by less than 0.10, are largely noise, and a model should not be judged on them.
-
-**The layer profile still adds nothing.** The mean per-category gain is $+0.6$ points, only 4 of 8 categories improve, and the paired $t$ test over categories gives $p = 0.87$. On GPT-2 at AP 0.5 the corresponding figures are $+1.3$ points, 5 of 8 categories, $p = 0.13$. Pooled accuracy actually *falls* on Qwen3, from 66.6% to 65.6%, so the pooled and per-category summaries disagree in sign, which is itself a sign that the effect is not robust.
-
-Per held-out category at AP 0.6, the spread swamps the mean difference:
-
-| Category | jaccard | + layer profile | delta |
-|---|---|---|---|
-| fruit | 54.3% | 73.8% | **+19.5** |
-| vehicles | 79.7% | 81.4% | +1.7 |
-| clothing | 76.4% | 78.1% | +1.7 |
-| vegetables | 36.8% | 40.0% | +3.2 |
-| sports | 67.0% | 66.7% | -0.3 |
-| furniture | 72.1% | 71.6% | -0.5 |
-| birds | 60.9% | 58.6% | -2.3 |
-| professions | 73.3% | 55.0% | **-18.3** |
-
-The mean again rests almost entirely on `fruit`, and `professions` moves 18 points the other way, reproducing the earlier pattern on the complete 8-category data.
-
-**The 28-bin profile settles the earlier question.** It scores 53.7% alone and drags Jaccard down from 66.6% to 60.1%. Since pair differencing cancels the parent profile algebraically, a distribution that fails here cannot have been contributing depth information when a per-concept regression on $p_c - p_k$ appeared to help. That earlier apparent gain was the category-identity shortcut.
-
-`vegetables` still sits **below chance** (36.8% to 40.0%) under every feature set and both formulations, and this is now on corrected data with `squash` present, so the earlier speculation that the regeneration might explain it is ruled out. Something is systematically inverted for that category and it needs investigating on its own terms.
-
-### 9.3 Label word against member average
-
-Whole-model scope, cross-validated $R^2$ with the held-out-category value beside it. `pF` is the partial $F$ p-value for adding the centroid layer profile to the centroid Jaccard.
-
-| Model | AP | label, Jaccard | members, Jaccard | members, both | pF |
-|---|---|---|---|---|---|
-| GPT-2 | 0.5 | +0.081 / -0.012 | +0.014 / -0.086 | +0.032 / -0.060 | 0.016 |
-| GPT-2 | 0.6 | +0.067 / -0.030 | -0.005 / -0.096 | +0.002 / -0.079 | 0.047 |
-| GPT-2 | 0.7 | +0.026 / -0.038 | -0.012 / -0.110 | -0.010 / -0.086 | 0.070 |
-| GPT-2 | 0.8 | -0.046 / -0.181 | -0.028 / -0.345 | -0.047 / -0.418 | 0.557 |
-| Qwen3 | 0.5 | +0.186 / +0.108 | +0.192 / +0.134 | **+0.209 / +0.151** | 0.009 |
-| Qwen3 | 0.6 | +0.139 / +0.057 | +0.098 / -0.012 | +0.133 / +0.002 | 0.002 |
-| Qwen3 | 0.7 | +0.090 / -0.012 | +0.031 / -0.071 | +0.053 / -0.070 | 0.010 |
-| Qwen3 | 0.8 | +0.078 / -0.031 | -0.004 / -0.086 | -0.014 / -0.109 | 0.441 |
-
-Two findings, and they point in different directions, so both have to be stated.
-
-**The member average does not generally beat the label word.** It wins in exactly one cell, Qwen3 at AP 0.5, where it leads on both the ordinary cross-validated $R^2$ (0.209 against 0.186) and the stricter held-out-category value (0.151 against 0.108). At every other threshold and throughout GPT-2 the label word is the better reference, sometimes by a wide margin. The classic family-resemblance intuition, that a typical bird is the one most like the other birds, is therefore not supported as a general claim by this data. It holds only in the largest model at the most lenient threshold, which is also the setting where the centroid is estimated from the most experts and is consequently least noisy.
-
-**The layer profile does add to the centroid reference, consistently.** The partial $F$ test clears 0.05 in five of the eight cells (Qwen3 at AP 0.5, 0.6 and 0.7, GPT-2 at AP 0.5 and 0.6), and the two failures are both at AP 0.8 where every model in the table has gone negative. This contrasts with the label-word reference, where the same feature never reaches significance. The layer profile is therefore not inert, it simply carries information about how a concept relates to the other members of its category rather than to the category's name, which is a different relation and was invisible to the earlier formulation.
-
-The contrast is drawn in `typicality_reference_comparison.png`, four bars covering both references under both cross-validation schemes, with the partial $F$ p-value for the added layer profile printed over each bar that includes it, so the significant centroid case and the non-significant label-word case are visible side by side.
-
-`centroid_margin` adds nothing anywhere (its own partial $F$ never approaches significance, p = 0.55 at Qwen3 AP 0.5), so the contrast against foreign centroids is not carrying signal beyond the own-centroid similarity.
-
-### 9.4 Predicting human pair similarity
-
-The headline column is `mean_category_spearman`, the mean of the per-category correlations, **not** the pooled `group_cv_spearman`.
-
-That distinction is not cosmetic here. Out-of-fold predictions for a held-out category are miscalibrated in level relative to the categories the model trained on, so pooling them across categories introduces a between-category component that can be strongly negative while every within-category ordering remains correct. At Qwen3 AP 0.8 the pooled figure is -0.167 against +0.493 per category. Reading the pooled column as the result would report failure where the model in fact works.
-
-| Model | AP | Jaccard | Jaccard + profile + z | profile alone (pooled) | n pairs |
-|---|---|---|---|---|---|
-| GPT-2 | 0.5 | 0.361 | 0.373 | -0.374 | 2,391 |
-| GPT-2 | 0.6 | 0.341 | 0.349 | -0.438 | 2,391 |
-| GPT-2 | 0.7 | 0.312 | 0.262 | -0.478 | 2,391 |
-| GPT-2 | 0.8 | 0.349 | 0.150 | -0.416 | 912 |
-| Qwen3 | 0.5 | 0.508 | **0.579** | -0.056 | 2,391 |
-| Qwen3 | 0.6 | 0.478 | 0.516 | -0.287 | 2,391 |
-| Qwen3 | 0.7 | 0.516 | 0.430 | -0.474 | 2,391 |
-| Qwen3 | 0.8 | 0.493 | 0.315 | -0.438 | 1,984 |
-
-**Expert similarity predicts human similarity with categories held out.** Qwen3 sits between 0.478 and 0.516 on Jaccard alone at every usable threshold, and GPT-2 between 0.312 and 0.361. These match subchapter 5.3's raw correlations almost exactly, which is the expected result: a monotone model of one feature preserves the within-category ordering, so cross-validating it can only reproduce what the feature already carries. The value of doing it here is that the model is fitted without ever seeing the test category.
-
-**Adding the layer profile helps at lenient thresholds and hurts at strict ones.** On Qwen3 it improves 0.508 to 0.579 at AP 0.5 and 0.478 to 0.516 at AP 0.6, then degrades the model from AP 0.7 onward. The crossover is where profiles start being estimated from very few experts, and a noisy feature added to a working model subtracts. Alone the profile is useless or actively inverted, from -0.056 down to -0.478.
-
-**AP 0.9 produces no output in either model**, since fewer than `MIN_PAIR_ROWS = 200` rated pairs survive once module 3's table has thinned, and the subchapter declines rather than reporting a correlation from a handful of pairs.
-
-### Across scopes
-
-At AP 0.6, per sublayer:
-
-| Scope | n | CV $R^2$ J | CV $R^2$ J+prof | $\Delta$ | rank acc J | rank acc J+prof | pair sim $\rho$ |
+| Reference | Cell | accuracy | accuracy_clear | regression | delta | cats | $p$ |
 |---|---|---|---|---|---|---|---|
-| whole model | 197 | 0.139 | 0.141 | +0.001 | 66.6% | 65.6% | 0.516 |
-| mlp.gate_proj | 197 | 0.163 | 0.192 | +0.029 | 67.1% | 64.8% | 0.471 |
-| mlp.up_proj | 197 | 0.139 | 0.146 | +0.007 | 65.7% | 66.4% | 0.513 |
-| self_attn.o_proj | 197 | 0.188 | 0.180 | -0.008 | 63.6% | 62.0% | **0.553** |
-| mlp.down_proj | 147 | 0.001 | 0.019 | +0.018 | 58.2% | 51.1% | 0.242 |
-| self_attn.q_proj | 197 | -0.021 | -0.010 | +0.012 | 53.7% | 46.6% | 0.252 |
-| self_attn.v_proj | 197 | 0.061 | 0.072 | +0.011 | 60.1% | 60.5% | 0.330 |
-| self_attn.k_proj | 197 | 0.021 | 0.029 | +0.007 | 56.9% | 53.0% | 0.268 |
+| label_word | jaccard | 61.5% | 64.7% | 61.5% | | | |
+| label_word | profile | 43.5% | 41.6% | 47.3% | $-17.3$ pp | 0/8 | 0.021 |
+| label_word | profile_z | 52.4% | 52.7% | 42.4% | $-10.4$ pp | 1/8 | 0.035 |
+| label_word | jaccard_profile | 63.0% | 66.2% | 61.3% | $+2.0$ pp | 5/8 | 0.244 |
+| label_word | jaccard_profile_z | 61.8% | 64.7% | 60.6% | $+0.3$ pp | 4/8 | 0.617 |
+| label_word | jaccard_profile_both | 62.6% | 66.2% | 62.3% | $+1.3$ pp | 6/8 | 0.411 |
+| member_centroid | jaccard | 59.5% | 62.8% | 59.5% | | | |
+| member_centroid | profile | 46.7% | 46.6% | 47.7% | $-12.1$ pp | 2/8 | 0.054 |
+| member_centroid | profile_z | 52.2% | 53.4% | 50.3% | $-7.8$ pp | 2/8 | 0.044 |
+| member_centroid | jaccard_profile | 60.7% | 63.1% | 59.6% | $+0.3$ pp | 5/8 | 0.834 |
+| member_centroid | jaccard_profile_z | 58.8% | 61.8% | 58.8% | $-0.9$ pp | 2/8 | 0.212 |
+| member_centroid | jaccard_profile_both | 63.4% | 68.0% | 62.7% | $+3.1$ pp | 5/8 | 0.190 |
 
-The three formulations do not agree on which sublayer is best. The regression and the human pair-similarity target both favour `self_attn.o_proj` (0.188 against the whole model's 0.139, and $\rho$ 0.553 against 0.516), while the ranker favours `mlp.gate_proj` at 67.1 percent and places `o_proj` below the whole model. With eight scopes compared and no correction applied, none of these orderings should be treated as established.
+Provisional readings, none of which should be relied on before the sweep. No profile cell reaches significance as an ADDITION to Jaccard under either reference, the largest gain being $+3.1$ points on the centroid reference at $p = 0.19$. As STANDALONE predictors the two profile features behave differently and only one of them is below chance. `profile` sits at 43.5 percent under the label word and 46.7 under the centroid, both below the 50 percent chance line, while `profile_z` sits at 52.4 and 52.2, marginally above chance on all pairs and above it on clear pairs too at 52.7 and 53.4. Both are well below the Jaccard baselines of 61.5 and 59.5, which is what their nominal significance in those rows measures, a significant DEFICIT against Jaccard rather than a gain. Restricting to clear pairs adds between 2.4 and 4.6 points on every Jaccard-bearing cell, and the ranker beats its own regression baseline on every multi-feature cell while tying it exactly on the two Jaccard cells, which is the behaviour the construction predicts.
 
-Two patterns do hold across all three. Every formulation separates the FFN expansion projections and `o_proj` from the remaining attention projections, matching module 1's sublayer informativeness ordering. And `mlp.down_proj`, `self_attn.q_proj` and `self_attn.k_proj` are near-useless on every target, with the ranker at or below chance on two of them.
+### Study B, human pair similarity, provisional
 
-The `pair sim` column is worth reading against subchapter 5.3's caution: `mlp.gate_proj` leads on category alignment but is only fourth here, while `o_proj` leads on human similarity. Recovering a category partition and reproducing graded human similarity are different tasks, and this table shows the same dissociation from the model side.
+Same run, 2,391 rated pairs over 8 categories, mean noise ceiling 0.8914.
 
-## Conclusions
+| Cell | mean_category_spearman | pooled | rho_over_ceiling | delta vs jaccard | partial $F$ |
+|---|---|---|---|---|---|
+| jaccard | 0.3608 | 0.1007 | 0.4048 | | |
+| profile | $-0.1222$ | $-0.4980$ | $-0.1371$ | $-0.483$ | |
+| profile_z | 0.0259 | $-0.4541$ | 0.0291 | $-0.335$ | |
+| jaccard_profile | 0.3735 | 0.2229 | 0.4190 | $+0.013$ | 97.8 vs jaccard, $p = 1.3\times10^{-22}$ |
+| jaccard_profile_z | 0.3542 | 0.1335 | 0.3974 | $-0.007$ | 33.9 vs jaccard, $p = 6.5\times10^{-9}$ |
+| jaccard_profile_both | 0.3890 | 0.2880 | 0.4364 | $+0.028$ | 64.1 vs jaccard_profile, $p = 1.8\times10^{-15}$ |
 
-- Adding layer-profile agreement to the Jaccard index does not improve prediction of human typicality. This holds at every AP threshold, in both the regression and the ranking formulation, and under linear, tree-based and neural models.
-- The layer-profile feature has no standalone predictive power for typicality, with a cross-validated $R^2$ near zero or negative throughout and a pairwise accuracy near chance.
-- This follows directly from module 3, where the concept-to-parent $z$ was already flat at zero. The feature carries no information about the specific pairing typicality depends on.
-- **The pairwise ranking formulation of 9.2 is nonetheless the better model of this target** and should be preferred regardless of features. It matches how the ratings were collected, removes category-level terms algebraically rather than by control, and beats the regression by about 3 points on identical features. Restricting to pairs with a clear rating difference adds a further 4 points.
-- A per-concept regression on the profile *difference from the parent* appears to help substantially (cross-validated $R^2$ from 0.115 to 0.312 on the complete dataset), but that gain is the category-identity shortcut, not depth information. Holding out whole categories cuts it to a fraction, and the pairwise formulation, which cancels the parent term algebraically, removes it entirely. Treat any per-concept feature containing a category-level component as suspect until tested with held-out categories.
-- Model capacity is not the limiting factor. A multilayer perceptron was the worst of four model classes tried, reaching $R^2$ between $-0.09$ and $-1.19$ on the higher-dimensional feature sets, because 196 concepts cannot support it. Random forests were the strongest nonlinear option and did not change any conclusion.
-- The result is not evidence against the metric in general. Module 5 shows it separating same-category from different-category concept pairs at ROC-AUC 0.69 and holding that separation where the Jaccard index collapses. The findings together locate its usefulness in concept-to-concept comparisons rather than in concept-to-category-label ones.
-- The natural follow-up, not implemented here, is to build the feature against the category *centroid*, the member-average layer profile of module 6, rather than against the category label word. Module 6 exists precisely because the label and the centroid behave differently, and typicality is defined relative to the category as a whole rather than to its name.
+Provisional readings. The Jaccard cell alone reaches 40 percent of the human noise ceiling with whole categories held out. Adding both profile features lifts the mean per-category correlation from 0.3608 to 0.3890 and the pooled figure from 0.1007 to 0.2880, and every nested partial $F$ clears significance by a wide margin, which is expected on 2,391 pairs and is exactly why the honest reading is the per-category mean and its ceiling-normalized column rather than the $F$ statistic. Alone the profile features are useless or inverted on this target.
+
+### Axis sensitivity, provisional
+
+The same run refits `jaccard_profile` on the flat 48-layer axis at the whole-model scope. Study A moves from 63.0 percent on the block axis to 62.3 percent on the flat axis, and Study B's mean per-category $\rho$ moves from 0.3735 to 0.3845. Both differences are small against the per-category spread, which is what the sensitivity line exists to show. It is one architecture at one threshold and it characterizes nothing beyond that.
+
+## Limitations
+
+**The concept-to-label-word count residual.** The count-matched null is defined over the full pair population, and on that population it works on both axes. Measured on this run over 20,910 pairs, the raw agreement $S$ correlates with the pair's smaller expert count at Spearman $+0.28$ on the flat axis and $+0.11$ on the block axis, while the standardized $z$ sits at $+0.0035$ and $+0.0029$ respectively. It does NOT remove the residual on the concept-to-label-word sub-population, where about $+0.21$ persists on BOTH axes, $+0.2100$ flat and $+0.2357$ block over 1,576 pairs. The reason is structural. A concept-to-label pair is systematically asymmetric, since the label word holds one of the largest expert sets in the population, and the pair's neighbourhood in the count coordinate is drawn from the same asymmetric family, so the null has nothing left to subtract.
+
+Three clarifications matter for reading this correctly. The block axis left that slice-level residual essentially unchanged, moving it by $+0.026$, and on the 1,379 foreign-category rows the two axes are indistinguishable at $+0.2385$ flat and $+0.2412$ block. The apparent jump on the 197 own-category rows that Study A actually fits, from $+0.0856$ flat to $+0.2334$ block, reflects the loss of an ACCIDENTAL CANCELLATION in the flat-axis baseline on those particular rows rather than a new confound. And a bin-count mechanism is DISCONFIRMED rather than merely untested, because a binning effect would move the whole slice and the slice moved by $+0.026$.
+
+This residual does not bias Study A's estimates. Concept expert count is itself uncorrelated with human typicality on this population, Spearman $-0.0414$ at $p = 0.56$ over 197 concepts, so a feature confounded with count has no channel through which the confound could manufacture accuracy against that target, and partialling count out shifts `profile_z`'s association with typicality by only 0.008, from $-0.0803$ to $-0.0727$. It is a limitation of describing the label-word profile $z$ as size-free, not a limitation of the study's conclusions.
+
+**`z_cen` calibration is underpowered rather than clean.** The point estimate against concept expert count is $+0.0818$ with a 95 percent confidence interval of $[-0.059, +0.219]$ over 197 concepts, and 80 percent power to detect the stated $|\rho| < 0.15$ bar only arrives near $\rho = 0.198$ at that sample size, so the bar cannot be established here. The supportable claim is COMPARATIVE rather than absolute. On this exact frame $z_{\text{cen}}$ is measurably cleaner than the label-word $z$, Steiger's $Z = -2.19$ at $p = 0.029$ for two correlations sharing the count variable. The null is also visibly doing its job in the intended direction, since raw $S_{\text{cen}}$ carries $+0.162$ at $p = 0.023$ and standardizing it roughly halves the point estimate to a non-significant $+0.082$.
+
+**`z_cen` is a replacement for `centroid_margin`, not a refinement of it.** The two are moderately concordant at Spearman $+0.41$, about 17 percent shared rank variance. Standardization explains only part of the gap, since the raw un-standardized $S_{\text{cen}}$ already agrees with the margin at only $+0.5145$, so the move from $+0.515$ to $+0.409$ is all the standardization accounts for and the remainder is STRUCTURAL. `centroid_margin` is contrastive, the own-centroid agreement minus the mean of seven foreign ones, while $S_{\text{cen}}$ and therefore $z_{\text{cen}}$ is non-contrastive and carries no foreign term at all. Those answer different questions, one asking whether a concept is closer to its own centroid than to the alternatives and the other asking how close it is to its own centroid full stop. The count-behaviour improvement is supported and is the headline, since the margin carries $+0.215$ at $p = 0.002$ against expert count where $z_{\text{cen}}$ carries $+0.082$, but any reliance on $z_{\text{cen}}$ inheriting the margin's previously validated behaviour is NOT established at 17 percent shared rank variance.
+
+**The centroid null matches on pooled count, not on the number of profiles averaged.** Each entry of the centroid null is placed at $(\log n_c, \log N_j)$, where $N_j$ is the centroid's POOLED expert count. A three-member category's leave-one-out centroid averages two profiles while a twenty-member one averages nineteen, so at equal pooled count those two centroids carry different amounts of averaging noise, and the coordinate does not condition that difference out. The effect is second order, but it is a stated property of the construction rather than something to discover later.
+
+**Study B inherits a presence gate it does not strictly need.** The design frame requires the category LABEL WORD to hold at least one expert before any of that category's concepts enter, which Study A needs and Study B's concept-to-concept features do not. The gate is conservative, so Study B under-reports the number of pairs it could have fitted rather than mis-reporting any number it does fit, and its statistical power at strict thresholds is understated rather than overstated. It was left unchanged deliberately, since removing it would mean introducing a second frame-construction path at the very end of the restructure and changing results a second time, and a stated conservative limitation serves the thesis better than a late structural change.
+
+**`vegetables` is anomalous in both studies at once, and the pooled means hide it.** The accuracies and correlations above are means over eight held-out categories, and `vegetables` is the weakest category in both studies simultaneously. In Study A it is below the 50 percent chance line in ALL TWELVE cells, from 36.3 percent on the label-word Jaccard cell and 41.6 percent on that reference's fullest cell to 42.1 and 43.7 percent on the corresponding centroid cells, so no feature set and neither reference recovers its typicality ordering. In Study B it is the only category whose Jaccard correlation with human ratings is negative, $-0.011$, rising to only $+0.090$ on the fullest cell against a category noise ceiling of 0.909, where the next weakest category, `birds`, reaches $+0.104$ and $+0.197$. Being simultaneously the worst category against human similarity and the only one systematically inverted in the ranker points at the category itself rather than at either model, and the most likely candidate is polysemy in its member words, several of which are common non-food senses in a language model. It is recorded here as unexplained. All figures above are from `ranker_per_category.csv` and `pair_similarity_per_category.csv` of the smoke run named in the Results section, and the module draws `ranker_pair_errors.png` precisely so a systematically inverted category can be inspected rather than only averaged over.
+
+**At strict thresholds Study A's numbers can be degenerate.** Measured at AP 0.9 on Qwen3 at the whole-model scope, Study A fits 47 concepts across only 2 categories, and `jaccard_pct` is exactly 0 for 45 of those 47 rows. Those cells must not be read as a result. The guards catch the empty case but not this one, where a study runs, writes a table and reports accuracies built almost entirely on a constant feature.

@@ -8,7 +8,7 @@ from scipy.stats import spearmanr
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
-from modules.module_9_typicality_prediction import build_pair_similarity_design
+from modules.module_9_typicality_prediction import build_pair_similarity_design, ACTIVE_METRICS
 from utils.human_similarity import human_pair_lookup
 
 
@@ -26,7 +26,7 @@ def main() -> int:
     design = pd.DataFrame({"concept": concepts, "category": ["fruit"] * 4,
                            "human_typicality": [0.9, 0.8, 0.7, 0.1]})
 
-    table = build_pair_similarity_design(design, experts)
+    table = build_pair_similarity_design(design, experts, ACTIVE_METRICS)
 
     lookup = human_pair_lookup()
     expected = sum(1 for i in range(4) for j in range(i + 1, 4)
@@ -34,8 +34,10 @@ def main() -> int:
     assert len(table) == expected, f"expected {expected} rated pairs, got {len(table)}"
     assert (table.word_a < table.word_b).all(), "pairs not canonical"
     assert table.human_similarity.between(1, 7).all(), "target off the 1 to 7 scale"
-    for column in ["jaccard_pct", "layer_profile_similarity_pct", "layer_profile_z"]:
-        assert column in table.columns, f"{column} missing"
+    for metric in ACTIVE_METRICS:
+        for column in [f"profile_{metric}", f"profile_{metric}_z"]:
+            assert column in table.columns, f"{column} missing"
+    assert "jaccard_pct" in table.columns, "jaccard_pct missing"
     assert table.category.nunique() == 1, "toy fixture should be single-category"
 
     # A model given only category identity must score at chance, because the category is

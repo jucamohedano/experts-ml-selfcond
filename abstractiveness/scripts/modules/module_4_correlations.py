@@ -6,7 +6,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from scipy import stats
 from utils.helpers import (save_dataframe, scope_out_dir, scope_summary_row,
-                           pair_similarity_vector, pair_layer_profile_vectors)
+                           pair_similarity_vector, pair_layer_profile_vectors, to_block_axis)
 from utils.plot_helpers import plot_hexbin_with_trends
 
 log = logging.getLogger(__name__)
@@ -329,7 +329,7 @@ def plot_all_pairs_jaccard_vs_layer_profile(scope, concept_metadata: pd.DataFram
     """
     items = list(concept_metadata["concept"].unique())
     jaccard = pair_similarity_vector(scope.expert_df, items) * 100.0
-    profile, profile_z = pair_layer_profile_vectors(scope.expert_df, items)
+    profile, profile_z = pair_layer_profile_vectors(to_block_axis(scope.expert_df), items)
 
     # Same-category mask over the same flat pair ordering. Category-label words carry a
     # null category, and NaN never equals NaN, so every pair involving one counts as

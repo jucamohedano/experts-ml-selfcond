@@ -562,6 +562,91 @@ def _jsd_to_similarity(jsd: np.ndarray) -> np.ndarray:
     return 100.0 * (1.0 - np.sqrt(jsd))
 
 
+def _cross_jsd_bits(p: np.ndarray, q: np.ndarray) -> np.ndarray:
+    """Jensen-Shannon divergence in bits between every row of p and every row of q,
+    as an (n, m) array. The pairwise mixture entropy is accumulated in row blocks,
+    mirroring _profile_jsd_matrix, so no (n, m, K) tensor is materialized at once."""
+    entropy_p = _entropy_bits(p)
+    entropy_q = _entropy_bits(q)
+    jsd = np.empty((len(p), len(q)), dtype=np.float64)
+    for start in range(0, len(p), _JSD_BLOCK_ROWS):
+        stop = min(start + _JSD_BLOCK_ROWS, len(p))
+        mixture = 0.5 * (p[start:stop, None, :] + q[None, :, :])
+        jsd[start:stop] = _entropy_bits(mixture)
+    jsd -= 0.5 * (entropy_p[:, None] + entropy_q[None, :])
+    return np.clip(jsd, 0.0, 1.0)
+
+
+def _js_distance_similarity(p: np.ndarray, q: np.ndarray | None = None) -> np.ndarray:
+    """The historical profile agreement, 100 * (1 - sqrt(JSD bits)). Square (n, n)
+    when q is None, cross (n, m) otherwise. Higher means more similar."""
+    if q is None:
+        return _jsd_to_similarity(_profile_jsd_matrix(p))
+    return _jsd_to_similarity(_cross_jsd_bits(p, q))
+
+
+# Registry of profile agreement measures. Contract: f(P, Q=None) -> (n, m) agreement
+# matrix over row-normalized profiles, square when Q is None, ORIENTED so that higher
+# always means more similar. Orientation is the entire contract, scale deliberately is
+# not, because every consumer standardizes or ranks the feature and forcing a shared
+# scale would manufacture false comparability. Adding a metric later (wasserstein,
+# cosine, pearson, spearman, js_divergence, hellinger) means adding one entry here and
+# listing its name where module 9 builds its grid. Wasserstein is the only planned
+# metric that reads bin ORDER, so it is only meaningful on the block axis, where
+# adjacent bins are adjacent depths.
+PROFILE_METRICS = {
+    "js_distance": _js_distance_similarity,
+}
+
+DEFAULT_PROFILE_METRIC = "js_distance"
+
+
+def count_matched_z(values: np.ndarray, coords: np.ndarray,
+                    neighbors: int = None) -> np.ndarray:
+    """
+    Standardize each entry of ``values`` against its nearest entries in ``coords``
+    space, self excluded. The coordinate-agnostic core of the count-matched null:
+    the pair null places pairs at (log min count, log max count) because a pair's
+    two words are exchangeable, the concept-to-centroid null of module 9 places
+    entries at (log concept count, log centroid pooled count) because those two
+    objects are different kinds and their order carries meaning. Returns a flat
+    array aligned with ``values``, NaN where fewer than 2 * NULL_NEIGHBORS_MIN
+    entries exist or the local sd is 0.
+    """
+    z = np.full(len(values), np.nan)
+    finite = np.isfinite(values) & np.isfinite(coords).all(axis=1)
+    # A standard deviation over a handful of neighbours is not worth reporting.
+    if finite.sum() < 2 * NULL_NEIGHBORS_MIN:
+        return z
+
+    usable_values = values[finite]
+    usable_coords = coords[finite]
+    if neighbors is None:
+        neighbors = int(np.clip(round(NULL_NEIGHBOR_FRACTION * len(usable_values)),
+                                NULL_NEIGHBORS_MIN, NULL_NEIGHBORS_MAX))
+    k = min(neighbors, len(usable_values) - 1)
+    _, idx = cKDTree(usable_coords).query(usable_coords, k=k + 1)
+
+    # Drop each entry from its own reference set, so an entry never helps define the mean
+    # it is measured against. Identity is matched rather than position, because many
+    # entries share exact coordinates and the self-match need not land in column 0. Where
+    # duplicates are numerous enough to push the self-match out of the neighbourhood
+    # entirely, the last (furthest) column is dropped instead, which keeps every row at
+    # exactly k references.
+    self_match = idx == np.arange(len(usable_values))[:, None]
+    drop = self_match & (self_match.cumsum(axis=1) == 1)
+    drop[~self_match.any(axis=1), -1] = True
+    keep = idx[~drop].reshape(len(usable_values), k)
+
+    reference = usable_values[keep]
+    mu = reference.mean(axis=1)
+    sigma = reference.std(axis=1, ddof=1)
+
+    with np.errstate(divide="ignore", invalid="ignore"):
+        z[finite] = np.where(sigma > 0, (usable_values - mu) / sigma, np.nan)
+    return z
+
+
 def _empirical_pair_null(similarity: np.ndarray, counts: np.ndarray,
                          neighbors: int = None) -> np.ndarray:
     """
@@ -583,6 +668,11 @@ def _empirical_pair_null(similarity: np.ndarray, counts: np.ndarray,
     high-count corner with too few pairs to estimate a standard deviation from, while
     kNN adapts its bandwidth to the local density automatically and needs no interpolation
     or empty-cell handling.
+
+    Building this symmetrised coordinate and gating both words on MIN_PROFILE_EXPERTS stays
+    here as pair-specific, the neighbourhood search, self-exclusion and standardisation now
+    delegate to count_matched_z, the coordinate-agnostic core shared with other null
+    placements such as module 9's concept-to-centroid null.
     """
     n = len(counts)
     z = np.full((n, n), np.nan)
@@ -591,42 +681,14 @@ def _empirical_pair_null(similarity: np.ndarray, counts: np.ndarray,
     n_a, n_b = counts[iu[0]], counts[iu[1]]
 
     usable = np.isfinite(pair_values) & (n_a >= MIN_PROFILE_EXPERTS) & (n_b >= MIN_PROFILE_EXPERTS)
-    # A standard deviation over a handful of neighbours is not worth reporting.
-    if usable.sum() < 2 * NULL_NEIGHBORS_MIN:
-        return z
+    pair_values_masked = np.where(usable, pair_values, np.nan)
+    coords = np.full((len(pair_values), 2), np.nan)
+    coords[usable] = np.stack([np.log(np.minimum(n_a, n_b)[usable]),
+                               np.log(np.maximum(n_a, n_b)[usable])], axis=1)
 
-    values = pair_values[usable]
-    coords = np.stack([np.log(np.minimum(n_a, n_b)[usable]),
-                       np.log(np.maximum(n_a, n_b)[usable])], axis=1)
-
-    if neighbors is None:
-        neighbors = int(np.clip(round(NULL_NEIGHBOR_FRACTION * len(values)),
-                                NULL_NEIGHBORS_MIN, NULL_NEIGHBORS_MAX))
-    k = min(neighbors, len(values) - 1)
-    _, idx = cKDTree(coords).query(coords, k=k + 1)
-
-    # Drop each pair from its own reference set, so a pair never helps define the mean it
-    # is measured against. Identity is matched rather than position, because many pairs
-    # share exact count coordinates and the self-match need not land in column 0. Where
-    # duplicates are numerous enough to push the self-match out of the neighbourhood
-    # entirely, the last (furthest) column is dropped instead, which keeps every row at
-    # exactly k references.
-    self_match = idx == np.arange(len(values))[:, None]
-    drop = self_match & (self_match.cumsum(axis=1) == 1)
-    drop[~self_match.any(axis=1), -1] = True
-    keep = idx[~drop].reshape(len(values), k)
-
-    reference = values[keep]
-    mu = reference.mean(axis=1)
-    sigma = reference.std(axis=1, ddof=1)
-
-    with np.errstate(divide="ignore", invalid="ignore"):
-        pair_z = np.where(sigma > 0, (values - mu) / sigma, np.nan)
-
-    filled = np.full(len(pair_values), np.nan)
-    filled[usable] = pair_z
-    z[iu] = filled
-    z.T[iu] = filled
+    flat = count_matched_z(pair_values_masked, coords, neighbors)
+    z[iu] = flat
+    z.T[iu] = flat
     return z
 
 
@@ -645,7 +707,9 @@ def _layer_profiles(expert_allocation_df: pd.DataFrame, items: list) -> tuple[np
 
 
 def layer_profile_matrices(expert_allocation_df: pd.DataFrame, items: list, *,
-                           null_neighbors: int = None) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+                           null_neighbors: int = None,
+                           metric: str = DEFAULT_PROFILE_METRIC
+                           ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     Pairwise layer-profile agreement for every pair of ``items``, as three square (n, n)
     arrays: (jsd_bits, similarity_pct, z).
@@ -675,6 +739,10 @@ def layer_profile_matrices(expert_allocation_df: pd.DataFrame, items: list, *,
 
     Every caller must pass the SAME item list, since the null's reference set is drawn
     from the pairs of ``items``, so a shorter list would change the z of a given pair.
+
+    metric names a PROFILE_METRICS entry, js_distance by default, and only the
+    similarity and z outputs depend on it, jsd_bits always reports the Jensen-Shannon
+    divergence.
     """
     prob, counts = _layer_profiles(expert_allocation_df, items)
     n = len(items)
@@ -689,7 +757,7 @@ def layer_profile_matrices(expert_allocation_df: pd.DataFrame, items: list, *,
     idx = np.flatnonzero(usable)
     block = np.ix_(idx, idx)
     jsd[block] = _profile_jsd_matrix(prob[idx])
-    similarity[block] = _jsd_to_similarity(jsd[block])
+    similarity[block] = PROFILE_METRICS[metric](prob[idx])
 
     z = _empirical_pair_null(similarity, counts, null_neighbors)
     np.fill_diagonal(z, np.nan)

@@ -33,7 +33,9 @@ REFERENCE_AP = min(AP_THRESHOLDS)
 # costs seconds instead of the full sweep, e.g. {3, 4, 5}. Modules 1, 2 and 7 feed module
 # 4, and disabling any of them silently drops the panels that depend on it (see the
 # dependency handling in the scope loop), so a narrowed run is for verification, never for
-# producing the results anyone reads. Restore to the full set before a real sweep.
+# producing the results anyone reads. Restore to the full set before a real sweep. Module 9
+# is self-sufficient, it computes its own features from the expert frame rather than reading
+# module 3's table, so it can be enabled alone.
 ENABLED_MODULES = {1, 2, 3, 4, 5, 6, 7, 8, 9}
 
 # Which columns each module's cross-scope comparison plot draws. Each module owns its own
@@ -102,7 +104,7 @@ MODEL_CONFIGS = {
         "metadata_file": "metadata_Richie_HSJ.json",
         "layer_mapping_file": "layer_mapping_Qwen3_1-7B.csv",
         "typicality_column": "typicality_HSJ_pairwise",
-        "output_subdir": "research_plots_qwen_richie_hsj_sensefix",
+        "output_subdir": "research_plots_qwen_richie_hsj_restructured",
         "sublayer_filter": "mlp.gate_proj",
         "embedding_cache_file": "concept_embeddings_qwen3_richie_hsj.npz",
     },
@@ -258,10 +260,12 @@ if __name__ == "__main__":
                     # execute_module_4b guards on an empty frame and returns {}.
                     global_typicality_df = empty
 
-                # Module 9: exploratory typicality prediction from module 3's pair features
+                # Module 9: two typicality studies over one feature grid, self-sufficient
+                # (computes its own features, module 3 need not be enabled).
                 if 9 in ENABLED_MODULES:
                     _, rows[9] = execute_module_9_typicality_prediction(
-                        scope, similarity_metrics_df, concept_metadata, module_dirs[9])
+                        scope, concept_metadata, module_dirs[9],
+                        axis_sensitivity=(ap == REFERENCE_AP))
 
                 # Module 4b: Jaccard vs. Cosine Typicality (needs module 7's output, so it runs here)
                 if 4 in ENABLED_MODULES:

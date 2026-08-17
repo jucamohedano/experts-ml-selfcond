@@ -4,7 +4,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from scipy.stats import spearmanr
 from utils.helpers import (save_dataframe, expert_set_overlap_matrices, category_alignment_metrics,
-                           scope_out_dir, scope_summary_row, layer_profile_matrices)
+                           scope_out_dir, scope_summary_row, layer_profile_matrices, to_block_axis)
 from utils.human_similarity import load_human_similarity, human_noise_ceiling
 from utils.plot_helpers import _plot_heatmap_with_leaders, build_category_color_map, fig_width_for
 
@@ -32,6 +32,30 @@ SUMMARY_LABELS = {
 # 3 metrics) rather than once, and p-value resolution of 0.001 is already finer than any
 # claim made from it.
 HUMAN_MANTEL_PERMUTATIONS = 999
+
+# Alpha for the star marking a supported bar in human_similarity_by_category.png. The
+# stars are descriptive, no correction is applied across the 24 tests a scope runs, so a
+# single starred category is weaker evidence than the mark suggests.
+HUMAN_SIGNIFICANCE_ALPHA = 0.05
+
+# The coefficient every figure and table in 5.3 reports, named explicitly wherever it is
+# shown, since "rho" alone leaves the reader to guess and the choice is not cosmetic. The
+# expert metrics are bounded and heavily right-skewed, with a large point mass at exactly 0
+# once the threshold tightens, and the ratings are bounded averages of ordinal judgments, so
+# a Pearson coefficient would report how LINEAR the relationship is rather than how strong.
+#
+# Which coefficient to use and how to get a p-value for it are independent choices. The
+# parametric p attached to either coefficient assumes the observations are independent, and
+# these are not, so significance comes from the Mantel permutation instead (see
+# HUMAN_MANTEL_PERMUTATIONS). Measured on Qwen3 at AP 0.6 for the layer profile, the
+# parametric Pearson p calls 4 of 8 categories significant and the Mantel test calls 1,
+# with professions at parametric p=0.0008 against Mantel p=0.169.
+HUMAN_COEFFICIENT = "Spearman"
+
+# Neighbourhood fraction for the LOWESS smooth drawn on the scatter panels. 0.4 matches the
+# value plot_helpers.plot_hexbin_with_trends already uses, so the two families of scatter in
+# this pipeline smooth at the same scale and can be compared by eye.
+LOWESS_FRACTION = 0.4
 
 # Metrics validated against the human ratings, as (key, label).
 HUMAN_VALIDATED_METRICS = [("jaccard", "Jaccard"), ("layer_profile", "layer profile"),
@@ -90,8 +114,8 @@ def plot_all_heatmaps(expert_allocation_df: pd.DataFrame, concept_metadata: pd.D
     save_dataframe(counts_df, heat_dir / "shared_expert_counts_matrix.csv", index=True)
 
     # Layer-profile agreement over the same concept list module 3 and module 4 pass, which
-    # the null grid requires (see layer_profile_matrices).
-    _, profile_matrix, profile_z_matrix = layer_profile_matrices(expert_allocation_df, list(concepts))
+    # the null grid requires (see layer_profile_matrices). The block axis matches modules 3 and 4, see check_block_axis_identity.py.
+    _, profile_matrix, profile_z_matrix = layer_profile_matrices(to_block_axis(expert_allocation_df), list(concepts))
 
     # Dictionary of metrics to streamline saving and plotting
     matrices = {
@@ -172,28 +196,48 @@ def summarize_category_contrast(concepts, similarity_matrix: np.ndarray, concept
 
 
 def _within_category_vectors(concepts: list, matrix: np.ndarray, pairs: pd.DataFrame,
-                             category: str) -> tuple:
+                             category: str, with_experts: set | None = None) -> tuple:
     """
     Model and human vectors for one category's rated pairs, aligned elementwise, plus the
     matrix positions behind them.
 
-    Pairs are dropped for two reasons, both of which appear at strict thresholds. A concept
-    can be missing from this scope's matrix entirely, when it retains no experts, and a cell
-    can be NaN, when a word holds fewer than 2 experts and therefore has no usable layer
-    profile (see the coverage note in subchapter 5.2). Dropping the NaN cells here rather
-    than downstream matters: Spearman would otherwise return NaN for the whole category
-    silently, reporting nothing rather than reporting less.
+    Pairs are dropped for three reasons, all of which appear only at strict thresholds.
+
+    First, a concept can be absent from the rating file or from ``concepts`` entirely.
+
+    Second, a cell can be NaN, which happens when a word holds fewer than 2 experts and so
+    has no usable layer profile (see the coverage note in subchapter 5.2). Dropping the NaN
+    cells here rather than downstream matters: Spearman would otherwise return NaN for the
+    whole category silently, reporting nothing rather than reporting less.
+
+    Third, and only when ``with_experts`` is supplied, a word can hold NO experts at all.
+    That case needs its own handling because it does NOT produce a NaN. expert_set_overlap_
+    matrices defines Jaccard as 0 when the union is empty, deliberately, so an empty-set
+    concept does not poison the heatmap with NaNs. Read as data, though, that 0 asserts
+    "these two words share none of their experts", which is a statement about two expert
+    sets, and here one of them does not exist. Feeding it to the correlation would score a
+    missing measurement as maximal dissimilarity. Measured on Qwen3 at AP 0.9, where 10 of
+    205 concepts retain nothing, this affects 114 of 2,391 rated pairs and moves the
+    per-category rho by at most 0.026, so it is a correctness fix rather than a result
+    change, and it leaves every threshold below 0.9 untouched.
+
+    The genuine zeros, both words holding experts but sharing none, are kept. They are real
+    measurements. They do dominate at AP 0.9, where 2,030 of 2,391 pairs are tied at exactly
+    0, which is why the Jaccard rho falls there: Spearman has almost no ordering left to read.
     """
     index = {concept: position for position, concept in enumerate(concepts)}
     subset = pairs[pairs.category == category]
     model, human, positions = [], [], []
     for word_a, word_b, rating in zip(subset.word_a, subset.word_b, subset.mean_rating):
-        if word_a in index and word_b in index:
-            value = matrix[index[word_a], index[word_b]]
-            if np.isfinite(value):
-                model.append(value)
-                human.append(rating)
-                positions.append((index[word_a], index[word_b]))
+        if word_a not in index or word_b not in index:
+            continue
+        if with_experts is not None and (word_a not in with_experts or word_b not in with_experts):
+            continue
+        value = matrix[index[word_a], index[word_b]]
+        if np.isfinite(value):
+            model.append(value)
+            human.append(rating)
+            positions.append((index[word_a], index[word_b]))
     return np.asarray(model, dtype=float), np.asarray(human, dtype=float), positions
 
 
@@ -234,43 +278,83 @@ def _mantel_within_category(model: np.ndarray, human: np.ndarray, positions: lis
     return (hits + 1) / (drawn + 1)
 
 
+def _format_mantel_p(value: float) -> str:
+    """
+    Mantel p for a panel title, at the resolution the permutation count can support.
+
+    With HUMAN_MANTEL_PERMUTATIONS draws the smallest attainable value is 1/(B+1), so a
+    result at the floor is reported as "<" that bound rather than as an exact figure it
+    cannot justify.
+    """
+    floor = 1.0 / (HUMAN_MANTEL_PERMUTATIONS + 1)
+    if not np.isfinite(value):
+        return "p=n/a"
+    if value <= floor:
+        return f"p<{floor:.3f}"
+    return f"p={value:.3f}"
+
+
 def plot_human_vs_expert(concepts: list, matrix: np.ndarray, metric_label: str,
-                         out_path) -> None:
+                         out_path, with_experts: set | None = None,
+                         mantel_p: dict | None = None) -> None:
     """
     One panel per category, expert similarity against the human rating.
 
     Drawn per category rather than pooled because a pooled cloud hides that categories sit at
     different mean similarity levels, and that offset would read as a correlation which is
     really a between-category difference.
+
+    Each panel title carries the Mantel p beside its rho, taken from the table this figure
+    accompanies so the two can never disagree. The permutation p is the only valid one here,
+    since the pairs of a category are not independent (every concept appears in m-1 of them)
+    and the parametric p attached to a Spearman coefficient would be badly anticonservative.
+    A rho without it invites reading a sign that the test does not support, which is exactly
+    what the near-zero layer-profile panels look like.
     """
     pairs = load_human_similarity()
     categories = sorted(pairs.category.unique())
     colors = build_category_color_map(categories)
+    mantel_p = mantel_p or {}
     fig, axes = plt.subplots(2, 4, figsize=(20, 9), sharey=True)
 
     for axis, category in zip(axes.ravel(), categories):
-        model, human, _ = _within_category_vectors(concepts, matrix, pairs, category)
+        model, human, _ = _within_category_vectors(concepts, matrix, pairs, category,
+                                                   with_experts)
         if len(model) < 3:
             axis.set_visible(False)
             continue
         axis.scatter(model, human, s=14, alpha=0.45, color=colors[category], edgecolors="none")
         rho = spearmanr(model, human).statistic
         if len(np.unique(model)) > 1:
-            # A trend line is decoration. At strict thresholds the surviving values can be
-            # nearly collinear and the least-squares solve fails to converge, which must not
-            # take down a sweep that has already produced its numbers.
+            # A LOWESS smooth rather than a straight least-squares fit, because the reported
+            # statistic is Spearman, which assumes only monotonicity. An OLS line is a
+            # Pearson-shaped object: its slope tracks the LINEAR association, so a panel
+            # showing one beside a Spearman rho invites reading the line as the illustration
+            # of the number when the two can disagree (professions at AP 0.6 is Pearson 0.171
+            # against Spearman 0.105). The smooth shows the monotone shape the coefficient
+            # actually measures, and it does not flatten the bend these panels display near
+            # zero, where the relationship rises steeply and then saturates.
+            #
+            # The fit stays decoration, so any failure is logged and skipped rather than
+            # allowed to take down a sweep that has already produced its numbers. At strict
+            # thresholds the surviving values can be nearly collinear or almost all tied.
             try:
-                slope, intercept = np.polyfit(model, human, 1)
-                grid = np.linspace(model.min(), model.max(), 50)
-                axis.plot(grid, slope * grid + intercept, color="black", linewidth=1.2)
-            except np.linalg.LinAlgError:
-                log.warning(f"    Trend line skipped for {category}, least squares did not converge.")
-        axis.set_title(f"{category}  rho={rho:.2f}  n={len(model)}", fontsize=11)
+                from statsmodels.nonparametric.smoothers_lowess import lowess
+                smoothed = lowess(human, model, frac=LOWESS_FRACTION, return_sorted=True)
+                axis.plot(smoothed[:, 0], smoothed[:, 1], color="black", linewidth=1.6)
+            except Exception as error:
+                log.warning(f"    Trend smooth skipped for {category}: {error}")
+        axis.set_title(
+            f"{category}  {HUMAN_COEFFICIENT} rho={rho:.2f}  "
+            f"Mantel {_format_mantel_p(mantel_p.get(category, float('nan')))}  n={len(model)}",
+            fontsize=11)
         axis.set_xlabel(f"expert {metric_label}")
     axes[0, 0].set_ylabel("human similarity rating (1-7)")
     axes[1, 0].set_ylabel("human similarity rating (1-7)")
-    fig.suptitle(f"Expert {metric_label} against human similarity, within-category pairs",
-                 fontsize=14)
+    fig.suptitle(
+        f"Expert {metric_label} against human similarity, within-category pairs\n"
+        f"{HUMAN_COEFFICIENT} rank correlation, significance by Mantel permutation of "
+        f"concept labels ({HUMAN_MANTEL_PERMUTATIONS} draws)", fontsize=13)
     fig.tight_layout()
     fig.savefig(out_path, dpi=300, bbox_inches="tight")
     plt.close(fig)
@@ -295,13 +379,25 @@ def plot_human_agreement_bars(table: pd.DataFrame, out_path) -> None:
         sub = per_category[per_category.metric == metric].set_index("category")
         values = [sub.loc[c, "rho_over_ceiling"] if c in sub.index else np.nan
                   for c in categories]
-        axis.bar(np.arange(len(categories)) + offset * width, values, width,
-                 label=sub.metric_label.iloc[0])
+        positions = np.arange(len(categories)) + offset * width
+        axis.bar(positions, values, width, label=sub.metric_label.iloc[0])
+        # A star marks a bar the Mantel test supports, so a tall bar that is really noise is
+        # not read as a result. Bars are otherwise indistinguishable on significance.
+        for position, category, value in zip(positions, categories, values):
+            if category not in sub.index or not np.isfinite(value):
+                continue
+            p_value = sub.loc[category, "mantel_p"]
+            if np.isfinite(p_value) and p_value < HUMAN_SIGNIFICANCE_ALPHA:
+                axis.text(position, value + (0.012 if value >= 0 else -0.03), "*",
+                          ha="center", va="bottom" if value >= 0 else "top", fontsize=13)
     axis.axhline(0, color="black", linewidth=0.8)
     axis.set_xticks(np.arange(len(categories)) + width * (len(metrics) - 1) / 2)
     axis.set_xticklabels(categories, rotation=30, ha="right")
-    axis.set_ylabel("Spearman rho / noise ceiling")
-    axis.set_title("Agreement with human similarity, as a fraction of what raters agree on")
+    axis.set_ylabel(f"{HUMAN_COEFFICIENT} rho / noise ceiling")
+    axis.set_title("Agreement with human similarity, as a fraction of what raters agree on\n"
+                   f"* Mantel p < {HUMAN_SIGNIFICANCE_ALPHA}, "
+                   f"{HUMAN_MANTEL_PERMUTATIONS} label permutations within the category",
+                   fontsize=11)
     axis.legend()
     fig.tight_layout()
     fig.savefig(out_path, dpi=300, bbox_inches="tight")
@@ -309,7 +405,8 @@ def plot_human_agreement_bars(table: pd.DataFrame, out_path) -> None:
 
 
 def validate_against_human(concepts: list, matrices: dict, out_dir,
-                           make_plots: bool = True) -> pd.DataFrame:
+                           make_plots: bool = True,
+                           with_experts: set | None = None) -> pd.DataFrame:
     """
     Correlate each expert similarity matrix against the human similarity ratings, per category.
 
@@ -338,12 +435,14 @@ def validate_against_human(concepts: list, matrices: dict, out_dir,
         pooled_model, pooled_human, per_category_rho = [], [], []
 
         for category in sorted(ceilings):
-            model, human, positions = _within_category_vectors(concepts, matrix, pairs, category)
+            model, human, positions = _within_category_vectors(concepts, matrix, pairs,
+                                                               category, with_experts)
             if len(model) < 3:
                 continue
             rho = float(spearmanr(model, human).statistic)
             ceiling = ceilings[category]
             rows.append({"metric": key, "metric_label": label, "category": category,
+                         "coefficient": HUMAN_COEFFICIENT.lower(), "test": "mantel",
                          "n_pairs": len(model), "rho": round(rho, 4),
                          "mantel_p": round(_mantel_within_category(
                              model, human, positions, matrix, rng), 4),
@@ -362,6 +461,7 @@ def validate_against_human(concepts: list, matrices: dict, out_dir,
             mean_rho = float(np.nanmean(per_category_rho))
             for name, value in [("POOLED", pooled), ("POOLED_MEAN", mean_rho)]:
                 rows.append({"metric": key, "metric_label": label, "category": name,
+                             "coefficient": HUMAN_COEFFICIENT.lower(), "test": "none",
                              "n_pairs": len(pooled_model), "rho": round(value, 4),
                              "mantel_p": float("nan"),
                              "noise_ceiling": round(mean_ceiling, 4),
@@ -373,8 +473,12 @@ def validate_against_human(concepts: list, matrices: dict, out_dir,
     if make_plots and not table.empty:
         for key, label in HUMAN_VALIDATED_METRICS:
             if key in matrices:
-                plot_human_vs_expert(concepts, matrices[key], label,
-                                     out_dir / f"human_vs_expert_similarity_{key}.png")
+                per_metric = table[table.metric == key]
+                plot_human_vs_expert(
+                    concepts, matrices[key], label,
+                    out_dir / f"human_vs_expert_similarity_{key}.png",
+                    with_experts=with_experts,
+                    mantel_p=dict(zip(per_metric.category, per_metric.mantel_p)))
         plot_human_agreement_bars(table, out_dir / "human_similarity_by_category.png")
     return table
 
@@ -398,11 +502,15 @@ def execute_module_5_heatmaps(scope, concept_metadata: pd.DataFrame, heat_dir) -
     profile_z = summarize_category_contrast(concepts, profile_z_matrix, concept_metadata)
 
     log.info(f"  [{scope.label}] Validating expert similarity against human ratings...")
+    # Concepts retaining at least one expert. A concept with none still occupies a row of
+    # the matrices, where its Jaccard reads 0 by definition rather than NaN, so it has to
+    # be excluded by name here or it enters the correlation as a false zero.
+    with_experts = set(scope.expert_df["concept"].unique())
     human = validate_against_human(
         concepts,
         {"jaccard": jaccard_matrix, "layer_profile": profile_matrix,
          "layer_profile_z": profile_z_matrix},
-        out_dir)
+        out_dir, with_experts=with_experts)
     # The unweighted mean over categories, not the pooled value, so the cross-scope summary
     # carries the conservative reading of a within-category test.
     mean_rho = ({} if human.empty else
