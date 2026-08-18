@@ -76,6 +76,8 @@ The square root serves two purposes. $\sqrt{\mathrm{JSD}}$ is the Jensen-Shannon
 
 **Why Jensen-Shannon.** It is symmetric, bounded, and finite even when the two profiles have disjoint support. That last property is what rules out the alternatives: a concept holding experts in layers where its category label holds none is common, and grows more common as the AP threshold tightens, so cross-entropy and Kullback-Leibler divergence, which are infinite there and additionally asymmetric with no principled direction between a concept and a category, cannot be used. A Pearson correlation across layer bins would be dominated by the model's global density profile, which every word inherits, leaving it pinned at a high baseline with compressed range. A Spearman correlation discards magnitude and collapses into ties at strict thresholds, where most bins are empty. The histogram intersection $\sum_\ell \min(p_c[\ell], p_k[\ell])$, which is the natural distributional analogue of the overlap coefficient, carries a finite-sample bias of order $\sqrt{K/n}$ against Jensen-Shannon's $K/n$, with $K$ the number of occupied bins, because writing $\min(x,y) = \tfrac{1}{2}(x + y - |x - y|)$ shows the absolute value accumulating sampling noise rather than cancelling it. It is therefore more sensitive to expert-set size, which is the opposite of what is wanted.
 
+These are the reasons Jensen-Shannon is the **default**, and since the multi-metric extension of subchapter 3.3 they are no longer only arguments. The alternatives named here are now computed alongside it, so the claims about Pearson and Spearman can be read off `profile_metric_comparison.csv` rather than taken on trust, and the Results below report that both do behave as predicted.
+
 **The size control.** $\mathrm{JSD}$ on normalized profiles is scale-invariant algebraically, since multiplying every count of a word by a constant leaves $p_c$ unchanged. What survives is estimation bias: $p_c$ is a multinomial estimate from $n_c$ draws, and plug-in entropy is biased low by approximately $(K-1)/(2 n \ln 2)$ bits, so a word with few experts yields a spuriously spiky profile and an inflated divergence. This cannot be normalized away, because it is a property of the sample rather than of the quantity estimated.
 
 The control is a count-matched null built from **other real pairs**. Each pair is placed at the coordinate $(\log \min(n_c, n_k),\ \log \max(n_c, n_k))$, which is symmetric in the pair by construction, and compared against the $k$ nearest other pairs in that space, itself excluded. Writing $\mathcal{N}(c,k)$ for that reference set, $\mu_{\mathcal{N}}$ and $\sigma_{\mathcal{N}}$ for the mean and standard deviation of $S$ over it, the reported control is the standardized excess
@@ -97,12 +99,40 @@ Because $z$ is defined relative to the pairs actually present, it is a **within-
 
 Words holding fewer than 2 experts have no usable profile, so all three quantities are left empty for them, rather than set to zero as the Jaccard index is for an empty set. Zero is a true statement for a set metric, the word shares no experts, but it would be a false one here, asserting a maximally different layer distribution about a word that has no layer distribution at all. When fewer than 80 usable pairs survive in total, $z$ is left empty throughout, since a count-matched reference set cannot be formed from so few.
 
-**Generated data structures.** Three columns added to `category_concept_similarity_metrics.csv` (see the table above) and two bar charts sharing the layout and category colors of the pair in subchapter 3.1:
+**Generated data structures.** Two columns per registered metric added to `category_concept_similarity_metrics.csv` (see subchapter 3.3 for the list), plus the metric-independent `layer_profile_jsd_bits`, and two bar charts per metric sharing the layout and category colors of the pair in subchapter 3.1:
 
-- `layer_profile_similarity_hierarchy.png`, `layer_profile_similarity_pct` ($S(c,k)$, x-axis) against `hierarchy` (y-axis), the direct counterpart of `jaccard_hierarchy.png`.
-- `layer_profile_z_hierarchy.png`, `layer_profile_z` ($z(c,k)$, x-axis) against `hierarchy` (y-axis), with a dashed reference line at $z = 0$ marking the count-matched null.
+- `layer_profile_<metric>_hierarchy.png`, `layer_profile_<metric>` ($S(c,k)$, y-axis) against `hierarchy` (x-axis), the direct counterpart of `jaccard_hierarchy.png`.
+- `layer_profile_<metric>_z_hierarchy.png`, `layer_profile_<metric>_z` ($z(c,k)$, y-axis) against `hierarchy` (x-axis), with a dashed reference line at $z = 0$ marking the count-matched null.
 
-The same quantities are computed for every pair of words, not only concept-to-parent pairs, in module 5's `layer_profile_matrix.csv` and `layer_profile_z_matrix.csv`, and module 4 relates them to the Jaccard index over both populations. Note that the $z$ values in this module's table are drawn from the all-pairs reference set, so a concept-to-parent pair is standardized against arbitrary word pairs of comparable size rather than against other concept-to-parent pairs. A mean $z$ above zero across this table is therefore itself a finding: it would say that concept-to-parent pairs agree on depth more than arbitrary word pairs of the same sizes do.
+The default metric additionally keeps its original column names, `layer_profile_similarity_pct` and `layer_profile_z`, holding the same values as `layer_profile_js_distance` and `layer_profile_js_distance_z`. Module 4 merges on the original names, and every results tree written before the multi-metric extension carries them, so the aliases are what keep those comparisons possible.
+
+The same quantities are computed for every pair of words, not only concept-to-parent pairs, in module 5's `layer_profile_<metric>_matrix.csv` and `layer_profile_<metric>_z_matrix.csv`, and module 4 relates them to the Jaccard index over both populations. Note that the $z$ values in this module's table are drawn from the all-pairs reference set, so a concept-to-parent pair is standardized against arbitrary word pairs of comparable size rather than against other concept-to-parent pairs. A mean $z$ above zero across this table is therefore itself a finding: it would say that concept-to-parent pairs agree on depth more than arbitrary word pairs of the same sizes do.
+
+### 3.3 The profile metric registry
+
+**Motivation.** Subchapter 3.2 argues for Jensen-Shannon on grounds that rule out several alternatives, and those arguments are predictions rather than measurements. The registry turns them into measurements. "Do these two words allocate their experts to the same depths" has no single correct formalization, the candidate measures disagree by construction, and running all of them costs one extra agreement matrix each over profiles that are built once, so the choice is now reported rather than assumed.
+
+**The seven measures.** All take the row-normalized profiles $p_c, p_k$ of subchapter 3.2 and are oriented so that a higher value means more similar, with 100 for identical profiles. Writing $P_c[\ell] = \sum_{j \le \ell} p_c[j]$ for the cumulative profile, $\langle\cdot,\cdot\rangle$ for the inner product over bins, $\bar{p} = 1/L$ for the mean of any normalized profile, and $r(p_c)$ for the vector of average ranks of $p_c$'s own bins:
+
+| Metric | Definition | Range |
+|---|---|---|
+| `js_distance` | $100\,(1 - \sqrt{\mathrm{JSD}})$ | 0 to 100 |
+| `js_divergence` | $100\,(1 - \mathrm{JSD})$ | 0 to 100 |
+| `hellinger` | $100\,(1 - \sqrt{1 - \sum_\ell \sqrt{p_c[\ell]\,p_k[\ell]}}\,)$ | 0 to 100 |
+| `cosine` | $100\,\langle p_c, p_k\rangle / (\lVert p_c\rVert\,\lVert p_k\rVert)$ | 0 to 100 |
+| `pearson` | $100\,\langle p_c - \bar{p}, p_k - \bar{p}\rangle / (\lVert p_c - \bar{p}\rVert\,\lVert p_k - \bar{p}\rVert)$ | $-100$ to 100 |
+| `spearman` | the `pearson` formula applied to $r(p_c)$ and $r(p_k)$ | $-100$ to 100 |
+| `wasserstein` | $100\,\big(1 - \tfrac{1}{L-1}\sum_{\ell=1}^{L-1} \lvert P_c[\ell] - P_k[\ell]\rvert\big)$ | 0 to 100 |
+
+They fall into three families. The **divergence family**, `js_distance`, `js_divergence` and `hellinger`, compares the profiles as distributions and is bounded, symmetric and finite on disjoint support. The first two are monotone transforms of one another, so they rank every pair identically and differ only in spacing, which matters solely to the linear models of module 9, where a linear function of $\sqrt{\mathrm{JSD}}$ is not a linear function of $\mathrm{JSD}$. Hellinger differs genuinely, since the square root inside its sum lifts the small bins and makes it more sensitive to agreement in a profile's thin tail.
+
+The **correlation family**, `cosine`, `pearson` and `spearman`, compares the profiles as vectors over bins. Centring is what separates the last two from the first: it removes the shared baseline every word inherits, the model's global expert density over depth, so those two read the deviation from that baseline and can go negative, meaning one word is heavy where the other is light. No member of the divergence family can express that.
+
+`wasserstein` stands alone as the only measure in the registry that reads bin **order**. Every other one is permutation invariant, so a word peaking at block 3 and a word peaking at block 4 are exactly as different to them as a word peaking at block 27, which is the wrong reading of a depth axis. Wasserstein charges the distance the mass has to travel, so near misses in depth score as near misses. The consequence is that it is meaningful only on an axis whose adjacency is real, that is on the block axis this module uses. On the flat layer axis adjacent bins are different projection types of the same block, so what it would measure there is largely sublayer alternation rather than depth.
+
+**Scale is deliberately not part of the contract.** The registry fixes orientation and nothing else, because every consumer standardizes or ranks the feature, and forcing a shared scale would manufacture a false comparability between measures that are not on one scale in the first place. The practical consequence is that raw agreement columns must not be compared across metrics. The $z$ columns can be, since each is a standard score against the same count-matched null over the same pairs, and so can any rank-based statistic computed from them.
+
+**Generated data structures.** `profile_metric_comparison.csv` and `profile_metric_comparison.png`, one row per metric, carrying `mean_agreement` and `median_agreement` for scale, `mean_z`, and `share_z_positive`, the fraction of concepts agreeing with their category label on depth more than two arbitrary words of those expert counts do. That last column is the blunt reading, and 0.5 is where a metric is finding nothing, since $z$ is centred on the null by construction. The default metric is drawn in the figure's reference color, and the title says so.
 
 ## Results
 
@@ -159,3 +189,25 @@ On Qwen3 it is flat at zero, mean between $+0.03$ and $+0.16$ with the share of 
 On GPT-2 the picture is weakly positive and grows with the threshold ($z$ = +0.30, +0.13, +0.44, +1.09 across AP 0.5 to 0.8, with 86% of pairs above zero at AP 0.8). The AP 0.8 figure should not be read as a strengthening effect: only 111 of 197 pairs survive there, and the survivors are the words with the most experts, whose profiles are the best estimated. Treat the GPT-2 column as a mild positive at lenient thresholds and as selection at strict ones. The two architectures do not agree here, so the safe statement is the Qwen3 one, that this pairing carries no reliable depth agreement.
 
 This does not mean the metric is uninformative, only that the concept-to-label pairing is the wrong place to look for the effect. Module 5 computes the same quantity over all word pairs and finds that same-category concept *pairs* do agree on depth well above chance, with a category alignment ROC-AUC near 0.69 at every threshold. The two results together say the category-label word behaves unlike its own members, which is the same dissociation module 6 reports between the category prototype and its exemplar average.
+
+### Metric comparison (subchapter 3.3)
+
+> **Provisional.** One scope of one architecture, GPT-2 whole model at AP 0.5, 197 concept-to-parent pairs. The full sweep on both architectures is gated and has not run, so read the ordering rather than the levels.
+
+| Metric | mean $S$ | median $S$ | mean $z$ | % of pairs with $z > 0$ |
+|---|---|---|---|---|
+| `js_distance` | 82.4 | 84.1 | +0.319 | 67.5% |
+| `wasserstein` | 92.4 | 93.5 | +0.268 | 64.0% |
+| `cosine` | 92.0 | 94.1 | +0.248 | 70.1% |
+| `pearson` | 70.1 | 78.2 | +0.106 | 66.0% |
+| `spearman` | 70.9 | 82.1 | +0.116 | 69.5% |
+| `js_divergence` | 96.4 | 97.5 | +0.280 | 70.6% |
+| `hellinger` | 85.2 | 86.8 | +0.319 | 68.0% |
+
+Three readings, and the mean $S$ column supports none of them, which is the point of reporting scale separately from orientation. `js_divergence` leads it at 96.4 purely because dropping the square root compresses everything toward the ceiling, and that is a property of the transform rather than of the data.
+
+First, the qualitative conclusion of subchapter 3.2 does not depend on the metric. Every one of the seven gives a small positive mean $z$, between $+0.11$ and $+0.32$, with the share of pairs above zero between 64 and 71 percent. No measure turns the weak GPT-2 positive into a strong effect and none reverses it, so the choice of formalization is not what is holding the result down.
+
+Second, the centred measures are the weakest on this pairing, $+0.106$ for `pearson` and $+0.116$ for `spearman` against $+0.319$ for `js_distance`, which is what subchapter 3.2 predicted for them and the first direct evidence for it. Removing the global density baseline removes most of what a concept and its category label share.
+
+Third, `js_distance` and `hellinger` agree to three decimal places on mean $z$, $+0.3194$ against $+0.3193$, despite being different functions. They order the pairs almost identically, so registering both buys very little on this target, and the same near-duplication shows up in module 5.

@@ -4,9 +4,12 @@ import numpy as np
 import matplotlib.pyplot as plt
 from scipy.stats import spearmanr
 from utils.helpers import (save_dataframe, expert_set_overlap_matrices, category_alignment_metrics,
-                           scope_out_dir, scope_summary_row, layer_profile_matrices, to_block_axis)
+                           scope_out_dir, scope_summary_row, layer_profile_metric_matrices,
+                           to_block_axis, ACTIVE_PROFILE_METRICS, DEFAULT_PROFILE_METRIC,
+                           profile_metric_label)
 from utils.human_similarity import load_human_similarity, human_noise_ceiling
-from utils.plot_helpers import _plot_heatmap_with_leaders, build_category_color_map, fig_width_for
+from utils.plot_helpers import (_plot_heatmap_with_leaders, build_category_color_map, fig_width_for,
+                                plot_sublayer_comparison_bars)
 
 log = logging.getLogger(__name__)
 
@@ -15,16 +18,31 @@ log = logging.getLogger(__name__)
 # to the same/different pair imbalance and directly comparable to the Jaccard one above.
 # Together they answer whether the layer-profile metric carries categorical signal that
 # Jaccard does not.
+#
+# The layer-profile entries report DEFAULT_PROFILE_METRIC alone. This table's question is
+# how the SCOPES compare, one number per column per scope, and carrying seven metrics
+# through it would triple its width to answer a different question. How the METRICS compare
+# within one scope is its own artifact, profile_metric_comparison.csv and its plot.
 SUMMARY_LABELS = {
     "category_contrast_pct": "Within minus across category Jaccard %",
     "category_roc_auc": "Category alignment ROC-AUC",
     "within_category_jaccard_pct": "Within-category Jaccard %",
     "across_category_jaccard_pct": "Across-category Jaccard %",
-    "layer_profile_roc_auc": "Category alignment ROC-AUC, layer profile",
-    "layer_profile_z_roc_auc": "Category alignment ROC-AUC, layer-profile z",
+    "layer_profile_roc_auc": f"Category alignment ROC-AUC, layer profile ({DEFAULT_PROFILE_METRIC})",
+    "layer_profile_z_roc_auc": f"Category alignment ROC-AUC, layer-profile z ({DEFAULT_PROFILE_METRIC})",
     "human_rho_jaccard": "Human similarity agreement, Jaccard",
-    "human_rho_layer_profile": "Human similarity agreement, layer profile",
+    "human_rho_layer_profile": f"Human similarity agreement, layer profile ({DEFAULT_PROFILE_METRIC})",
 }
+
+
+def profile_matrix_key(metric: str) -> str:
+    """Matrix key, CSV stem and heatmap stem for one registered metric's agreement."""
+    return f"layer_profile_{metric}"
+
+
+def profile_z_matrix_key(metric: str) -> str:
+    """Matrix key, CSV stem and heatmap stem for one metric's count-matched null."""
+    return f"layer_profile_{metric}_z"
 
 # Permutations for the within-category Mantel test. Pairs sharing a concept are not
 # independent, so an ordinary p-value over hundreds of pairs would be badly anticonservative.
@@ -57,9 +75,25 @@ HUMAN_COEFFICIENT = "Spearman"
 # this pipeline smooth at the same scale and can be compared by eye.
 LOWESS_FRACTION = 0.4
 
-# Metrics validated against the human ratings, as (key, label).
-HUMAN_VALIDATED_METRICS = [("jaccard", "Jaccard"), ("layer_profile", "layer profile"),
-                           ("layer_profile_z", "layer profile z")]
+def human_validated_metrics() -> list:
+    """
+    Matrices validated against the human ratings, as (key, label), Jaccard plus the
+    agreement and null pair of every active profile metric.
+
+    Generated rather than written out so registering a metric extends 5.3 with it
+    automatically. Cost is linear in the list: each entry runs one Mantel permutation
+    sweep per category, HUMAN_MANTEL_PERMUTATIONS draws each, which is about a second per
+    entry per scope on the Richie-HSJ item set.
+    """
+    metrics = [("jaccard", "Jaccard")]
+    for metric in ACTIVE_PROFILE_METRICS:
+        label = profile_metric_label(metric)
+        metrics.append((profile_matrix_key(metric), f"layer profile, {label}"))
+        metrics.append((profile_z_matrix_key(metric), f"layer profile z, {label}"))
+    return metrics
+
+
+HUMAN_VALIDATED_METRICS = human_validated_metrics()
 
 def plot_all_heatmaps(expert_allocation_df: pd.DataFrame, concept_metadata: pd.DataFrame, heat_dir) -> tuple:
     """
@@ -68,8 +102,14 @@ def plot_all_heatmaps(expert_allocation_df: pd.DataFrame, concept_metadata: pd.D
 
     The first two ask which neurons a pair shares, the layer-profile pair asks whether
     they spread their experts over the layers alike, which is invisible to a set metric.
-    Returns (concepts, jaccard_matrix, layer_profile_matrix, layer_profile_z_matrix) so
-    the caller can summarize without recomputing.
+    The layer-profile question is asked once per entry of ACTIVE_PROFILE_METRICS, each
+    getting its own agreement and z matrix, CSV and heatmap, because the metrics formalize
+    "same depth allocation" differently and disagree by construction. See the module 3
+    docstring for what separates the three families.
+
+    Returns (concepts, jaccard_matrix, profile_matrices) where profile_matrices maps every
+    layer-profile matrix key to its array, so the caller can summarize and validate
+    without recomputing.
     """
     concepts = concept_metadata['concept'].unique()
 
@@ -114,17 +154,31 @@ def plot_all_heatmaps(expert_allocation_df: pd.DataFrame, concept_metadata: pd.D
     save_dataframe(counts_df, heat_dir / "shared_expert_counts_matrix.csv", index=True)
 
     # Layer-profile agreement over the same concept list module 3 and module 4 pass, which
-    # the null grid requires (see layer_profile_matrices). The block axis matches modules 3 and 4, see check_block_axis_identity.py.
-    _, profile_matrix, profile_z_matrix = layer_profile_matrices(to_block_axis(expert_allocation_df), list(concepts))
+    # the null grid requires (see layer_profile_matrices). The block axis matches modules 3
+    # and 4, see check_block_axis_identity.py. One pass over every active metric, sharing
+    # the profile build across them.
+    by_metric = layer_profile_metric_matrices(to_block_axis(expert_allocation_df), list(concepts),
+                                              ACTIVE_PROFILE_METRICS)
 
-    # Dictionary of metrics to streamline saving and plotting
+    # Dictionary of metrics to streamline saving and plotting. The two set-based matrices
+    # first, then one agreement and one z matrix per registered profile metric. Filenames
+    # carry the metric name for ALL metrics including the default, so the folder reads as
+    # one family: this renames the previous layer_profile_matrix.csv / _heatmap.png pair to
+    # its js_distance members, values unchanged.
     matrices = {
         "jaccard": (jaccard_matrix, "Pairwise Jaccard Similarity Index %", "magma"),
         "overlap": (overlap_matrix, "Pairwise Overlap Coefficient %", "magma"),
-        "layer_profile": (profile_matrix, "Pairwise Layer-Profile Similarity %", "magma"),
-        "layer_profile_z": (profile_z_matrix,
-                            "Pairwise Layer-Profile Agreement vs Count-Matched Null (z)", "magma"),
     }
+    profile_matrices = {}
+    for metric in ACTIVE_PROFILE_METRICS:
+        _, similarity, z = by_metric[metric]
+        label = profile_metric_label(metric)
+        profile_matrices[profile_matrix_key(metric)] = similarity
+        profile_matrices[profile_z_matrix_key(metric)] = z
+        matrices[profile_matrix_key(metric)] = (
+            similarity, f"Pairwise Layer-Profile Agreement, {label}", "magma")
+        matrices[profile_z_matrix_key(metric)] = (
+            z, f"Pairwise Layer-Profile Agreement vs Count-Matched Null (z), {label}", "magma")
 
     for name, (mtx, title, cmap) in matrices.items():
         matrix_df = pd.DataFrame(mtx, index=concepts, columns=concepts)
@@ -135,7 +189,7 @@ def plot_all_heatmaps(expert_allocation_df: pd.DataFrame, concept_metadata: pd.D
             category_boundaries=category_boundaries,
         )
 
-    return concepts, jaccard_matrix, profile_matrix, profile_z_matrix
+    return concepts, jaccard_matrix, profile_matrices
 
 
 def summarize_category_contrast(concepts, similarity_matrix: np.ndarray, concept_metadata: pd.DataFrame) -> dict:
@@ -373,7 +427,11 @@ def plot_human_agreement_bars(table: pd.DataFrame, out_path) -> None:
     metrics = list(dict.fromkeys(per_category.metric))
     categories = sorted(per_category.category.unique())
     width = 0.8 / len(metrics)
-    fig, axis = plt.subplots(figsize=(fig_width_for(len(categories), 1.2, min_w=9.0), 5))
+    # Width scales with the number of BARS, not of categories: one series per validated
+    # matrix means Jaccard plus two per registered profile metric, so a figure sized for
+    # three series draws fifteen at 0.08 inches each and nothing is readable.
+    fig, axis = plt.subplots(
+        figsize=(fig_width_for(len(categories) * len(metrics), 0.22, min_w=9.0), 5))
 
     for offset, metric in enumerate(metrics):
         sub = per_category[per_category.metric == metric].set_index("category")
@@ -398,7 +456,11 @@ def plot_human_agreement_bars(table: pd.DataFrame, out_path) -> None:
                    f"* Mantel p < {HUMAN_SIGNIFICANCE_ALPHA}, "
                    f"{HUMAN_MANTEL_PERMUTATIONS} label permutations within the category",
                    fontsize=11)
-    axis.legend()
+    # Legend below the axes and in columns, since one entry per validated matrix overflows
+    # a single-column box inside the plot once several profile metrics are registered. It
+    # clears the rotated category labels, which occupy the strip directly under the axes.
+    axis.legend(loc="upper center", bbox_to_anchor=(0.5, -0.30), frameon=False,
+                fontsize=9, ncol=min(len(metrics), 4))
     fig.tight_layout()
     fig.savefig(out_path, dpi=300, bbox_inches="tight")
     plt.close(fig)
@@ -483,6 +545,64 @@ def validate_against_human(concepts: list, matrices: dict, out_dir,
     return table
 
 
+# Columns of the per-scope metric comparison, as {column: axis label}. Kept to four so the
+# figure stays readable at plot_sublayer_comparison_bars' 4.2 inches per panel.
+METRIC_COMPARISON_LABELS = {
+    "category_roc_auc": "Category alignment ROC-AUC",
+    "category_roc_auc_z": "Category alignment ROC-AUC, z",
+    "human_rho": "Human similarity agreement (mean over categories)",
+    "human_rho_z": "Human similarity agreement, z",
+}
+
+
+def write_profile_metric_comparison(profile_contrasts: dict, mean_rho: dict, out_dir) -> pd.DataFrame:
+    """
+    Reduce every active profile metric to one row, so the metrics can be compared inside a
+    scope the way sublayer_comparison compares scopes inside a module.
+
+    Two independent readings sit side by side on purpose, and module 8 already showed they
+    can disagree: the sublayer best at recovering the category partition was not the one
+    best at reproducing human similarity. category_roc_auc asks whether the metric
+    separates within-category pairs from across-category ones, a partition question with a
+    large contrast behind it. human_rho asks whether it orders WITHIN-category pairs the
+    way people do, which is the harder and more externally valid test, and it is reported
+    as the unweighted mean over categories rather than the pooled value, since pooling lets
+    between-category differences in mean similarity masquerade as agreement.
+
+    The z columns restate both against the count-matched null, which is the comparison to
+    trust when ranking metrics: the raw agreement scales differ by metric, deliberately, so
+    a metric scoring higher on category_roc_auc than another may simply be reading
+    expert-set size more strongly.
+    """
+    rows = []
+    for metric in ACTIVE_PROFILE_METRICS:
+        agreement = profile_contrasts[profile_matrix_key(metric)]
+        null = profile_contrasts[profile_z_matrix_key(metric)]
+        rows.append({
+            "metric": metric,
+            "metric_label": profile_metric_label(metric),
+            "within_pct": agreement["within_pct"],
+            "across_pct": agreement["across_pct"],
+            "contrast_pct": agreement["contrast_pct"],
+            "category_roc_auc": agreement["roc_auc"],
+            "category_roc_auc_z": null["roc_auc"],
+            "human_rho": mean_rho.get(profile_matrix_key(metric), float("nan")),
+            "human_rho_z": mean_rho.get(profile_z_matrix_key(metric), float("nan")),
+        })
+    table = pd.DataFrame(rows)
+    save_dataframe(table, out_dir / "profile_metric_comparison.csv")
+    # plot_sublayer_comparison_bars draws its FIRST row in the reference colour, which lands
+    # on DEFAULT_PROFILE_METRIC because ACTIVE_PROFILE_METRICS keeps it first. That is the
+    # right row to mark, since it is the metric every summary row reports, so the title says
+    # so rather than leaving the dark bar looking arbitrary.
+    plot_sublayer_comparison_bars(
+        table, METRIC_COMPARISON_LABELS, out_dir / "profile_metric_comparison.png",
+        "Layer-profile metrics compared, pairwise concept similarity\n"
+        f"dark bar is the default metric, {DEFAULT_PROFILE_METRIC}",
+        scope_col="metric_label")
+    return table
+
+
 def execute_module_5_heatmaps(scope, concept_metadata: pd.DataFrame, heat_dir) -> dict:
     """Execute Module 5: Heatmaps.
     Generate all pairwise similarity heatmaps and CSV matrices for concepts.
@@ -493,13 +613,13 @@ def execute_module_5_heatmaps(scope, concept_metadata: pd.DataFrame, heat_dir) -
     """
     out_dir = scope_out_dir(heat_dir, scope)
     log.info(f"  [{scope.label}] Generating all pairwise heatmaps and CSV matrices "
-             f"(Jaccard, Overlap & layer profile)...")
-    concepts, jaccard_matrix, profile_matrix, profile_z_matrix = plot_all_heatmaps(
+             f"(Jaccard, Overlap & {len(ACTIVE_PROFILE_METRICS)} layer-profile metrics)...")
+    concepts, jaccard_matrix, profile_matrices = plot_all_heatmaps(
         scope.expert_df, concept_metadata, out_dir)
 
     jaccard = summarize_category_contrast(concepts, jaccard_matrix, concept_metadata)
-    profile = summarize_category_contrast(concepts, profile_matrix, concept_metadata)
-    profile_z = summarize_category_contrast(concepts, profile_z_matrix, concept_metadata)
+    profile_contrasts = {key: summarize_category_contrast(concepts, matrix, concept_metadata)
+                         for key, matrix in profile_matrices.items()}
 
     log.info(f"  [{scope.label}] Validating expert similarity against human ratings...")
     # Concepts retaining at least one expert. A concept with none still occupies a row of
@@ -507,23 +627,26 @@ def execute_module_5_heatmaps(scope, concept_metadata: pd.DataFrame, heat_dir) -
     # be excluded by name here or it enters the correlation as a false zero.
     with_experts = set(scope.expert_df["concept"].unique())
     human = validate_against_human(
-        concepts,
-        {"jaccard": jaccard_matrix, "layer_profile": profile_matrix,
-         "layer_profile_z": profile_z_matrix},
+        concepts, {"jaccard": jaccard_matrix, **profile_matrices},
         out_dir, with_experts=with_experts)
     # The unweighted mean over categories, not the pooled value, so the cross-scope summary
     # carries the conservative reading of a within-category test.
     mean_rho = ({} if human.empty else
                 human[human.category == "POOLED_MEAN"].set_index("metric")["rho"].to_dict())
 
+    write_profile_metric_comparison(profile_contrasts, mean_rho, out_dir)
+
+    default_profile = profile_contrasts[profile_matrix_key(DEFAULT_PROFILE_METRIC)]
+    default_profile_z = profile_contrasts[profile_z_matrix_key(DEFAULT_PROFILE_METRIC)]
     return scope_summary_row(
         scope,
         within_category_jaccard_pct=jaccard["within_pct"],
         across_category_jaccard_pct=jaccard["across_pct"],
         category_contrast_pct=jaccard["contrast_pct"],
         category_roc_auc=jaccard["roc_auc"],
-        layer_profile_roc_auc=profile["roc_auc"],
-        layer_profile_z_roc_auc=profile_z["roc_auc"],
+        layer_profile_roc_auc=default_profile["roc_auc"],
+        layer_profile_z_roc_auc=default_profile_z["roc_auc"],
         human_rho_jaccard=mean_rho.get("jaccard", float("nan")),
-        human_rho_layer_profile=mean_rho.get("layer_profile", float("nan")),
+        human_rho_layer_profile=mean_rho.get(
+            profile_matrix_key(DEFAULT_PROFILE_METRIC), float("nan")),
     )

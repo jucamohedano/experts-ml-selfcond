@@ -74,9 +74,9 @@ if not before.equals(after):
 # The call sites wrap their frame. A source check, crude but effective.
 base_path = Path(__file__).resolve().parents[1]
 expectations = {
-    "modules/module_3_similarities.py": r"layer_profile_matrices\(to_block_axis\(",
+    "modules/module_3_similarities.py": r"layer_profile_metric_matrices\(to_block_axis\(",
     "modules/module_4_correlations.py": r"pair_layer_profile_vectors\(to_block_axis\(",
-    "modules/module_5_heatmaps.py": r"layer_profile_matrices\(to_block_axis\(",
+    "modules/module_5_heatmaps.py": r"layer_profile_metric_matrices\(to_block_axis\(",
 }
 for path, pattern in expectations.items():
     full_path = base_path / path

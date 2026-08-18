@@ -310,7 +310,33 @@ COMPARISON_STYLE = {
     "tick_size": 10,
     "value_size": 9,
     "legend_size": 9,
+    # Inches of axes height per bar row, which is what makes a comparison panel scale with
+    # its content instead of squeezing every row into the fixed "figsize" height. A row
+    # carrying two series needs more, since it holds two bars plus the gap between them.
+    # The values are set so a row is comfortably taller than the 10 point tick label and
+    # the 9 point value annotation printed beside it.
+    "row_height": 0.32,
+    "grouped_row_height": 0.40,
+    # Fixed overhead per panel for the title, the x axis label and the legend below it.
+    "panel_margin": 2.4,
 }
+
+
+def comparison_panel_height(n_rows: int, grouped: bool = False, min_height: float = 4.6) -> float:
+    """
+    Axes height in inches for a horizontal-bar comparison panel of ``n_rows`` rows.
+
+    The comparison figures of module 9 were written when a feature grid held six cells, so a
+    fixed height was fine. The grid is now generated per registered profile metric, six cells
+    times seven metrics plus the metric-free Jaccard cell, and at 36 rows a fixed height
+    overlaps every tick label with the bar above it and prints the value annotations on top of
+    one another. Height therefore scales with the row count, and ``min_height`` keeps a small
+    panel from collapsing when only one metric is active.
+
+    ``grouped`` selects the taller per-row allowance for a panel drawing two series per row.
+    """
+    per_row = COMPARISON_STYLE["grouped_row_height" if grouped else "row_height"]
+    return max(min_height, COMPARISON_STYLE["panel_margin"] + per_row * max(n_rows, 1))
 
 # Base is the reference/baseline series, accent the model under test, muted anything carried
 # as a diagnostic rather than a candidate, and reference the line marking a ceiling or a
@@ -324,9 +350,18 @@ COMPARISON_COLORS = {
 }
 
 
-def comparison_legend(axis, ncol: int = 2) -> None:
-    """Legend below the axes, unframed, so it never covers a bar."""
-    axis.legend(loc="upper center", bbox_to_anchor=(0.5, -0.13),
+def comparison_legend(axis, ncol: int = 2, pad_inches: float = 0.5) -> None:
+    """
+    Legend below the axes, unframed, so it never covers a bar.
+
+    The offset is expressed in INCHES and converted to the axes-relative units
+    ``bbox_to_anchor`` wants, rather than left at a fixed fraction of the axes height. A
+    comparison panel now grows with its row count, so a fixed fraction that sat tight under a
+    5 inch panel drifts nearly two inches below a 14 inch one, stranding the legend in
+    whitespace far from the bars it explains.
+    """
+    axes_height = axis.get_position().height * axis.figure.get_figheight()
+    axis.legend(loc="upper center", bbox_to_anchor=(0.5, -pad_inches / max(axes_height, 0.1)),
                 fontsize=COMPARISON_STYLE["legend_size"], frameon=False, ncol=ncol)
 
 
@@ -336,6 +371,11 @@ def annotate_barh_values(axis, values, formatter, pad: float = 0.012) -> None:
 
     ``formatter`` takes the value and returns the label, so the caller decides how to express
     the reading against its own reference (fraction of a noise ceiling, points above chance).
+
+    Text lands at the ROW centre. On a grouped panel, whose two series sit at
+    ``row +/- height/2``, that is the gap between them rather than beside the bar being
+    annotated, which is deliberate: the ranker panel overlays its per-category dots on one of
+    the two half-rows, so aligning the text with that bar prints it straight through them.
     """
     for index, value in enumerate(values):
         if pd.notna(value):

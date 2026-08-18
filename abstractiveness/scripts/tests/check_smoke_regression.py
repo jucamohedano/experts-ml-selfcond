@@ -49,6 +49,8 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 import numpy as np
 import pandas as pd
 
+from utils.helpers import ACTIVE_PROFILE_METRICS, DEFAULT_PROFILE_METRIC
+
 DEFAULT_SMOKE = "../results/research_plots_gpt2_richie_hsj_smoke_m9"
 DEFAULT_BASELINE = "../results/research_plots_gpt2_richie_hsj_sensefix"
 DEFAULT_AP = "AP_0.5"
@@ -75,7 +77,48 @@ UPSTREAM_DEPENDENT_ROWS = {"shannon_entropy_vs_expert_count", "jaccard_vs_cosine
 # SCHEMA_ADDED_COLUMNS are columns a restructured module now writes that the baseline
 # predates. Their presence is intended, every column the baseline DID write must still
 # match value for value.
-SCHEMA_ADDED_COLUMNS = {"human_similarity_validation.csv": {"coefficient", "test"}}
+#
+# The module 3 entry is the multi-metric extension: the module now writes one agreement and
+# one z column per entry of ACTIVE_PROFILE_METRICS, generated from the registry rather than
+# written out, so the allowance is generated the same way. The DEFAULT metric's original
+# column names are deliberately NOT in this set, because they are still written and must
+# still match the baseline exactly, which is the whole evidence that the extension left the
+# existing metric alone.
+SCHEMA_ADDED_COLUMNS = {
+    "human_similarity_validation.csv": {"coefficient", "test"},
+    "category_concept_similarity_metrics.csv": {
+        column for metric in ACTIVE_PROFILE_METRICS
+        for column in (f"layer_profile_{metric}", f"layer_profile_{metric}_z")},
+}
+
+# RENAMED_FILES and RENAMED_ROWS cover the same extension, which named every layer-profile
+# artifact after the metric behind it. The baseline predates that, so its unqualified name
+# IS the default metric's file or row and is compared against it. A rename must not change a
+# value, so these pairs still have to clear the byte or numeric comparison below.
+RENAMED_FILES = {
+    "layer_profile_matrix.csv": f"layer_profile_{DEFAULT_PROFILE_METRIC}_matrix.csv",
+    "layer_profile_z_matrix.csv": f"layer_profile_{DEFAULT_PROFILE_METRIC}_z_matrix.csv",
+}
+RENAMED_ROWS = {
+    "human_similarity_validation.csv": {
+        "metric": {"layer_profile": f"layer_profile_{DEFAULT_PROFILE_METRIC}",
+                   "layer_profile_z": f"layer_profile_{DEFAULT_PROFILE_METRIC}_z"}},
+}
+
+# SCHEMA_ADDED_ROWS are rows the baseline could not carry because the metric did not exist
+# when it was written. Subchapter 5.3 now validates every registered metric, so a scope
+# gains two rows per category per non-default metric. Generated from the registry, so
+# registering a metric extends the allowance with it.
+SCHEMA_ADDED_ROWS = {
+    "human_similarity_validation.csv": {
+        f"layer_profile_{metric}{suffix}"
+        for metric in ACTIVE_PROFILE_METRICS for suffix in ("", "_z")},
+}
+
+# Text columns allowed to differ, because they carry a DISPLAY label rather than a value and
+# the label now names the metric ("layer profile" became "layer profile, Jensen-Shannon
+# distance"). The numeric columns of the same row are still compared exactly.
+RENAMED_TEXT_COLUMNS = {"human_similarity_validation.csv": {"metric_label"}}
 
 # The rows of module 4's correlation_summary.csv that read the layer profile and its
 # count-matched z. On a sublayer scope these are exactly the numbers the block-axis change
@@ -121,6 +164,14 @@ def numeric_frames_match(base: pd.DataFrame, smoke: pd.DataFrame, name: str) -> 
         problems.append(f"{name}: no key column to align on")
         return problems
 
+    # Relabel the baseline's key values onto the names the smoke run uses, so a row that was
+    # only RENAMED is still aligned and its values still compared. Applied to the baseline
+    # rather than the smoke run because the rename is the direction the code moved.
+    base = base.copy()
+    for column, mapping in RENAMED_ROWS.get(name, {}).items():
+        if column in base.columns:
+            base[column] = base[column].replace(mapping)
+
     base_indexed = base.set_index(key)
     smoke_indexed = smoke.set_index(key)
     lost = [k for k in base_indexed.index if k not in set(smoke_indexed.index)]
@@ -128,10 +179,14 @@ def numeric_frames_match(base: pd.DataFrame, smoke: pd.DataFrame, name: str) -> 
                    if (k if isinstance(k, str) else k[0]) not in UPSTREAM_DEPENDENT_ROWS]
     if unexplained:
         problems.append(f"{name}: rows lost {unexplained}")
+    allowed_new_rows = SCHEMA_ADDED_ROWS.get(name, set())
     gained = [k for k in smoke_indexed.index if k not in set(base_indexed.index)]
-    if gained:
-        problems.append(f"{name}: rows added {gained}")
+    unexplained_gained = [k for k in gained
+                          if (k if isinstance(k, str) else k[0]) not in allowed_new_rows]
+    if unexplained_gained:
+        problems.append(f"{name}: rows added {unexplained_gained}")
 
+    relabelled = RENAMED_TEXT_COLUMNS.get(name, set())
     shared_rows = [k for k in base_indexed.index if k in set(smoke_indexed.index)]
     for column in [c for c in base_indexed.columns if c in smoke_indexed.columns]:
         left = base_indexed.loc[shared_rows, column]
@@ -143,6 +198,8 @@ def numeric_frames_match(base: pd.DataFrame, smoke: pd.DataFrame, name: str) -> 
                 worst = np.nanmax(np.abs(left.to_numpy(dtype=float)
                                          - right.to_numpy(dtype=float)))
                 problems.append(f"{name}: column {column} differs, max abs diff {worst}")
+        elif column in relabelled:
+            continue
         elif not left.fillna("").astype(str).equals(right.fillna("").astype(str)):
             problems.append(f"{name}: text column {column} differs")
     return problems
@@ -169,11 +226,20 @@ def main() -> int:
             relative = baseline_csv.relative_to(B)
             smoke_csv = S / relative
             if not smoke_csv.exists():
-                if baseline_csv.name in UPSTREAM_DEPENDENT_FILES:
+                # A file the multi-metric extension renamed is not missing, it moved to the
+                # name carrying its metric. Comparison then proceeds normally against it,
+                # so the rename still has to leave every value untouched.
+                renamed = RENAMED_FILES.get(baseline_csv.name)
+                if renamed is not None and (smoke_csv.parent / renamed).exists():
+                    notes.append(f"renamed by the multi-metric extension, compared against "
+                                 f"{renamed}: {relative}")
+                    smoke_csv = smoke_csv.parent / renamed
+                elif baseline_csv.name in UPSTREAM_DEPENDENT_FILES:
                     notes.append(f"absent by configuration, modules 2 and 7 disabled: {relative}")
+                    continue
                 else:
                     failures.append(f"missing {smoke_csv}")
-                continue
+                    continue
             if filecmp.cmp(baseline_csv, smoke_csv, shallow=False):
                 identical += 1
                 continue

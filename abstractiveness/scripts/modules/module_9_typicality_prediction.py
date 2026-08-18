@@ -69,10 +69,11 @@ from utils.helpers import (save_dataframe, scope_out_dir, scope_summary_row,
                            expert_set_overlap_matrices, pair_similarity_vector,
                            pair_layer_profile_vectors, layer_profile_matrices,
                            count_matched_z, PROFILE_METRICS, DEFAULT_PROFILE_METRIC,
-                           MIN_PROFILE_EXPERTS)
+                           ACTIVE_PROFILE_METRICS, MIN_PROFILE_EXPERTS)
 from utils.human_similarity import human_pair_lookup, human_noise_ceiling
 from utils.plot_helpers import (COMPARISON_STYLE, COMPARISON_COLORS, comparison_legend,
-                                annotate_barh_values, style_comparison_axis)
+                                annotate_barh_values, style_comparison_axis,
+                                comparison_panel_height)
 
 log = logging.getLogger(__name__)
 
@@ -122,10 +123,12 @@ MIN_TRAIN_CONCEPTS = 40
 # over the pairs humans actually rated, once its own table is built.
 MIN_PAIR_CONCEPTS = 3
 
-# Profile metrics the grid is instantiated on. One entry today. The follow-up project
-# registers wasserstein, cosine, pearson, spearman, js_divergence and hellinger in
-# PROFILE_METRICS and appends their names here, nothing else changes.
-ACTIVE_METRICS = [DEFAULT_PROFILE_METRIC]
+# Profile metrics the grid is instantiated on, shared with modules 3 and 5 so one edit
+# changes what the whole pipeline computes. All seven registered metrics today: the grid
+# generates five cells per metric plus the single metric-free Jaccard cell, so Study A
+# fits 36 cells per reference and Study B fits 36, against 6 and 6 with one metric.
+# Narrow ACTIVE_PROFILE_METRICS in utils/helpers.py to make a verification run cheap.
+ACTIVE_METRICS = list(ACTIVE_PROFILE_METRICS)
 
 # The six grid cells, as the roles each uses. J is the set feature, S the profile
 # agreement, z its count-matched null score. The grid is GENERATED per metric rather
@@ -824,8 +827,16 @@ def plot_ranker_comparison(results: pd.DataFrame, per_category: pd.DataFrame, ou
         return
     titles = {"label_word": "Label-word reference", "member_centroid": "Member-centroid reference"}
 
-    fig, axes = plt.subplots(len(references), 1,
-                             figsize=(style["figsize"][0], 4.6 * len(references)), squeeze=False)
+    # Height scales with the number of grid cells rather than sitting at a fixed 4.6 inches
+    # per panel. Each reference draws one row per cell, and the grid is generated per
+    # registered metric, so seven metrics turn six rows into thirty-six and a fixed height
+    # overlaps every tick label with the bar above it.
+    panel_rows = max(len(_grid_order(results[results.reference == reference]))
+                     for reference in references)
+    fig, axes = plt.subplots(
+        len(references), 1, squeeze=False,
+        figsize=(style["figsize"][0],
+                 comparison_panel_height(panel_rows, grouped=True) * len(references)))
     width = style["grouped_bar_height"]
     has_reference_column = not per_category.empty and "reference" in per_category.columns
 
@@ -858,6 +869,9 @@ def plot_ranker_comparison(results: pd.DataFrame, per_category: pd.DataFrame, ou
 
         upper = float(np.nanmax(accuracy)) if accuracy.notna().any() else CHANCE_ACCURACY
         axis.set_xlim(0.3, max(0.8, upper) + 0.18)
+        # Left at the row CENTRE, in the gap between the row's two bars, rather than beside
+        # the ranker bar it describes. The per-category dots share the ranker bar's half of
+        # the row, so aligning the text with that bar prints it straight through them.
         annotate_barh_values(
             axis, accuracy,
             lambda value: f"{value:.3f}  ({100 * (value - CHANCE_ACCURACY):+.1f} pp vs chance)")
@@ -900,28 +914,13 @@ def plot_pair_similarity(results: pd.DataFrame, per_category: pd.DataFrame, out_
     frame = results.set_index(["model", "metric"]).reindex(order)
     ceiling = float(frame["noise_ceiling_mean"].iloc[0])
 
-    fig, axes = plt.subplots(1, 2, figsize=style["figsize"])
-
-    y_pos = np.arange(len(order))
-    highlight = {"jaccard": colors["base"], "jaccard_profile_both": colors["accent"]}
-    values = frame["mean_category_spearman"].astype(float)
-    axes[0].barh(y_pos, values, height=style["bar_height"],
-                 color=[highlight.get(model, colors["muted"]) for model, _ in order])
-    axes[0].axvline(ceiling, color=colors["reference"], linewidth=1.8, linestyle="--",
-                    label=f"Human noise ceiling ({ceiling:.3f})")
-    axes[0].axvline(0.0, color=colors["zero"], linewidth=1.0, linestyle=":")
-    axes[0].set_xlim(min(0.0, float(values.min()) - 0.05), ceiling + 0.10)
-    annotate_barh_values(axes[0], values,
-                         lambda value: f"{value:.3f}  ({value / ceiling:.0%} of ceiling)")
-    bold = [label for label, (model, _) in zip(labels, order) if model in HEADLINE_CELLS]
-    style_comparison_axis(axes[0], labels, "Agreement with human pair similarity",
-                          "Spearman with human ratings, mean over categories", bold=bold)
-    comparison_legend(axes[0], ncol=2)
-
     # Selected on the (model, metric) PAIR rather than on the first row of the grid order
     # carrying the model name. With a second metric registered there is one such row per
     # metric, and taking the first would draw whichever metric the grid happened to emit
     # first while the summary row reported _display_metric's choice.
+    #
+    # Resolved BEFORE the figure is built, because the right panel's row count decides how
+    # much of its column it is given.
     base_key = next((key for key in order if key[0] == "jaccard"), None)
     rich_key = next((key for key in order
                      if key == ("jaccard_profile_both", _display_metric())), None)
@@ -930,6 +929,7 @@ def plot_pair_similarity(results: pd.DataFrame, per_category: pd.DataFrame, out_
         wanted = {base_key, rich_key}
         detail = per_category[[key in wanted for key
                                in zip(per_category.model, per_category.metric)]]
+    pivot = pd.DataFrame()
     if not detail.empty:
         # Pivoted on the (model, metric) pair joined into one label rather than on the model
         # name, which stops being unique the moment a second metric is registered.
@@ -938,25 +938,59 @@ def plot_pair_similarity(results: pd.DataFrame, per_category: pd.DataFrame, out_
                                      in zip(detail.model, detail.metric)])
                  .pivot(index="category", columns="cell", values="rho")
                  .reindex(columns=["base", "rich"]).dropna().sort_values("rich"))
+
+    # The figure is sized on the LEFT panel, which carries one row per grid cell and so grows
+    # with the number of registered metrics. The right panel carries one row per held-out
+    # category, eight of them however many metrics are active, so it is given only the top
+    # share of its column. Stretching eight bars over a figure sized for thirty-six would draw
+    # them as slabs an inch and a half thick.
+    # min_height is the historical fixed height, so a run with one registered metric, six
+    # rows, reproduces the figure this replaced rather than shrinking it.
+    height = comparison_panel_height(len(order), min_height=style["figsize"][1])
+    fig = plt.figure(figsize=(style["figsize"][0], height))
+    outer = fig.add_gridspec(1, 2, width_ratios=[1.15, 1.0])
+    left_axis = fig.add_subplot(outer[0, 0])
+
+    y_pos = np.arange(len(order))
+    highlight = {"jaccard": colors["base"], "jaccard_profile_both": colors["accent"]}
+    values = frame["mean_category_spearman"].astype(float)
+    left_axis.barh(y_pos, values, height=style["bar_height"],
+                   color=[highlight.get(model, colors["muted"]) for model, _ in order])
+    left_axis.axvline(ceiling, color=colors["reference"], linewidth=1.8, linestyle="--",
+                      label=f"Human noise ceiling ({ceiling:.3f})")
+    left_axis.axvline(0.0, color=colors["zero"], linewidth=1.0, linestyle=":")
+    left_axis.set_xlim(min(0.0, float(values.min()) - 0.05), ceiling + 0.10)
+    annotate_barh_values(left_axis, values,
+                         lambda value: f"{value:.3f}  ({value / ceiling:.0%} of ceiling)")
+    bold = [label for label, (model, _) in zip(labels, order) if model in HEADLINE_CELLS]
+    style_comparison_axis(left_axis, labels, "Agreement with human pair similarity",
+                          "Spearman with human ratings, mean over categories", bold=bold)
+    comparison_legend(left_axis, ncol=2)
+
+    if not pivot.empty:
+        share = min(1.0, comparison_panel_height(len(pivot)) / height)
+        inner = outer[0, 1].subgridspec(2, 1, height_ratios=[share, max(1e-3, 1.0 - share)])
+        right_axis = fig.add_subplot(inner[0, 0])
+
         base_label, rich_label = _grid_labels([base_key, rich_key])
         y = np.arange(len(pivot))
         width = style["grouped_bar_height"]
-        axes[1].barh(y + width / 2, pivot["rich"], height=width, color=colors["accent"],
-                     label=rich_label.replace("_", " "))
-        axes[1].barh(y - width / 2, pivot["base"], height=width, color=colors["base"],
-                     label=base_label.replace("_", " "))
+        right_axis.barh(y + width / 2, pivot["rich"], height=width, color=colors["accent"],
+                        label=rich_label.replace("_", " "))
+        right_axis.barh(y - width / 2, pivot["base"], height=width, color=colors["base"],
+                        label=base_label.replace("_", " "))
         # Each category's own ceiling, as a tick, since they differ enough to matter.
         ceilings = detail.drop_duplicates("category").set_index("category")["noise_ceiling"]
         for index, category in enumerate(pivot.index):
-            axes[1].plot([ceilings[category]], [index], marker="|", markersize=16,
-                         color=colors["reference"], markeredgewidth=2.2,
-                         label="Category noise ceiling" if index == 0 else None)
-        axes[1].set_xlim(0.0, 1.0)
-        style_comparison_axis(axes[1], list(pivot.index), "Per held-out category",
+            right_axis.plot([ceilings[category]], [index], marker="|", markersize=16,
+                            color=colors["reference"], markeredgewidth=2.2,
+                            label="Category noise ceiling" if index == 0 else None)
+        right_axis.set_xlim(0.0, 1.0)
+        style_comparison_axis(right_axis, list(pivot.index), "Per held-out category",
                               "Spearman with human ratings, held-out category")
-        comparison_legend(axes[1], ncol=3)
+        comparison_legend(right_axis, ncol=3)
 
-    plt.tight_layout()
+    fig.tight_layout()
     plt.savefig(out_dir / "pair_similarity_comparison.png", dpi=300, bbox_inches="tight")
     plt.close(fig)
 

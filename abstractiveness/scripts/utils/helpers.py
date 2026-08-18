@@ -585,20 +585,223 @@ def _js_distance_similarity(p: np.ndarray, q: np.ndarray | None = None) -> np.nd
     return _jsd_to_similarity(_cross_jsd_bits(p, q))
 
 
+def _js_divergence_similarity(p: np.ndarray, q: np.ndarray | None = None) -> np.ndarray:
+    """
+    Jensen-Shannon DIVERGENCE as an agreement, 100 * (1 - JSD bits).
+
+    Same quantity as js_distance without the square root, so the two rank every pair
+    identically and differ only in spacing. The root is a monotone transform, which is
+    why registering both is not redundant only for the linear consumers: the ranker and
+    the correlations see one metric, the ordinary least squares cells of module 9 see
+    two, since a linear model in sqrt(JSD) is not a linear model in JSD. The unrooted
+    form compresses the near-zero region the rooted one expands, so it carries less
+    resolution where the observed values bunch, which is the reason js_distance and not
+    this one is the default.
+    """
+    if q is None:
+        return 100.0 * (1.0 - _profile_jsd_matrix(p))
+    return 100.0 * (1.0 - _cross_jsd_bits(p, q))
+
+
+def _pair_inputs(p: np.ndarray, q: np.ndarray | None) -> tuple[np.ndarray, np.ndarray]:
+    """The (P, Q) a cross-form kernel operates on. Every registered metric is symmetric
+    and needs no separate square path, so f(P) is exactly f(P, P)."""
+    return (p, p) if q is None else (p, q)
+
+
+def _cosine_rows(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """
+    Cosine of every row of ``a`` against every row of ``b``, clipped to [-1, 1].
+
+    A row of length 0 has no direction, so its cosine is NaN rather than 0. That happens
+    only for a degenerate profile, an all-zero row, or a centred row that was uniform
+    across bins, and NaN is the honest reading of "this profile has no shape to compare".
+    """
+    norm_a = np.linalg.norm(a, axis=1)
+    norm_b = np.linalg.norm(b, axis=1)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        cosine = (a @ b.T) / np.outer(norm_a, norm_b)
+    return np.where(np.isfinite(cosine), np.clip(cosine, -1.0, 1.0), np.nan)
+
+
+def _cosine_similarity(p: np.ndarray, q: np.ndarray | None = None) -> np.ndarray:
+    """
+    Cosine agreement between layer profiles, 100 * cos(p, q).
+
+    Profiles are non-negative, so this lives in [0, 100]: 100 for identical shapes, 0 for
+    profiles on disjoint layers. Unlike the divergence family it is scale-free by
+    construction rather than by normalization, and it weights the bins a profile actually
+    occupies, so two words agreeing on a few heavily loaded blocks score high even when
+    they disagree about the long tail of near-empty ones.
+    """
+    return 100.0 * _cosine_rows(*_pair_inputs(p, q))
+
+
+def _pearson_similarity(p: np.ndarray, q: np.ndarray | None = None) -> np.ndarray:
+    """
+    Pearson correlation between layer profiles across bins, on a 100 * r scale.
+
+    Centring each profile by its own mean is what separates this from cosine: the shared
+    baseline every word carries, the model's global expert density over depth, is removed
+    from both sides, so the metric reads the DEVIATION from that baseline. A pair can then
+    score negative, meaning one word is heavy where the other is light, which no member of
+    the divergence family can express. Identical profiles score 100, and a pair of
+    one-block spikes on different blocks scores below 0 rather than at it.
+
+    A profile that is exactly uniform over the bins has zero variance and no deviation to
+    correlate, so its row is NaN.
+    """
+    a, b = _pair_inputs(p, q)
+    return 100.0 * _cosine_rows(a - a.mean(axis=1, keepdims=True),
+                                b - b.mean(axis=1, keepdims=True))
+
+
+def _spearman_similarity(p: np.ndarray, q: np.ndarray | None = None) -> np.ndarray:
+    """
+    Spearman rank correlation between layer profiles across bins, on a 100 * rho scale.
+
+    The rank transform is applied WITHIN each profile, ranking that word's bins against
+    each other, and the correlation is then Pearson on those ranks. It answers "do these
+    two words order the blocks the same way", which is the weakest and most robust reading
+    in the registry: the magnitudes drop out entirely, so a pair agreeing on which blocks
+    are busiest scores high even when one word's distribution is far peakier than the
+    other's.
+
+    Ties are averaged, which matters here more than in most rank statistics. At a strict AP
+    threshold most bins of a small expert set are exactly 0, they all share one average
+    rank, and the correlation is then carried by the few occupied blocks. A profile whose
+    bins are all equal, including an all-zero row, has constant ranks and comes back NaN.
+    """
+    a, b = _pair_inputs(p, q)
+    rank_a = stats.rankdata(a, axis=1)
+    rank_b = rank_a if q is None else stats.rankdata(b, axis=1)
+    return 100.0 * _cosine_rows(rank_a - rank_a.mean(axis=1, keepdims=True),
+                                rank_b - rank_b.mean(axis=1, keepdims=True))
+
+
+def _hellinger_similarity(p: np.ndarray, q: np.ndarray | None = None) -> np.ndarray:
+    """
+    Hellinger agreement, 100 * (1 - H), with H = sqrt(1 - BC) and BC the Bhattacharyya
+    coefficient sum_k sqrt(p_k q_k).
+
+    A true metric on the simplex, bounded in [0, 1], finite on disjoint support, so it
+    shares the properties that made Jensen-Shannon the original choice. It differs in
+    where it puts its resolution: the square root inside the sum lifts the small bins, so
+    Hellinger is more sensitive than the divergence family to agreement in a profile's
+    THIN tail and less dominated by its mode. The whole matrix is one matrix product of
+    the square-rooted profiles, so it needs none of the blocking the mixture entropy does.
+    """
+    a, b = _pair_inputs(p, q)
+    bhattacharyya = np.clip(np.sqrt(a) @ np.sqrt(b).T, 0.0, 1.0)
+    return 100.0 * (1.0 - np.sqrt(1.0 - bhattacharyya))
+
+
+def _wasserstein_similarity(p: np.ndarray, q: np.ndarray | None = None) -> np.ndarray:
+    """
+    First Wasserstein (earth mover's) agreement over the bin axis, on a 0 to 100 scale.
+
+    W1 between two distributions on an evenly spaced axis is the L1 distance between their
+    cumulative distribution functions, sum_k |CDF_p(k) - CDF_q(k)| over the first K-1 bins.
+    Its maximum is K-1, all mass at the first bin against all mass at the last, so the
+    reported agreement is 100 * (1 - W1 / (K-1)).
+
+    This is the ONLY metric in the registry that reads bin ORDER, and that is the point of
+    including it. Every other measure is permutation invariant, so a word peaking at block
+    3 and a word peaking at block 4 are exactly as different to them as a word peaking at
+    block 27, which is the wrong reading of a depth axis. Wasserstein charges the distance
+    the mass has to travel, so near misses in depth score as near misses.
+
+    The consequence is that it is meaningful only on an axis whose adjacency is real, that
+    is on the BLOCK axis, where bin k+1 is one transformer block deeper than bin k. On the
+    flat layer axis, adjacent bins are different projection types of the SAME block, so the
+    transport cost it measures is largely sublayer alternation rather than depth. Callers
+    on the flat axis get a number, and it is not a depth statement.
+
+    The CDF difference is the only term needing a pairwise tensor, so it is accumulated in
+    row blocks, mirroring _profile_jsd_matrix.
+    """
+    a, b = _pair_inputs(p, q)
+    n_bins = a.shape[1]
+    if n_bins < 2:
+        return np.full((len(a), len(b)), 100.0)
+
+    # The last cumulative value is 1 for every normalized profile, so it contributes
+    # nothing and is dropped rather than summed as a column of zeros.
+    cdf_a = np.cumsum(a, axis=1)[:, :-1]
+    cdf_b = np.cumsum(b, axis=1)[:, :-1]
+    distance = np.empty((len(a), len(b)), dtype=np.float64)
+    for start in range(0, len(a), _JSD_BLOCK_ROWS):
+        stop = min(start + _JSD_BLOCK_ROWS, len(a))
+        distance[start:stop] = np.abs(cdf_a[start:stop, None, :] - cdf_b[None, :, :]).sum(axis=-1)
+    return 100.0 * (1.0 - np.clip(distance / (n_bins - 1), 0.0, 1.0))
+
+
 # Registry of profile agreement measures. Contract: f(P, Q=None) -> (n, m) agreement
 # matrix over row-normalized profiles, square when Q is None, ORIENTED so that higher
 # always means more similar. Orientation is the entire contract, scale deliberately is
 # not, because every consumer standardizes or ranks the feature and forcing a shared
-# scale would manufacture false comparability. Adding a metric later (wasserstein,
-# cosine, pearson, spearman, js_divergence, hellinger) means adding one entry here and
-# listing its name where module 9 builds its grid. Wasserstein is the only planned
-# metric that reads bin ORDER, so it is only meaningful on the block axis, where
-# adjacent bins are adjacent depths.
+# scale would manufacture false comparability. Adding a metric means adding one entry
+# here, a display label below, and its name in ACTIVE_PROFILE_METRICS.
+#
+# The seven entries are three families. The divergence family (js_distance, js_divergence,
+# hellinger) compares the profiles as distributions and is bounded, symmetric and finite on
+# disjoint support. The correlation family (cosine, pearson, spearman) compares them as
+# vectors over bins, and the latter two can go negative because they read deviation from a
+# baseline rather than overlap. Wasserstein stands alone as the only metric reading bin
+# ORDER, so it is meaningful only on the block axis, where adjacent bins are adjacent
+# depths.
 PROFILE_METRICS = {
     "js_distance": _js_distance_similarity,
+    "wasserstein": _wasserstein_similarity,
+    "cosine": _cosine_similarity,
+    "pearson": _pearson_similarity,
+    "spearman": _spearman_similarity,
+    "js_divergence": _js_divergence_similarity,
+    "hellinger": _hellinger_similarity,
 }
 
 DEFAULT_PROFILE_METRIC = "js_distance"
+
+# Metrics computed by every consumer of the registry: modules 3 and 5 draw one figure per
+# entry, module 9 instantiates every cell of both studies on each. Narrow this list to make
+# a verification run cheap, restore it before a real sweep. DEFAULT_PROFILE_METRIC stays
+# FIRST, because it is the metric the cross-scope summary rows and the legacy column names
+# report, and a reader comparing against an older results tree should find it in place.
+ACTIVE_PROFILE_METRICS = list(PROFILE_METRICS)
+
+# Short display names for figure titles and axis labels. Kept out of PROFILE_METRICS so the
+# registry stays a plain name-to-callable mapping its contract check can iterate.
+PROFILE_METRIC_LABELS = {
+    "js_distance": "Jensen-Shannon distance",
+    "wasserstein": "Wasserstein",
+    "cosine": "Cosine",
+    "pearson": "Pearson",
+    "spearman": "Spearman",
+    "js_divergence": "Jensen-Shannon divergence",
+    "hellinger": "Hellinger",
+}
+
+# Metrics whose agreement can be negative, because they measure deviation from a per-profile
+# baseline rather than overlap. A figure drawn on one of these needs a signed axis and a
+# reference line at 0, and reading its value as a percentage would be wrong.
+SIGNED_PROFILE_METRICS = {"pearson", "spearman"}
+
+
+def profile_metric_label(metric: str) -> str:
+    """Display name for a registered metric, falling back to the raw key."""
+    return PROFILE_METRIC_LABELS.get(metric, metric)
+
+
+def profile_metric_value_label(metric: str) -> str:
+    """
+    Axis label for a metric's raw agreement value.
+
+    Signed metrics are reported as a correlation times 100 rather than as a percentage,
+    since "-42%" of an agreement is not a quantity anyone can read.
+    """
+    if metric in SIGNED_PROFILE_METRICS:
+        return f"{profile_metric_label(metric)} correlation x 100"
+    return "Agreement % (100 = identical profiles)"
 
 
 def count_matched_z(values: np.ndarray, coords: np.ndarray,
@@ -743,25 +946,57 @@ def layer_profile_matrices(expert_allocation_df: pd.DataFrame, items: list, *,
     metric names a PROFILE_METRICS entry, js_distance by default, and only the
     similarity and z outputs depend on it, jsd_bits always reports the Jensen-Shannon
     divergence.
+
+    For several metrics at once call layer_profile_metric_matrices, which this delegates
+    to: it shares the profile build and the Jensen-Shannon tensor across the metrics
+    instead of repeating them per call.
     """
+    return layer_profile_metric_matrices(expert_allocation_df, items, [metric],
+                                         null_neighbors=null_neighbors)[metric]
+
+
+def layer_profile_metric_matrices(expert_allocation_df: pd.DataFrame, items: list,
+                                  metrics: list = None, *,
+                                  null_neighbors: int = None) -> dict:
+    """
+    layer_profile_matrices for several metrics at once, as {metric: (jsd_bits,
+    similarity, z)}. Defaults to ACTIVE_PROFILE_METRICS.
+
+    Every metric reads the SAME row-normalized profiles over the same item list, so the
+    profile build and the Jensen-Shannon tensor are computed once here rather than once
+    per metric. Only the agreement matrix and its count-matched null are per metric, and
+    the null is metric-agnostic by construction, so a newly registered metric gets its z
+    with no null-side change at all.
+
+    jsd_bits is the same array for every metric, since it always reports the
+    Jensen-Shannon divergence regardless of which agreement was asked for. Each metric
+    gets its own copy so a caller mutating one cannot reach into another's.
+
+    See layer_profile_matrices for what the three arrays mean, why z rather than the raw
+    similarity is the reading to trust, and why every caller must pass the same item list.
+    """
+    metrics = list(ACTIVE_PROFILE_METRICS if metrics is None else metrics)
     prob, counts = _layer_profiles(expert_allocation_df, items)
     n = len(items)
     usable = np.isfinite(counts) & (counts >= MIN_PROFILE_EXPERTS) & np.isfinite(prob).all(axis=1)
 
-    jsd = np.full((n, n), np.nan)
-    similarity = np.full((n, n), np.nan)
-    z = np.full((n, n), np.nan)
     if usable.sum() < 2:
-        return jsd, similarity, z
+        return {metric: (np.full((n, n), np.nan), np.full((n, n), np.nan),
+                         np.full((n, n), np.nan)) for metric in metrics}
 
     idx = np.flatnonzero(usable)
     block = np.ix_(idx, idx)
+    jsd = np.full((n, n), np.nan)
     jsd[block] = _profile_jsd_matrix(prob[idx])
-    similarity[block] = PROFILE_METRICS[metric](prob[idx])
 
-    z = _empirical_pair_null(similarity, counts, null_neighbors)
-    np.fill_diagonal(z, np.nan)
-    return jsd, similarity, z
+    out = {}
+    for metric in metrics:
+        similarity = np.full((n, n), np.nan)
+        similarity[block] = PROFILE_METRICS[metric](prob[idx])
+        z = _empirical_pair_null(similarity, counts, null_neighbors)
+        np.fill_diagonal(z, np.nan)
+        out[metric] = (jsd.copy(), similarity, z)
+    return out
 
 
 def pair_layer_profile_vectors(expert_allocation_df: pd.DataFrame, items: list,

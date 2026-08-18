@@ -36,7 +36,7 @@ REFERENCE_AP = min(AP_THRESHOLDS)
 # producing the results anyone reads. Restore to the full set before a real sweep. Module 9
 # is self-sufficient, it computes its own features from the expert frame rather than reading
 # module 3's table, so it can be enabled alone.
-ENABLED_MODULES = {1, 2, 3, 4, 5, 6, 7, 8, 9}
+ENABLED_MODULES = {3, 5, 9}
 
 # Which columns each module's cross-scope comparison plot draws. Each module owns its own
 # list so the metric names stay next to the code that computes them.

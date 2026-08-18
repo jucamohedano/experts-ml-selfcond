@@ -106,26 +106,47 @@ The distinction being drawn is the one subchapter 5.1 cannot see. $J_{cd}$ and $
 
 **The layer axis.** Both matrices are built on the BLOCK-AGGREGATED axis, sublayers summed within each transformer block, giving 28 bins on Qwen3 and 12 on GPT-2 rather than the flat 196 and 48. A bin is then a transformer block and nothing else, so $S(c,d)$ reads as agreement in depth allocation, whereas on the flat axis a bin is a block crossed with a sublayer and the quantity confounded allocating deep with allocating to a particular projection type. The block axis also carries roughly one seventh of the flat axis's plug-in entropy bias, which scales as $1/n$ and therefore contaminates small expert sets most, which is the confound $z(c,d)$ exists to remove. This is not a claim about ordering. The Jensen-Shannon divergence sums over bins independently and never touches bin adjacency, so it is permutation invariant and neither axis measures depth in an ordered sense, and what changed is what a bin MEANS together with how noisily it is estimated. Every `sublayers/` scope is numerically unchanged, because aggregating a single-sublayer frame is an identity relabel. Subchapter 5.1's set matrices are untouched, since they read neuron identity rather than a layer distribution, and both matrix files keep their existing names.
 
-**Generated data structures.** Two further square CSV matrices and their heatmaps, sharing the layout, colormap, category-colored labels and white boundary lines described above.
+**One pair of matrices per registered metric.** $S(c,d)$ is not one quantity but a family, defined by whichever entry of the profile metric registry is asked for. Module 3, subchapter 3.3 lists the seven registered measures, gives their formulas, and explains the three families they fall into and why their raw scales are deliberately not comparable. This module computes every active one over the same profiles, built once, so each gets its own agreement matrix, its own count-matched $z$ matrix, and a heatmap for each.
 
-#### 4. layer_profile_matrix.csv
+Note that `wasserstein` is the only registered measure that reads bin ORDER, which is exactly why the block axis above is what makes it meaningful. On the flat layer axis the transport cost it charges would be mostly sublayer alternation rather than depth.
+
+**Generated data structures.** Two further square CSV matrices per registered metric and their heatmaps, sharing the layout, colormap, category-colored labels and white boundary lines described above. `<metric>` below is a registry key such as `js_distance` or `wasserstein`.
+
+#### 4. layer_profile_&lt;metric&gt;_matrix.csv
 
 | Column | Type | Symbol | Description |
 |--------|------|--------|-------------|
 | (index) | string | $c$ | Concept label for the row. |
-| `<concept>` (one column per concept) | float | $S(c,d)$ | Layer-profile similarity as a percentage, diagonal 100, empty for words below 2 experts. |
+| `<concept>` (one column per concept) | float | $S(c,d)$ | Layer-profile agreement under that metric, diagonal 100, empty for words below 2 experts. |
 
-#### 5. layer_profile_z_matrix.csv
+#### 5. layer_profile_&lt;metric&gt;_z_matrix.csv
 
 | Column | Type | Symbol | Description |
 |--------|------|--------|-------------|
 | (index) | string | $c$ | Concept label for the row. |
 | `<concept>` (one column per concept) | float | $z(c,d)$ | Standard deviations by which $S(c,d)$ exceeds the count-matched null, diagonal empty. |
 
-- `layer_profile_heatmap.png`, encodes the values $S(c,d)$ of `layer_profile_matrix.csv`.
-- `layer_profile_z_heatmap.png`, encodes the values $z(c,d)$ of `layer_profile_z_matrix.csv`.
+- `layer_profile_<metric>_heatmap.png`, encodes the values $S(c,d)$ of the matching matrix.
+- `layer_profile_<metric>_z_heatmap.png`, encodes the values $z(c,d)$ of the matching matrix.
 
-These two matrices are the intended source for any downstream model consuming pairwise expert features, since together with `jaccard_matrix.csv` they cover both readings of pairwise agreement, shared identity and shared depth allocation, over the same concept ordering.
+Every layer-profile artifact carries its metric in the name, the default included, so the folder reads as one family rather than as a privileged file plus six additions. Results trees written before the multi-metric extension name the default metric's pair `layer_profile_matrix.csv` and `layer_profile_z_matrix.csv`, and those files are the same quantity as today's `layer_profile_js_distance_matrix.csv` and `layer_profile_js_distance_z_matrix.csv`, verified equal at a maximum absolute difference of exactly 0.0 on all four GPT-2 sublayer scopes at AP 0.5.
+
+#### 6. profile_metric_comparison.csv
+
+One row per registered metric, reducing its two matrices to the two questions this module can answer about them, so the metrics can be compared inside a scope the way `sublayer_comparison.csv` compares scopes inside a module.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `metric`, `metric_label` | string | Registry key and its display name. |
+| `within_pct`, `across_pct`, `contrast_pct` | float | Mean agreement over within-category pairs, over across-category pairs, and their difference. Comparable across scopes for one metric, NOT across metrics, since the registry fixes orientation and not scale. |
+| `category_roc_auc` | float | Category alignment ROC-AUC of the agreement matrix. Rank based, so it IS comparable across metrics. |
+| `category_roc_auc_z` | float | The same statistic on the $z$ matrix. |
+| `human_rho` | float | Mean over categories of the subchapter 5.3 correlation against the human ratings. |
+| `human_rho_z` | float | The same, on the $z$ matrix. |
+
+The two readings sit side by side on purpose, and module 8 already showed they can disagree, since the sublayer best at recovering the category partition was not the one best at reproducing human similarity. `category_roc_auc` asks whether the metric separates within-category pairs from across-category ones, a partition question with a large contrast behind it. `human_rho` asks whether it orders *within-category* pairs the way people do, which is the harder and more externally valid test. The accompanying `profile_metric_comparison.png` draws the same four columns, with the default metric in the figure's reference color.
+
+These matrices are the intended source for any downstream model consuming pairwise expert features, since together with `jaccard_matrix.csv` they cover both readings of pairwise agreement, shared identity and shared depth allocation, over the same concept ordering.
 
 A note on coverage. Words holding fewer than 2 experts have no usable layer profile and are empty throughout both matrices. When the cross-scope summary reduces a matrix to its category-alignment ROC-AUC, such words are dropped as whole concepts rather than as scattered pairs, because the alignment statistic derives its same-category mask from the concept list and permutes labels across concepts, both of which require the pair pool to remain a complete triangle over one consistent concept set.
 
@@ -161,7 +182,9 @@ The genuine zeros are kept, since two words that both hold experts and share non
 
 **Two pooled figures, both reported.** `POOLED` is the rank correlation over all 2,391 pairs at once, which lets between-category differences in mean similarity contribute. `POOLED_MEAN` is the unweighted mean of the eight per-category values, which does not. The second is the conservative reading and is the one carried into `sublayer_comparison.csv`.
 
-**Generated data structures.** `human_similarity_validation.csv`, one row per (metric, category) plus the two pooled rows per metric, with columns `metric`, `metric_label`, `category`, `coefficient`, `test`, `n_pairs`, `rho`, `mantel_p`, `noise_ceiling`, `rho_over_ceiling`. The `coefficient` and `test` columns state `spearman` and `mantel` explicitly rather than leaving `rho` to be guessed at. The column keeps the bare name `rho` because `scripts/tests/check_human_validation.py` reads it.
+**Which matrices are validated.** The Jaccard index, plus the agreement and the $z$ matrix of every registered profile metric, so the list grows with the registry rather than being written out. At the seven metrics active today that is 15 series against the 3 of the single-metric era. The cost is linear in the list, one Mantel permutation sweep per series per category, which is roughly a second per series per scope on the Richie-HSJ item set. Narrowing `ACTIVE_PROFILE_METRICS` in `utils/helpers.py` narrows this along with everything else.
+
+**Generated data structures.** `human_similarity_validation.csv`, one row per (metric, category) plus the two pooled rows per metric, with columns `metric`, `metric_label`, `category`, `coefficient`, `test`, `n_pairs`, `rho`, `mantel_p`, `noise_ceiling`, `rho_over_ceiling`. The `metric` key of a layer-profile row is the matrix name, such as `layer_profile_wasserstein` or `layer_profile_wasserstein_z`. The `coefficient` and `test` columns state `spearman` and `mantel` explicitly rather than leaving `rho` to be guessed at. The column keeps the bare name `rho` because `scripts/tests/check_human_validation.py` reads it.
 
 Two figures.
 
@@ -169,7 +192,7 @@ Two figures.
 
 The trend drawn on each panel is a **LOWESS smooth** (`frac = 0.4`, matching `plot_helpers.plot_hexbin_with_trends` so the two scatter families in the pipeline smooth at the same scale), not a least-squares line. A straight fit is a Pearson-shaped object whose slope tracks the linear association, so placing one beside a Spearman coefficient invites reading the line as the illustration of the number when the two can disagree, professions at AP 0.6 being Pearson 0.171 against Spearman 0.105. The smooth shows the monotone shape the coefficient actually measures, and it exposes structure a line hides, notably furniture saturating above a Jaccard of about 10 and vegetables staying flat before rising only at its top end.
 
-`human_similarity_by_category.png`, grouped bars, one x group per category and one bar per metric. The height is $\rho_k$ divided by that category's noise ceiling, not raw $\rho_k$, so a category whose raters disagreed with each other is not charged for the model's inability to predict their noise. A bar reaching 1.0 would mean the metric agrees with the raters as well as the raters agree with each other. A `*` marks each bar whose Mantel p clears 0.05. The stars are uncorrected across the 24 tests a scope runs (8 categories by 3 metrics), so a single starred category is weaker evidence than the mark suggests. The two pooled rows are excluded from this figure.
+`human_similarity_by_category.png`, grouped bars, one x group per category and one bar per metric. The height is $\rho_k$ divided by that category's noise ceiling, not raw $\rho_k$, so a category whose raters disagreed with each other is not charged for the model's inability to predict their noise. A bar reaching 1.0 would mean the metric agrees with the raters as well as the raters agree with each other. A `*` marks each bar whose Mantel p clears 0.05. The stars are uncorrected across the tests a scope runs, 8 categories by one series per validated matrix, which is the Jaccard index plus an agreement and a $z$ matrix for each registered metric, so 120 tests at the seven metrics active today against 24 when only the default was registered. A single starred category is therefore weaker evidence than the mark suggests, and more so now than before. The two pooled rows are excluded from this figure.
 
 ## Results
 
@@ -255,6 +278,30 @@ At lenient thresholds the Jaccard index is the far better category detector, 0.9
 **The ordering reverses at strict thresholds, in both architectures.** Jaccard's AUC collapses to 0.506 (GPT-2) and 0.546 (Qwen3) by AP=0.9, both essentially chance: the expert sets are so thinned that shared-neuron identity carries almost no category information, which is the mirror image of the ratio table above, where the surviving relative effect rests on a handful of pairs sharing anything at all. Layer-profile agreement is nearly flat over the same range, 0.618 to 0.566 in GPT-2 and 0.716 to 0.685 in Qwen3, and its $z$ form is flatter still. The crossover happens earlier in GPT-2, at AP 0.8 (0.594 profile against 0.571 Jaccard), than in Qwen3, at AP 0.9 (0.685 against 0.546), consistent with GPT-2's expert sets thinning faster at every threshold.
 
 The interpretation is that depth allocation is the more robust carrier of category structure. Two same-category concepts continue to place their experts at similar depths even once the AP filter has stripped away nearly every shared neuron, so the categorical organization of the expert space survives in the layer profile after it has effectively vanished from set identity.
+
+### Metric comparison (subchapter 5.2)
+
+> **Provisional.** One scope of one architecture, GPT-2 whole model at AP 0.5. The full sweep on both architectures is gated and has not run, so read the ordering rather than the levels.
+
+| Metric | category AUC | category AUC, $z$ | human $\rho$ | human $\rho$, $z$ |
+|---|---|---|---|---|
+| `js_distance` | 0.6055 | 0.5909 | 0.0708 | 0.0660 |
+| `wasserstein` | 0.5768 | 0.5680 | 0.0322 | 0.0331 |
+| `cosine` | 0.6010 | 0.5840 | 0.0758 | 0.0711 |
+| `pearson` | 0.5715 | 0.5687 | 0.0605 | 0.0656 |
+| `spearman` | 0.5415 | 0.5466 | 0.0221 | 0.0418 |
+| `js_divergence` | 0.6055 | 0.5890 | 0.0708 | 0.0675 |
+| `hellinger` | 0.6055 | 0.5909 | 0.0706 | 0.0663 |
+
+Four readings.
+
+First, and as a correctness check rather than a finding, `js_distance` and `js_divergence` agree to six decimal places on `category_roc_auc` and exactly on `human_rho`. They must, since one is a monotone transform of the other and both statistics are rank based, so this is the arithmetic confirming itself. Their $z$ columns differ slightly, 0.5909 against 0.5890, which is also correct: the count-matched null is computed on the raw scale, so a monotone transform changes the local standard deviation it divides by.
+
+Second, `hellinger` joins them at 0.6055, matching `js_distance` to four decimal places on both AUC columns despite being a different function. The divergence family is close to interchangeable on this target, so registering all three buys resolution only for the linear models of module 9.
+
+Third, the spread across the whole registry is narrow, 0.5415 to 0.6055 on category AUC, and every metric sits far below the Jaccard index's 0.9343 on the same scope. The conclusion of subchapter 5.2 is a property of the layer profile rather than of any particular way of comparing profiles.
+
+Fourth, the two orderings do not agree, which is the reason both columns are reported. `cosine` is second on category AUC at 0.6010 but first on human agreement at 0.0758, ahead of `js_distance`. `wasserstein` is second worst on category AUC and worst on human agreement, so the one measure that reads depth ORDER gains nothing here, and the natural reading is that what distinguishes two concepts' profiles is which blocks they occupy rather than how far apart those blocks are. `pearson` and `spearman` are weakest on the partition question, 0.5715 and 0.5415, which matches module 3's finding that removing the global density baseline removes most of what related words share.
 
 That the raw and $z$ columns track each other so closely, never differing by more than 0.03, is itself a useful check. It says the categorical signal in the layer profile is not an artifact of expert-set size, since conditioning on size leaves it intact. At AP=0.8 and 0.9 the $z$ form is in fact slightly the stronger of the two, which is consistent with size noise diluting the raw reading precisely where expert sets are smallest.
 
