@@ -251,3 +251,63 @@ python run_pipeline.py \
 | cot-ap-0.7 | 11 | 0 | +0.403 | +1.381 | 0.007 (0.013) | -0.006 (0.019) |
 | cot-ap-0.8 | 9 | 0 | +0.321 | +1.030 | 0.006 (0.013) | -0.004 (0.018) |
 | cot-ap-0.9 | 4 | 0 | -0.164 | +1.278 | 0.000 (0.017) | 0.012 (0.023) |
+
+
+---
+
+## Voxel-Normalized Results
+
+All results below use **per-voxel normalized** brain RDMs with the original grid shape `[2, 10, 5]` (87 regions). Each voxel contributes equally to the representational geometry.
+
+### Table 5: RSA Statistics - Attention Output Projections (`attn.c_proj`) with Voxel Normalization
+
+| Condition | Sig (Raw) | Sig (FDR) | Mean d | Max d | Mean Expert (SD) | Mean Full (SD) |
+|---|---|---|---|---|---|---|
+| cot-ap-0.5 | 13 | 0 | +0.290 | +1.524 | 0.024 (0.025) | 0.023 (0.024) |
+| cot-ap-0.6 | 14 | 0 | -0.163 | +1.500 | 0.022 (0.022) | 0.023 (0.024) |
+| cot-ap-0.7 | 36 | 13 | -0.551 | +2.254 | 0.016 (0.016) | 0.022 (0.023) |
+| cot-ap-0.8 | 32 | 0 | -0.545 | +1.821 | 0.012 (0.015) | 0.019 (0.020) |
+| cot-ap-0.9 | 45 | 22 | -0.786 | +2.506 | -0.002 (0.020) | 0.019 (0.020) |
+
+### Table 6: RSA Statistics - MLP First Layers (`mlp.c_fc`) with Voxel Normalization
+
+| Condition | Sig (Raw) | Sig (FDR) | Mean d | Max d | Mean Expert (SD) | Mean Full (SD) |
+|---|---|---|---|---|---|---|
+| cot-ap-0.5 | 7 | 0 | +0.088 | +1.430 | 0.024 (0.027) | 0.024 (0.028) |
+| cot-ap-0.6 | 12 | 0 | -0.010 | +1.297 | 0.024 (0.026) | 0.024 (0.028) |
+| cot-ap-0.7 | 17 | 0 | -0.214 | +1.448 | 0.022 (0.024) | 0.024 (0.028) |
+| cot-ap-0.8 | 25 | 5 | -0.461 | +1.838 | 0.018 (0.020) | 0.024 (0.028) |
+| cot-ap-0.9 | 33 | 16 | -0.642 | +2.231 | 0.011 (0.012) | 0.024 (0.028) |
+
+### Table 7: RSA Statistics - Attention Input Projections (`attn.c_attn`) with Voxel Normalization
+
+| Condition | Sig (Raw) | Sig (FDR) | Mean d | Max d | Mean Expert (SD) | Mean Full (SD) |
+|---|---|---|---|---|---|---|
+| cot-ap-0.5 | 6 | 0 | -0.148 | +1.031 | 0.023 (0.026) | 0.024 (0.027) |
+| cot-ap-0.6 | 17 | 1 | -0.365 | +1.952 | 0.022 (0.023) | 0.024 (0.027) |
+| cot-ap-0.7 | 28 | 1 | -0.522 | +1.864 | 0.019 (0.020) | 0.024 (0.027) |
+| cot-ap-0.8 | 33 | 17 | -0.577 | +1.967 | 0.015 (0.016) | 0.024 (0.027) |
+| cot-ap-0.9 | 42 | 28 | -0.690 | +2.041 | 0.006 (0.007) | 0.024 (0.027) |
+
+### Table 8: RSA Statistics - MLP Output Projections (`mlp.c_proj`) with Voxel Normalization
+
+| Condition | Sig (Raw) | Sig (FDR) | Mean d | Max d | Mean Expert (SD) | Mean Full (SD) |
+|---|---|---|---|---|---|---|
+| cot-ap-0.5 | 17 | 0 | -0.419 | +1.546 | 0.015 (0.015) | 0.019 (0.021) |
+| cot-ap-0.6 | 21 | 4 | -0.523 | +1.800 | 0.012 (0.013) | 0.019 (0.021) |
+| cot-ap-0.7 | 32 | 11 | -0.653 | +1.839 | 0.007 (0.009) | 0.017 (0.020) |
+| cot-ap-0.8 | 31 | 2 | -0.644 | +1.857 | 0.007 (0.010) | 0.015 (0.018) |
+| cot-ap-0.9 | 8 | 0 | -0.186 | +1.389 | 0.011 (0.020) | 0.013 (0.016) |
+
+### Key Findings: Voxel Normalization Reverses Results
+
+Comparing voxel-normalized results to the original (non-normalized) analysis reveals a **fundamental reversal** of the main effect:
+
+| Layer Component | Original Finding | Voxel-Normalized Finding |
+|-----------------|------------------|--------------------------|
+| `mlp.c_proj` | Expert neurons outperform (Mean d = +0.627 at AP=0.6) | Dense embeddings outperform (Mean d = -0.523) |
+| `attn.c_proj` | Mixed (Mean d = +0.326 at AP=0.6) | Reverses to negative (Mean d = -0.163) |
+| `mlp.c_fc` | Expert neurons outperform (Mean d = +0.443 at AP=0.5) | Near-zero/negative (Mean d = -0.010 at AP=0.6) |
+| `attn.c_attn` | Mixed to negative | Consistently negative across all thresholds |
+
+**Conclusion:** Per-voxel normalization eliminates or reverses the expert neuron advantage observed in the original analysis. This suggests that voxels with larger response variance were driving the original brain alignment signal, and the expert neuron hypothesis is **not stable** under this methodological control.

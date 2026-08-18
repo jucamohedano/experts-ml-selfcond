@@ -52,9 +52,17 @@ def compute_brain_rdms(
 
         region_acts = word_activations[:, voxel_indices]  # [60, n_voxels]
 
-        # 1 - Pearson correlation across words
+        # ----> PER-VOXEL NORMALIZATION (z-score across words for each voxel) <----
+        voxel_mean = region_acts.mean(axis=0, keepdims=True)
+        voxel_std  = region_acts.std(axis=0, keepdims=True)
+        # Avoid division by zero for constant voxels
+        voxel_std[voxel_std == 0] = 1.0
+        region_acts_norm = (region_acts - voxel_mean) / voxel_std
+        # -------------------------------------------------------------------------
+
+        # 1 - Pearson correlation across words (now on voxel-normalized data)
         # np.corrcoef over rows yields [60, 60]
-        rdm = 1.0 - np.corrcoef(region_acts)
+        rdm = 1.0 - np.corrcoef(region_acts_norm)
         brain_rdms[region_id] = rdm.astype(np.float32)
 
     return brain_rdms
