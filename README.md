@@ -139,7 +139,7 @@ python run_pipeline.py task=steering_validation
 
 For full details, see the final project report: [JuanCamachoMohedano-257536-Project-Experts.pdf](my_docs/JuanCamachoMohedano-257536-Project-Experts.pdf).
 
-> **Robustness Check (see branch `fix/voxel-normalization`):** A per-voxel normalization control was applied to the brain RDM computation ([`agent/plan.md`](agent/plan.md), [`my_docs/voxel_normalization_analysis.md`](my_docs/voxel_normalization_analysis.md)). This **reverses** the main expert neuron advantage (e.g., `mlp.c_proj` at AP ≥ 0.6 drops from $d=+0.627$ to $d=-0.523$), indicating that high-variance voxels were driving the original brain alignment signal. The expert neuron hypothesis is sensitive to this methodological choice.
+> **Robustness Check (see branch `fix/voxel-normalization`):** A per-voxel normalization control was applied to the brain RDM computation ([`my_docs/voxel_normalization_analysis.md`](my_docs/voxel_normalization_analysis.md)). This **reverses** the main expert neuron advantage (e.g., `mlp.c_proj` at AP ≥ 0.6 drops from $d=+0.627$ to $d=-0.523$), indicating that high-variance voxels were driving the original brain alignment signal. The expert neuron hypothesis is sensitive to this methodological choice.
 
 ## Results Archive
 
