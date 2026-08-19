@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 from scipy import sparse, stats
 from scipy.spatial import cKDTree
+from scipy.spatial.distance import cdist
 from scipy.special import xlogy
 
 log = logging.getLogger(__name__)
@@ -562,27 +563,43 @@ def _jsd_to_similarity(jsd: np.ndarray) -> np.ndarray:
     return 100.0 * (1.0 - np.sqrt(jsd))
 
 
-def _cross_jsd_bits(p: np.ndarray, q: np.ndarray) -> np.ndarray:
-    """Jensen-Shannon divergence in bits between every row of p and every row of q,
-    as an (n, m) array. The pairwise mixture entropy is accumulated in row blocks,
-    mirroring _profile_jsd_matrix, so no (n, m, K) tensor is materialized at once."""
-    entropy_p = _entropy_bits(p)
-    entropy_q = _entropy_bits(q)
-    jsd = np.empty((len(p), len(q)), dtype=np.float64)
-    for start in range(0, len(p), _JSD_BLOCK_ROWS):
-        stop = min(start + _JSD_BLOCK_ROWS, len(p))
-        mixture = 0.5 * (p[start:stop, None, :] + q[None, :, :])
-        jsd[start:stop] = _entropy_bits(mixture)
-    jsd -= 0.5 * (entropy_p[:, None] + entropy_q[None, :])
-    return np.clip(jsd, 0.0, 1.0)
+# scipy.spatial.distance.cdist does not forward a `base` argument to its jensenshannon
+# kernel, so what it returns is the Jensen-Shannon distance in NATS. The divergence scales
+# with the log base, JSD_bits = JSD_nats / ln 2, and the distance is its square root, so
+# dividing by sqrt(ln 2) converts exactly.
+_SQRT_LN2 = np.sqrt(np.log(2.0))
+
+
+def _zero_mass(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """
+    Pairs where either profile carries no mass at all, as an (n, m) boolean mask.
+
+    An all-zero row is not a profile, it is the absence of one, and every kernel below
+    marks such pairs NaN rather than returning a number for them. That is the same
+    convention MIN_PROFILE_EXPERTS enforces upstream, restated at the kernel so a caller
+    reaching these functions directly cannot get a silently meaningless value. It matters
+    because the library functions disagree about the degenerate case: cdist's
+    jensenshannon divides by the row sum and returns inf, its braycurtis returns NaN, and
+    scipy.stats.wasserstein_distance raises outright.
+    """
+    return (a.sum(axis=1)[:, None] <= 0) | (b.sum(axis=1)[None, :] <= 0)
+
+
+def _js_distance_bits(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """Jensen-Shannon distance in bits, sqrt(JSD), from scipy's kernel."""
+    with np.errstate(divide="ignore", invalid="ignore"):
+        distance = cdist(a, b, metric="jensenshannon") / _SQRT_LN2
+    return np.where(_zero_mass(a, b), np.nan, distance)
 
 
 def _js_distance_similarity(p: np.ndarray, q: np.ndarray | None = None) -> np.ndarray:
     """The historical profile agreement, 100 * (1 - sqrt(JSD bits)). Square (n, n)
-    when q is None, cross (n, m) otherwise. Higher means more similar."""
-    if q is None:
-        return _jsd_to_similarity(_profile_jsd_matrix(p))
-    return _jsd_to_similarity(_cross_jsd_bits(p, q))
+    when q is None, cross (n, m) otherwise. Higher means more similar.
+
+    Delegates to scipy.spatial.distance.cdist's `jensenshannon` kernel rather than
+    computing the mixture entropy here, so the definition a reader has to trust is the
+    library's documented one."""
+    return 100.0 * (1.0 - _js_distance_bits(*_pair_inputs(p, q)))
 
 
 def _js_divergence_similarity(p: np.ndarray, q: np.ndarray | None = None) -> np.ndarray:
@@ -598,9 +615,7 @@ def _js_divergence_similarity(p: np.ndarray, q: np.ndarray | None = None) -> np.
     resolution where the observed values bunch, which is the reason js_distance and not
     this one is the default.
     """
-    if q is None:
-        return 100.0 * (1.0 - _profile_jsd_matrix(p))
-    return 100.0 * (1.0 - _cross_jsd_bits(p, q))
+    return 100.0 * (1.0 - _js_distance_bits(*_pair_inputs(p, q)) ** 2)
 
 
 def _pair_inputs(p: np.ndarray, q: np.ndarray | None) -> tuple[np.ndarray, np.ndarray]:
@@ -609,32 +624,33 @@ def _pair_inputs(p: np.ndarray, q: np.ndarray | None) -> tuple[np.ndarray, np.nd
     return (p, p) if q is None else (p, q)
 
 
-def _cosine_rows(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+def _correlation_agreement(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     """
-    Cosine of every row of ``a`` against every row of ``b``, clipped to [-1, 1].
-
-    A row of length 0 has no direction, so its cosine is NaN rather than 0. That happens
-    only for a degenerate profile, an all-zero row, or a centred row that was uniform
-    across bins, and NaN is the honest reading of "this profile has no shape to compare".
+    100 * Pearson r between every row of a and every row of b, via cdist's `correlation`
+    kernel, which returns 1 - r. A row of zero variance has no deviation to correlate and
+    comes back NaN from scipy, which is the reading this pipeline wants and states.
     """
-    norm_a = np.linalg.norm(a, axis=1)
-    norm_b = np.linalg.norm(b, axis=1)
     with np.errstate(divide="ignore", invalid="ignore"):
-        cosine = (a @ b.T) / np.outer(norm_a, norm_b)
-    return np.where(np.isfinite(cosine), np.clip(cosine, -1.0, 1.0), np.nan)
+        return 100.0 * (1.0 - cdist(a, b, metric="correlation"))
 
 
 def _cosine_similarity(p: np.ndarray, q: np.ndarray | None = None) -> np.ndarray:
     """
-    Cosine agreement between layer profiles, 100 * cos(p, q).
+    Cosine agreement between layer profiles, 100 * cos(p, q), via cdist's `cosine` kernel,
+    which returns 1 - cos.
 
     Profiles are non-negative, so this lives in [0, 100]: 100 for identical shapes, 0 for
     profiles on disjoint layers. Unlike the divergence family it is scale-free by
     construction rather than by normalization, and it weights the bins a profile actually
     occupies, so two words agreeing on a few heavily loaded blocks score high even when
     they disagree about the long tail of near-empty ones.
+
+    A row of length 0 has no direction, so its cosine is NaN rather than 0.
     """
-    return 100.0 * _cosine_rows(*_pair_inputs(p, q))
+    a, b = _pair_inputs(p, q)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        agreement = 100.0 * (1.0 - cdist(a, b, metric="cosine"))
+    return np.where(_zero_mass(a, b), np.nan, agreement)
 
 
 def _pearson_similarity(p: np.ndarray, q: np.ndarray | None = None) -> np.ndarray:
@@ -651,9 +667,7 @@ def _pearson_similarity(p: np.ndarray, q: np.ndarray | None = None) -> np.ndarra
     A profile that is exactly uniform over the bins has zero variance and no deviation to
     correlate, so its row is NaN.
     """
-    a, b = _pair_inputs(p, q)
-    return 100.0 * _cosine_rows(a - a.mean(axis=1, keepdims=True),
-                                b - b.mean(axis=1, keepdims=True))
+    return _correlation_agreement(*_pair_inputs(p, q))
 
 
 def _spearman_similarity(p: np.ndarray, q: np.ndarray | None = None) -> np.ndarray:
@@ -661,11 +675,11 @@ def _spearman_similarity(p: np.ndarray, q: np.ndarray | None = None) -> np.ndarr
     Spearman rank correlation between layer profiles across bins, on a 100 * rho scale.
 
     The rank transform is applied WITHIN each profile, ranking that word's bins against
-    each other, and the correlation is then Pearson on those ranks. It answers "do these
-    two words order the blocks the same way", which is the weakest and most robust reading
-    in the registry: the magnitudes drop out entirely, so a pair agreeing on which blocks
-    are busiest scores high even when one word's distribution is far peakier than the
-    other's.
+    each other, and the correlation is then Pearson on those ranks, which is what
+    scipy.stats.rankdata followed by cdist's `correlation` kernel computes. It answers "do
+    these two words order the blocks the same way", which is the weakest and most robust
+    reading in the registry: the magnitudes drop out entirely, so a pair agreeing on which
+    blocks are busiest scores high even when one word's distribution is far peakier.
 
     Ties are averaged, which matters here more than in most rank statistics. At a strict AP
     threshold most bins of a small expert set are exactly 0, they all share one average
@@ -673,10 +687,7 @@ def _spearman_similarity(p: np.ndarray, q: np.ndarray | None = None) -> np.ndarr
     bins are all equal, including an all-zero row, has constant ranks and comes back NaN.
     """
     a, b = _pair_inputs(p, q)
-    rank_a = stats.rankdata(a, axis=1)
-    rank_b = rank_a if q is None else stats.rankdata(b, axis=1)
-    return 100.0 * _cosine_rows(rank_a - rank_a.mean(axis=1, keepdims=True),
-                                rank_b - rank_b.mean(axis=1, keepdims=True))
+    return _correlation_agreement(stats.rankdata(a, axis=1), stats.rankdata(b, axis=1))
 
 
 def _hellinger_similarity(p: np.ndarray, q: np.ndarray | None = None) -> np.ndarray:
@@ -692,8 +703,55 @@ def _hellinger_similarity(p: np.ndarray, q: np.ndarray | None = None) -> np.ndar
     the square-rooted profiles, so it needs none of the blocking the mixture entropy does.
     """
     a, b = _pair_inputs(p, q)
-    bhattacharyya = np.clip(np.sqrt(a) @ np.sqrt(b).T, 0.0, 1.0)
-    return 100.0 * (1.0 - np.sqrt(1.0 - bhattacharyya))
+    # Computed as the Euclidean distance between the square-rooted profiles over sqrt(2),
+    # which is the Hellinger distance identically, rather than as sqrt(1 - BC). The two are
+    # equal on paper and NOT equal in floating point: for similar profiles BC approaches 1
+    # and the subtraction cancels catastrophically, which on a pair whose true distance is
+    # 2.16e-09 returned essentially 0, a 100 percent relative error, where this form errs by
+    # 7e-18. Similar pairs are exactly the regime the clustering of module 9's Study C reads.
+    distance = cdist(np.sqrt(a), np.sqrt(b), metric="euclidean") / np.sqrt(2.0)
+    return np.where(_zero_mass(a, b), np.nan, 100.0 * (1.0 - distance))
+
+
+def _profile_jaccard_similarity(p: np.ndarray, q: np.ndarray | None = None) -> np.ndarray:
+    """
+    Weighted Jaccard (Ruzicka) agreement between layer profiles, on a 0 to 100 scale.
+
+        J(p, q) = sum_k min(p_k, q_k) / sum_k max(p_k, q_k)
+
+    The continuous generalization of the Jaccard index used on expert SETS elsewhere in
+    this pipeline: replace each set by its indicator vector and this returns the ordinary
+    |A and B| / |A or B|. Registering it makes the pipeline's two geometries comparable
+    under ONE functional form, so "which neurons does a word recruit" and "where along
+    depth does it put them" can be contrasted without the measure itself changing between
+    them, which is the only reason the difference between them can be attributed to the
+    representation rather than to the statistic.
+
+    It also fills the one family the registry was missing. Profiles are normalized, so
+    sum_k max = 2 - sum_k min, and sum_k min(p, q) = 1 - TV with TV the total variation
+    distance. Hence
+
+        J = (1 - TV) / (1 + TV),
+
+    a strictly decreasing function of TV, which makes this the registry's only L1 or
+    total-variation member beside the divergence, correlation and transport families.
+    Being a monotone transform of TV, it ranks every pair exactly as TV does, so any
+    rank-based statistic reads the two identically while average linkage and the linear
+    consumers do not, since a mean of transformed distances is not the transform of a mean.
+
+    One minus this agreement is a true metric on the simplex, which is what makes it safe
+    to cluster on.
+    """
+    a, b = _pair_inputs(p, q)
+    # cdist's `braycurtis` kernel is sum|u - v| / sum|u + v|, which on two normalized
+    # non-negative profiles has denominator 2 and is therefore the total variation distance
+    # exactly. J = (1 - TV) / (1 + TV) follows from sum max = 2 - sum min and
+    # sum min = 1 - TV, so the weighted Jaccard comes straight out of a library kernel with
+    # no pairwise tensor to build.
+    with np.errstate(divide="ignore", invalid="ignore"):
+        total_variation = cdist(a, b, metric="braycurtis")
+        jaccard = (1.0 - total_variation) / (1.0 + total_variation)
+    return np.where(_zero_mass(a, b), np.nan, 100.0 * jaccard)
 
 
 def _wasserstein_similarity(p: np.ndarray, q: np.ndarray | None = None) -> np.ndarray:
@@ -725,14 +783,21 @@ def _wasserstein_similarity(p: np.ndarray, q: np.ndarray | None = None) -> np.nd
     if n_bins < 2:
         return np.full((len(a), len(b)), 100.0)
 
-    # The last cumulative value is 1 for every normalized profile, so it contributes
-    # nothing and is dropped rather than summed as a column of zeros.
-    cdf_a = np.cumsum(a, axis=1)[:, :-1]
-    cdf_b = np.cumsum(b, axis=1)[:, :-1]
-    distance = np.empty((len(a), len(b)), dtype=np.float64)
-    for start in range(0, len(a), _JSD_BLOCK_ROWS):
-        stop = min(start + _JSD_BLOCK_ROWS, len(a))
-        distance[start:stop] = np.abs(cdf_a[start:stop, None, :] - cdf_b[None, :, :]).sum(axis=-1)
+    # scipy.stats.wasserstein_distance takes support values and weights, so the bins are the
+    # support and each profile is the weighting over it. It is a per-pair call rather than a
+    # vectorised one, which costs about 0.6 seconds on a 205 by 205 matrix against 2
+    # milliseconds for the cumulative-difference form it replaces. That is affordable at one
+    # matrix per scope and buys a definition the reader can check against scipy's own docs.
+    # The two agree to 1.8e-14, so the previous hand-rolled version was correct.
+    bins = np.arange(n_bins, dtype=np.float64)
+    empty = _zero_mass(a, b)
+    distance = np.full((len(a), len(b)), np.nan)
+    for i, u in enumerate(a):
+        for j, v in enumerate(b):
+            # wasserstein_distance rejects a zero-sum weight vector outright, so the
+            # degenerate pairs are skipped and left NaN rather than guarded inside scipy.
+            if not empty[i, j]:
+                distance[i, j] = stats.wasserstein_distance(bins, bins, u, v)
     return 100.0 * (1.0 - np.clip(distance / (n_bins - 1), 0.0, 1.0))
 
 
@@ -743,13 +808,15 @@ def _wasserstein_similarity(p: np.ndarray, q: np.ndarray | None = None) -> np.nd
 # scale would manufacture false comparability. Adding a metric means adding one entry
 # here, a display label below, and its name in ACTIVE_PROFILE_METRICS.
 #
-# The seven entries are three families. The divergence family (js_distance, js_divergence,
+# The eight entries are four families. The divergence family (js_distance, js_divergence,
 # hellinger) compares the profiles as distributions and is bounded, symmetric and finite on
 # disjoint support. The correlation family (cosine, pearson, spearman) compares them as
 # vectors over bins, and the latter two can go negative because they read deviation from a
 # baseline rather than overlap. Wasserstein stands alone as the only metric reading bin
 # ORDER, so it is meaningful only on the block axis, where adjacent bins are adjacent
-# depths.
+# depths. profile_jaccard is the L1 family, a monotone transform of total variation, and is
+# the same functional form as the expert-SET Jaccard used elsewhere, which is what lets the
+# set geometry and the depth geometry be compared without changing the statistic.
 PROFILE_METRICS = {
     "js_distance": _js_distance_similarity,
     "wasserstein": _wasserstein_similarity,
@@ -758,6 +825,7 @@ PROFILE_METRICS = {
     "spearman": _spearman_similarity,
     "js_divergence": _js_divergence_similarity,
     "hellinger": _hellinger_similarity,
+    "profile_jaccard": _profile_jaccard_similarity,
 }
 
 DEFAULT_PROFILE_METRIC = "js_distance"
@@ -779,6 +847,7 @@ PROFILE_METRIC_LABELS = {
     "spearman": "Spearman",
     "js_divergence": "Jensen-Shannon divergence",
     "hellinger": "Hellinger",
+    "profile_jaccard": "Weighted Jaccard",
 }
 
 # Metrics whose agreement can be negative, because they measure deviation from a per-profile

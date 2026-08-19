@@ -124,7 +124,7 @@ MODEL_CONFIGS = {
 }
 
 # Select which configuration to run.
-ACTIVE_CONFIG = "qwen3_richie_hsj"
+ACTIVE_CONFIG = "gpt2_richie_hsj"
 
 if __name__ == "__main__":
     REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]

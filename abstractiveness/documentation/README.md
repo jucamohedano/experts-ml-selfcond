@@ -27,6 +27,7 @@ The outputs are written into one `AP_{threshold}` subfolder per AP threshold und
 - Module 6: dual category definitions with Jensen-Shannon divergence, comparing category-label prototypes to member-exemplar distributions.
 - Module 7: empirical cosine typicality, comparing concepts to global and per-layer category prototypes.
 - Module 8: expert set versus embedding semantics, a second-order RSA correlating the pooled expert-set Jaccard geometry against the concept-embedding geometry of each layer, with a concept-level Mantel permutation, a split-half noise ceiling, and the density and depth-stability diagnostics needed to read the depth curve correctly.
+- Module 9: typicality prediction and concept structure, in three studies over one representation. Study A predicts which of two same-category concepts humans rate as more typical and Study B predicts the measured human similarity of a pair, both from one generated feature grid. Study C drops the target and asks the unsupervised question in two views, a dendrogram of the layer distributions, with the merge-height table that says where its divisions actually appear, and the node-link concept graph of Fedzechkina's ExpertLens Figure 4, drawn once on the expert-set Jaccard and once on the layer-profile agreement.
 
 Each module is described in its own page below.
 
