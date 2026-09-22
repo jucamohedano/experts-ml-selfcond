@@ -70,10 +70,6 @@ HUMAN_SIGNIFICANCE_ALPHA = 0.05
 # with professions at parametric p=0.0008 against Mantel p=0.169.
 HUMAN_COEFFICIENT = "Spearman"
 
-# Neighbourhood fraction for the LOWESS smooth drawn on the scatter panels. 0.4 matches the
-# value plot_helpers.plot_hexbin_with_trends already uses, so the two families of scatter in
-# this pipeline smooth at the same scale and can be compared by eye.
-LOWESS_FRACTION = 0.4
 
 def human_validated_metrics() -> list:
     """
@@ -380,24 +376,47 @@ def plot_human_vs_expert(concepts: list, matrix: np.ndarray, metric_label: str,
         axis.scatter(model, human, s=14, alpha=0.45, color=colors[category], edgecolors="none")
         rho = spearmanr(model, human).statistic
         if len(np.unique(model)) > 1:
-            # A LOWESS smooth rather than a straight least-squares fit, because the reported
-            # statistic is Spearman, which assumes only monotonicity. An OLS line is a
-            # Pearson-shaped object: its slope tracks the LINEAR association, so a panel
-            # showing one beside a Spearman rho invites reading the line as the illustration
-            # of the number when the two can disagree (professions at AP 0.6 is Pearson 0.171
-            # against Spearman 0.105). The smooth shows the monotone shape the coefficient
-            # actually measures, and it does not flatten the bend these panels display near
-            # zero, where the relationship rises steeply and then saturates.
+            # An ISOTONIC fit (pool adjacent violators) rather than a straight least-squares
+            # line, because the reported statistic is Spearman, which scores only how well
+            # the pairs are ORDERED. An OLS line is a Pearson-shaped object: its slope tracks
+            # the LINEAR association, so a panel showing one beside a Spearman rho invites
+            # reading the line as the illustration of the number when the two can disagree
+            # (professions at AP 0.6 is Pearson 0.171 against Spearman 0.105). Isotonic
+            # regression returns the best MONOTONE function of the data, which is exactly the
+            # shape the coefficient measures, and its flat runs still expose the bend these
+            # panels display near zero, where the relationship rises steeply and saturates.
+            #
+            # This replaced a LOWESS smooth, which was the wrong object twice over. A local
+            # smoother carries NO monotonicity constraint, so it doubled back on itself on
+            # most panels and invited the reading that the reported rho had turned negative
+            # over part of the range. It had not: a rho of 0.16 implies a Kendall tau near
+            # 0.10 and therefore about 45 percent of pairs running the wrong way, which is
+            # ample local disorder to bend any neighbourhood fit. The ratings are also
+            # averages of ordinal judgments and stack into horizontal bands, and the tails of
+            # the expert-similarity axis hold few neighbours, so the least trustworthy
+            # segments of a LOWESS curve were its two ends, where a reader looks first.
+            #
+            # sklearn fits y as a monotone function of x using only the ORDER of x, so
+            # fitting the raw values is identical to fitting the ranks Spearman uses, while
+            # the output stays in rating units and overlays the scatter directly. The
+            # direction is taken from this panel's own rho rather than from the library's
+            # increasing="auto", which reruns its own bootstrapped Spearman and warns when
+            # the interval spans zero, as it does on nearly every panel here. Reusing the rho
+            # already in the title is both quieter and stronger: the curve cannot rise while
+            # the number it accompanies is negative.
             #
             # The fit stays decoration, so any failure is logged and skipped rather than
             # allowed to take down a sweep that has already produced its numbers. At strict
             # thresholds the surviving values can be nearly collinear or almost all tied.
             try:
-                from statsmodels.nonparametric.smoothers_lowess import lowess
-                smoothed = lowess(human, model, frac=LOWESS_FRACTION, return_sorted=True)
-                axis.plot(smoothed[:, 0], smoothed[:, 1], color="black", linewidth=1.6)
+                from sklearn.isotonic import IsotonicRegression
+                order = np.argsort(model, kind="stable")
+                fitted = IsotonicRegression(increasing=bool(rho >= 0),
+                                            out_of_bounds="clip").fit_transform(
+                                                model[order], human[order])
+                axis.plot(model[order], fitted, color="black", linewidth=1.6)
             except Exception as error:
-                log.warning(f"    Trend smooth skipped for {category}: {error}")
+                log.warning(f"    Trend fit skipped for {category}: {error}")
         axis.set_title(
             f"{category}  {HUMAN_COEFFICIENT} rho={rho:.2f}  "
             f"Mantel {_format_mantel_p(mantel_p.get(category, float('nan')))}  n={len(model)}",

@@ -19,6 +19,7 @@ The outputs are written into one `AP_{threshold}` subfolder per AP threshold und
 
 ## Module overview
 
+- [Dataset and metadata provenance](dataset_and_metadata.md): where the human-sourced inputs come from, namely the concept word list, the pairwise similarity judgments, the typicality columns derived from them, and the word frequencies, with coverage, caveats, the metadata schema, and how to regenerate it. It stops where module 1, subchapter 1.1 starts.
 - Module 1: layer-wise expert distribution, covering data provenance (responses → expert sets), percentage allocation matrices with their raw counts, cumulative-mass plots (depth-ordered and Pareto-sorted), the sublayer-informativeness ranking (category-alignment AUC with permutation test, Geary's C), and the sublayer handoff to modules 2+.
 - Module 2: layer-distribution descriptors per word, namely Shannon entropy, Geary's C, peak layer with dominance gap, and full and trimmed average layer, comparing concept-level and category-level concentration, depth, and profile shape, with the entropy-vs-expert-count dependence discussed explicitly.
 - Module 3: category-concept similarity, using Jaccard and overlap coefficients between concept and category expert sets, with the raw set sizes stored beside every percentage.
