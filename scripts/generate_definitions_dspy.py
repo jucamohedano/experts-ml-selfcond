@@ -550,6 +550,16 @@ def build_negatives_stratified(
             negatives[c] = []
             continue
 
+        # Excluding c as a SOURCE is not enough. The LM sometimes writes the same
+        # sentence for two related concepts, for example radish and turnip both getting
+        # "The plant belongs to the Brassicaceae family ...", and drawing it from the
+        # other one puts a positive of c into the negatives of c, labelling one string
+        # both ways and corrupting c's Average Precision.
+        own_positives = set(positives_by_concept.get(c, []))
+
+        def pool_for(source: str) -> t.List[str]:
+            return [s for s in positives_by_concept.get(source, []) if s not in own_positives]
+
         k = len(sources)
         base_quota = target_negatives // k
         remainder = target_negatives % k
@@ -568,7 +578,7 @@ def build_negatives_stratified(
         deficits = 0
         
         for s in sources:
-            pool = positives_by_concept.get(s, [])
+            pool = pool_for(s)
             q = quota[s]
 
             if q <= 0:
@@ -588,7 +598,7 @@ def build_negatives_stratified(
             global_pool = []
             selected_set = set(selected)
             for s in sources:
-                for sent in positives_by_concept.get(s, []):
+                for sent in pool_for(s):
                     if sent not in selected_set:
                         global_pool.append(sent)
 
@@ -597,7 +607,7 @@ def build_negatives_stratified(
             else:
                 selected.extend(global_pool)
                 still_need = deficits - len(global_pool)
-                all_other = [sent for s in sources for sent in positives_by_concept.get(s, [])]
+                all_other = [sent for s in sources for sent in pool_for(s)]
                 if still_need > 0 and all_other:
                     selected.extend(rng.choices(all_other, k=still_need))
 
@@ -616,10 +626,12 @@ def build_negatives_stratified(
 def storage_key_for(concept: str, category: t.Optional[str], all_concepts: t.List[str]) -> str:
     """A bare concept name is ambiguous when the same word is used for two different
     senses in the same word list (e.g. "squash" the vegetable vs. "squash" the sport --
-    both appear in the Richie & Bhatia HSJ table). When a name repeats, disambiguate the
-    on-disk storage key (filename / intermediate dict key) with its category, so the two
-    senses don't silently overwrite each other. The "concept" field written into every
-    JSON file's content, and the value sent to the LM, stays the plain word, unchanged.
+    both appear in the Richie & Bhatia HSJ table). When a name repeats, the key carries
+    its category, so the two senses get their own file AND their own identity downstream.
+
+    The key is the join key for every expert-side table, so write_concept_json stores it
+    in the "concept" field and keeps the bare surface form in "word". The value sent to
+    the LM, and the string WordNet is queried with, is always the bare word.
     """
     if category and all_concepts.count(concept) > 1:
         return f"{concept}__{category}"
@@ -634,19 +646,18 @@ def load_categories_for_concepts(
     flattening the same source list in the same order. Falls back to all-None (no
     disambiguation) if the metadata doesn't line up, rather than risk mismatched pairing.
 
-    Rows without a "concept" key are skipped rather than raising: the metadata file also
-    carries deliberately excluded entries under underscore-prefixed keys (e.g.
-    "_ignored_concept_squash_sport"), which are not part of the dataset and must not shift
-    the positional alignment.
+    Rows without a "concept" key are skipped rather than raising, so a hand-annotated
+    metadata file cannot shift the positional alignment.
     """
     with metadata_path.open("r", encoding="utf-8") as fp:
         raw_entries = json.load(fp)
     entries = [e for e in raw_entries if isinstance(e, dict) and "concept" in e]
     skipped = len(raw_entries) - len(entries)
     if skipped:
-        print(f"Note: skipped {skipped} metadata row(s) without a 'concept' key "
-              f"(excluded entries).")
-    meta_concepts = [e["concept"] for e in entries]
+        print(f"Note: skipped {skipped} metadata row(s) without a 'concept' key.")
+    # Compare on the surface form: metadata "concept" carries the per-sense key for an
+    # ambiguous word, while the config lists the bare word once per sense.
+    meta_concepts = [e.get("word", e["concept"]) for e in entries]
     if meta_concepts != concepts:
         print(f"Warning: {metadata_path} concepts don't match config concepts 1:1; "
               f"category-based disambiguation disabled.")
@@ -666,7 +677,10 @@ def write_concept_json(
     negatives: t.List[str],
 ) -> None:
     out = {
-        "concept": concept,
+        # The storage key IS the concept identity downstream: it reaches expertise.csv and
+        # is what every module merges on, so two senses of one word stay separable.
+        "concept": storage_key,
+        "word": concept,
         "category": category,
         "group": group,
         "source": source,
@@ -684,12 +698,32 @@ def write_concept_json(
 def write_concept_list_csv(
     *, dataset_root: pathlib.Path, group: str, entries: t.List[t.Tuple[str, str, t.Optional[str]]]
 ) -> None:
+    """The "concept" column must hold the STORAGE KEY, not the surface form.
+
+    compute_responses.py and compute_expertise.py read this file through
+    selfcond.data.concept_list_to_df, which takes only "group" and "concept" and then
+    opens <group>/<concept>.json. Writing the bare word here makes an ambiguous concept
+    point at a file that does not exist, and compute_responses prints a one-line skip and
+    returns, so the concept silently vanishes from the run. That is the failure documented
+    under "Squash restored to the dataset" in documentation/fixes.md.
+    """
+    # Every row must resolve to a file, since a row that does not is exactly the silent
+    # skip described above rather than a loud failure.
+    unresolved = [key for _, key, _ in entries
+                  if not (dataset_root / group / f"{key}.json").exists()]
+    if unresolved:
+        raise FileNotFoundError(
+            f"concept_list.csv would name {len(unresolved)} concept(s) with no "
+            f"{group}/<concept>.json beside them, which compute_responses.py would skip "
+            f"silently: {sorted(unresolved)}"
+        )
+
     csv_path = dataset_root / "concept_list.csv"
     csv_path.parent.mkdir(parents=True, exist_ok=True)
     with csv_path.open("w", encoding="utf-8") as fp:
-        fp.write("group,concept,storage_key,category\n")
-        for concept, storage_key, category in entries:
-            fp.write(f"{group},{concept},{storage_key},{category or ''}\n")
+        fp.write("group,concept,word,category\n")
+        for word, storage_key, category in entries:
+            fp.write(f"{group},{storage_key},{word},{category or ''}\n")
 
 
 def write_intermediate_positives(
@@ -701,7 +735,8 @@ def write_intermediate_positives(
     positives: t.List[str],
 ) -> None:
     intermediate_dir.mkdir(parents=True, exist_ok=True)
-    out = {"concept": concept, "storage_key": storage_key, "category": category, "positives": positives}
+    out = {"concept": storage_key, "word": concept, "storage_key": storage_key,
+           "category": category, "positives": positives}
     with (intermediate_dir / f"{storage_key}.json").open("w", encoding="utf-8") as fp:
         json.dump(out, fp, ensure_ascii=False)
 
@@ -1026,7 +1061,8 @@ async def async_main() -> None:
         print("Mode: Fix/Rebuild from intermediate files. Ignoring config/filter concepts.")
         records = load_all_intermediate_records(intermediate_dir)
         entries = [
-            (r["concept"], key, r.get("category"))
+            # first slot is the surface form, second the identity key
+            (r.get("word", r["concept"]), key, r.get("category"))
             for key, r in records.items()
         ]
         print(f"Found {len(entries)} concepts in .intermediate")

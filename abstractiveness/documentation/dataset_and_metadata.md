@@ -6,7 +6,7 @@ Every number the pipeline produces is model-derived except four, and those four 
 
 It is the counterpart of module 1, subchapter 1.1, which documents the other half of the provenance chain, namely how sentences become responses and responses become expert sets. That subchapter starts from a word list and takes it forward. This page ends where that one begins.
 
-Two stimulus sets exist in the repository. The **Richie-HSJ** set (205 words) is the one both models are currently run on and is the subject of most of this page. The older **150-concept** set (164 words) is documented in the last section for completeness, since the older results tables cited across the module pages come from it.
+Two stimulus sets exist in the repository. The **Richie-HSJ** set (206 concepts over 205 distinct words) is the one both models are currently run on and is the subject of most of this page. The older **150-concept** set (164 words) is documented in the last section for completeness, since the older results tables cited across the module pages come from it.
 
 ## 1. Source materials at a glance
 
@@ -15,12 +15,14 @@ Two stimulus sets exist in the repository. The **Richie-HSJ** set (205 words) is
 | `assets/Richie_and_Bhatia-HSJ/table 1 - word lists.csv` | The 8 categories and their members, Table 1 of the source paper | the concept list, the prompt dataset config, category assignment |
 | `assets/Richie_and_Bhatia-HSJ/study1_pairwise_data/data_individual_level/<Category>_pairwise.csv` | Study 1 total-set pairwise similarity ratings, one row per subject, one column per pair | `typicality_HSJ_pairwise`, module 5.3, module 9 Study B |
 | `assets/Richie_and_Bhatia-HSJ/study1_spam_data.csv` | Study 1 Spatial Arrangement Method data, one row per subject per category with final (x, y) per item | `typicality_HSJ_spam` |
-| `assets/THINGS-database/osfstorage/03_category-level/typicality53_mean-ratings.tsv` | THINGS database mean typicality ratings, keyed by (member, category) | the `typicality` column |
-| `assets/enwiki-2023-04-13.txt` | English Wikipedia word count list, one `word count` pair per line | the `frequency` column |
+| `assets/THINGS-database/osfstorage/03_category-level/typicality53_mean-ratings.tsv` | THINGS database mean typicality ratings, keyed by (member, category) | the `typicality` column of the older 150-concept set only |
+| `assets/enwiki-2023-04-13.txt` | English Wikipedia word count list, one `word count` pair per line | the `frequency` column and the Wikipedia Zipf columns |
+| `assets/SUBTLEX-US.txt` | SUBTLEX-US subtitle frequencies, 74,286 entries | the primary Zipf columns |
+| `assets/SUBTLEX-UK.txt` | SUBTLEX-UK subtitle frequencies, 160,022 entries | the British reference Zipf column |
 | `assets/metadata_Richie_HSJ.json` | **Output.** One row per word with all covariates merged | every module, through `load_experts_data` |
-| `dataset_config_Qwen3-30B-A3B-Instruct-2507-abstractiveness_Richie_HSJ.json` | **Output.** The same 205 words plus the sentence generation parameters | the sentence generation stage |
+| `dataset_config_Qwen3-30B-A3B-Instruct-2507-abstractiveness_Richie_HSJ.json` | **Output.** The same 206 concepts plus the sentence generation parameters | the sentence generation stage |
 
-`assets/` is excluded by `.gitignore`, so none of these files travel with the repository and they have to be placed by hand on a fresh checkout. Of the five inputs, the Richie and Bhatia directory is present in the working tree today. The Wikipedia count file and the THINGS directory are **not**, so the `frequency` and `typicality` values currently in `metadata_Richie_HSJ.json` are the only surviving copies of what those two sources contributed, and regenerating the metadata from scratch requires fetching them again. Section 7 says what has to be recovered and in what order.
+`assets/` is excluded by `.gitignore`, so none of these files travel with the repository and they have to be placed by hand on a fresh checkout. The Richie and Bhatia directory, the Wikipedia count file and the two SUBTLEX files are all present in the working tree today, and section 6.2 records where the Wikipedia file came from. The THINGS directory is **not** present, which no longer blocks anything here, since the Richie-HSJ metadata dropped the THINGS `typicality` column and nothing in this dataset reads it. Only the older 150-concept set in section 10 still needs that file.
 
 ## 2. The concept list
 
@@ -38,15 +40,17 @@ Two stimulus sets exist in the repository. The **Richie-HSJ** set (205 words) is
 | clothing | 29 | 29 | |
 | birds | 30 | 30 | |
 | vegetables | 20 | 20 | includes `squash` |
-| sports | 28 | 27 | `squash` dropped |
+| sports | 28 | 28 | includes `squash` |
 | vehicles | 22 | 22 | |
 | fruit | 21 | 21 | |
 | professions | 28 | 28 | |
-| **total members** | **198** | **197** | |
+| **total members** | **198** | **198** | |
 | plus level 1 labels | | **8** | |
-| **total items** | | **205** | |
+| **total items** | | **206** | |
 
-**The one edit made to the source list.** The table lists `squash` twice, once as a vegetable and once as a sport. A single surface form cannot carry two expert sets, because the sentences describing one sense would sit in the negative pool of the other and the Average Precision of every unit would be computed against a corrupted label. The word is admitted once, under **vegetables**, because vegetables is the smaller category (19 other members against 27 for sports), so the exclusion costs the smaller category less imbalance than dropping the word entirely would. The rule lives in `EXCLUDED_SENSES` in `prepare_metadata_richie_hsj.py` so that regenerating the metadata cannot reintroduce the sports row, and the same exclusion is repeated in `EXCLUDED_MEMBERS` in `utils/human_similarity.py` so that the sports pairs containing `squash` are dropped from the ratings too. The full history of this decision, including the silent skip in `compute_responses.py` that it originally surfaced, is in [fixes.md](fixes.md).
+**The one word listed twice.** The table lists `squash` under both vegetables and sports. An expert set is defined per concept, so two senses need two concept identities, and one surface form cannot supply them: both sentence files would be named `squash.json`, and every table merging on `concept` would fold the senses together. Pooling both senses' sentences under one concept is no remedy, because the positive class would then describe two unrelated things and the expert set would be a mixture belonging to neither category. Both senses are therefore admitted as **separate concepts**, keyed `squash__vegetables` and `squash__sports`, each with its own sentences and its own expert set. The key is built in `utils/preparers/metadata_preparer.py` from `SENSE_SEPARATOR` whenever a surface form appears under more than one category, and the same key is what `storage_key_for` in `generate_definitions_dspy.py` already used for the on-disk filename, so the two now agree.
+
+The separation runs on the **concept** field while the bare surface form stays in **`word`**. Anything lexical reads `word`, which is what WordNet is queried with, what the sentence generator sends to the model, and what the frequency tables are keyed on. Anything joining against an expert-side table reads `concept`. `select_wordnet_sense` resolves the two senses through its per-category anchors, returning `squash.n.02` (edible fruit of a squash plant) for vegetables and `squash.n.03` (a game played in an enclosed court) for sports. The earlier decision to admit only the vegetable, and the silent skip in `compute_responses.py` that it originally surfaced, is in [fixes.md](fixes.md).
 
 **Word senses are a separate problem from word strings.** The list gives strings, not meanings. Sentences are generated from a WordNet gloss, and WordNet sense ordering does not know which category the word was filed under, so a word can silently acquire sentences about the wrong meaning (`fencing` the sport against `fencing` the material, `date` the fruit against `date` the appointment). That failure is invisible downstream, because the file is complete and the counts are right, only the meaning is wrong. `scripts/audit_concept_senses.py` screens for it with a leave-one-out TF-IDF check against the category profile, and sixteen concepts were regenerated on the strength of it. This is documented in [fixes.md](fixes.md) rather than here, because it is a property of the generated sentences rather than of the source list.
 
@@ -65,12 +69,12 @@ Two stimulus sets exist in the repository. The **Richie-HSJ** set (205 words) is
 | fruit | 31 | 210 | 29 | 31 | 0.3% |
 | furniture | 33 | 190 | 32 | 33 | 0.2% |
 | professions | 67 | 378 | 32 | 39 | 43.6% |
-| sports | 61 | 351 | 28 | 37 | 44.6% |
+| sports | 61 | 378 | 28 | 37 | 44.6% |
 | vegetables | 30 | 190 | 29 | 30 | 0.0% |
 | vehicles | 28 | 231 | 26 | 28 | 1.5% |
-| **total** | | **2,391** | | | |
+| **total** | | **2,418** | | | |
 
-Pair counts are exactly $\binom{n}{2}$ for each category's membership, so the files are complete total-set designs with no pair missing. Sports shows 351 rather than $\binom{28}{2} = 378$ because the 27 pairs containing `squash` are dropped, and 2,391 is the same pair count module 9's ranker enumerates combinatorially from the same word list, which is the cheapest available check that the two sides agree on membership.
+Pair counts are exactly $\binom{n}{2}$ for each category's membership, so the files are complete total-set designs with no pair missing, sports included at $\binom{28}{2} = 378$ now that both squash senses are in the dataset. The total of 2,418 is the same pair count module 9's ranker enumerates combinatorially from the same word list, which is the cheapest available check that the two sides agree on membership. Because one word can map to two concepts, every row carries `concept_a` and `concept_b` beside `word_a` and `word_b`, and a join against an expert-side table must use the concept columns.
 
 **Unequal rater counts are harmless here.** Different pairs carrying different numbers of raters makes some pair means noisier than others, and noise in a target **attenuates** a correlation rather than inflating it, so the risk runs against the hypothesis rather than for it. The noise ceiling below is what turns that attenuation into a number that can be divided out.
 
@@ -99,7 +103,7 @@ Reporting a raw correlation against these ratings without stating it as a fracti
 
 **What was collected.** The same Study 1 also ran a SpAM task, in which each subject arranged one category's words on a two-dimensional surface so that closer means more similar. This is an independent elicitation of the same underlying similarity structure, using a different response mode.
 
-**File layout.** `study1_spam_data.csv` is 432 rows, one per subject per category, which is 54 subjects across each of the 8 categories. There are 30 stimulus slots, `Stim1` to `Stim30`, each paired with `Object<i>XFinal` and `Object<i>YFinal` giving the position the subject dropped that item at. Categories with fewer than 30 members pad the unused slots with the sentinel item `.....` parked at `(3840, 2160)`, and `compile_typicality_hsj.py` drops those rows before computing anything.
+**File layout.** `study1_spam_data.csv` is 432 rows, one per subject per category, which is 54 subjects across each of the 8 categories. There are 30 stimulus slots, `Stim1` to `Stim30`, each paired with `Object<i>XFinal` and `Object<i>YFinal` giving the position the subject dropped that item at. Categories with fewer than 30 members pad the unused slots with the sentinel item `.....` parked at `(3840, 2160)`, and `typicality_preparer.py` drops those rows before computing anything.
 
 **Coverage gap.** The SpAM stimulus set is not identical to the word list. Vehicles was arranged with 20 items rather than the list's 22, because `truck` and `van` are absent from the SpAM stimuli. Those are exactly the two words carrying `typicality_HSJ_spam: null`, so the column covers 195 of 197 concepts while `typicality_HSJ_pairwise` covers all 197.
 
@@ -131,13 +135,15 @@ rounded to three decimals, so 1 is the most typical member of its category and 0
 
 The within-category normalization is the important caveat to carry downstream. The column is **ordinal within a category and not comparable across categories**, because the most typical bird and the most typical profession both score 1.0 regardless of how tightly either category holds together. Any analysis pooling this column across categories is reading a rank, not a level, which is the reason module 9's Study A is formulated as a within-category pairwise ranking rather than a regression on the raw value.
 
-Coverage is 197 of 197 concepts.
+Coverage is 198 of 198 concepts.
 
 ### 5.2 `typicality_HSJ_spam`, the second elicitation
 
 The same family-resemblance logic applied to the arrangement data. For each subject's trial, the Euclidean distance from a word's position to every other item's position in that trial is averaged, then averaged across subjects, which is the row mean of the aggregate SpAM distance matrix. Distance is negated so that closer means more typical, and the result is min-max normalized within category exactly as above. Coverage is 195 of 197, missing `truck` and `van`.
 
-### 5.3 `typicality`, the THINGS ratings
+### 5.3 `typicality`, the THINGS ratings, retired from this dataset
+
+**This column is no longer written into `metadata_Richie_HSJ.json`.** It survives only in `metadata_150.json`, which the `gpt2_150` config still uses, and the rest of this subchapter describes it as it exists there. It was dropped here because both Richie-HSJ configs use `typicality_HSJ_pairwise`, so the column was carried at 96 of 198 coverage without a single reader, and its builder silently produced an all-null column whenever the THINGS file was absent, which it is.
 
 A third and fully external source, the THINGS database's mean typicality ratings, keyed by `(member, category)`. These are **direct** typicality ratings rather than a derivation from similarity, which is what makes them worth carrying even at partial coverage.
 
@@ -171,49 +177,117 @@ Coverage after the mapping is 96 of 197 concepts:
 
 ### 5.4 Which column each run uses
 
-`MODEL_CONFIGS` in `abstractiveness_executor.py` names the column through `typicality_column`, and `load_experts_data` renames whatever is named to `human_typicality` for every downstream module, so module code never references a source-specific name. Both Richie-HSJ configs use `typicality_HSJ_pairwise`, for its full coverage and because it was elicited on exactly these words. The older `gpt2_150` config uses `typicality`, the THINGS column. Anywhere the module pages say Human Typicality, that is the renamed column, and which source it came from is decided here.
+`MODEL_CONFIGS` in `abstractiveness_executor.py` names the column through `typicality_column`, and `load_experts_data` renames whatever is named to `human_typicality` for every downstream module, so module code never references a source-specific name. Both Richie-HSJ configs use `typicality_HSJ_pairwise`, for its full coverage and because it was elicited on exactly these words. The older `gpt2_150` config uses `typicality`, the THINGS column, which now exists only in that set's own metadata file. Anywhere the module pages say Human Typicality, that is the renamed column, and which source it came from is decided here.
 
 ## 6. Word frequency
 
-**Source file.** `assets/enwiki-2023-04-13.txt`, a plain text English Wikipedia word count list dated 2023-04-13, one entry per line as a word followed by whitespace and an integer count. `load_frequencies_from_file` parses it with `rsplit(None, 1)`, lowercases the key, and discards any line whose trailing token is not an integer. Both `prepare_metadata_richie_hsj.py` and the older `scripts/prepare_metadata.py` read the same file through identical copies of that function.
+Three corpora are read, and they do three different jobs. All of the logic lives in `scripts/utils/preparers/frequency_preparer.py`, which carries no rationale of its own and points here instead.
 
-**Provenance gap to close.** The file is not in the working tree and no fetch command or upstream URL is recorded anywhere in the repository, so the only surviving record of what it contained is the `frequency` column of the two metadata JSONs. The file name matches the naming convention of the published English Wikipedia word-frequency dumps, but that is an inference from the name rather than something this repository records, and it should be confirmed and written down here before anyone tries to reproduce the metadata or extend the stimulus set. Until then, treat the frequency column as reproducible only by reusing the existing JSON.
+**Status.** The preparer computes every column described below, and `check_preparers.py` verifies them, but `metadata_preparer.py` does not yet write them into `metadata_Richie_HSJ.json`. That file still carries the raw `frequency` column alone, which is what section 8 documents and what every module currently reads. Wiring the writer is the outstanding step.
 
-**Coverage and range.** Every one of the 205 words resolves, 197 of 197 concepts and 8 of 8 category labels, with no nulls and no zeros. Counts run from 183 (`footstool`) to 605,641 (`radio`), median 14,099, with `minister` at 582,021 and `sports` at 418,627 next below the maximum.
+### 6.1 Which corpus, and why
 
-**How it is used.** Module 1's `save_expert_counts_metadata` maps the raw count to $\tilde{f}_c = \log_{10} f_c$, computed only when $f_c > 0$, and drops rows with a missing or non-positive count from the merged table. The log transform compresses the heavy right tail so that module 4's linear correlations are not dominated by a handful of very frequent words. Frequency appears as a predictor in its own right (does a more frequent word recruit more experts) and as a control, in module 4's frequency-partialled correlations, where the question is whether a typicality effect survives once frequency is held fixed.
+**SUBTLEX-US is the primary source.** 51 million tokens of American film and television subtitles over 74,286 entries, from Brysbaert and New (2009), which is the most widely used modern English frequency norm. The stimulus list and the human similarity ratings both come from Richie and Bhatia, an American study run on American participants, so the frequency covariate sitting beside those ratings should be American as well.
 
-**Three caveats the column carries.**
+That choice was measured rather than assumed. Substituting the British norms moves the per-category Spearman correlation between `typicality_HSJ_pairwise` and frequency by 0.075 on average, and by 0.215 for professions, which falls from 0.276 to 0.061. The mechanism is visible word by word. British English uses `minister` overwhelmingly for a government minister rather than for clergy, at Zipf 5.44 against 4.27, it prefers solicitor and barrister to `lawyer`, and it says vet rather than `veterinarian`. No category changes the sign of its correlation under either corpus, so the qualitative conclusions are stable either way, but the magnitudes are not, and professions in particular would be misreported.
 
-- These are **raw corpus counts**, not a per-million rate and not a Zipf value, so they are meaningful only relatively and only within this one corpus snapshot. Nothing in the pipeline compares them against an external frequency norm.
-- Matching is on the **lowercased surface form** with no lemmatization, so `bird` and `birds` are different keys. Since the level 1 label words are the category names as written in the source table, several of them are plural (`birds`, `sports`, `vegetables`) while their members are singular, and the level 1 versus level 2 frequency comparison inherits that asymmetry.
-- Homographs are **conflated**, because the corpus count cannot distinguish senses. `squash` carries the count of both the vegetable and the sport even though the dataset admits only the vegetable, and the same applies to every word the sense audit touched.
+**Wikipedia is the secondary source.** 2.47 billion tokens. It answers a different question rather than the same question worse. The confound module 4 controls for is whether the model allocated more units to a word because it met that word more often during pretraining, which is model exposure and not human familiarity. Neither model studied here publishes its pretraining corpus, so counting the training data directly is not available, and a large encyclopedic web corpus is the closest proxy on hand. The two primary columns correlate at only r = 0.73 across the stimulus set, so repeating a frequency-partialled result under both is a genuine robustness check rather than a redundant one.
+
+**SUBTLEX-UK is a reference column only.** 201 million tokens of BBC broadcast subtitles, from van Heuven, Mandera, Keuleers and Brysbaert (2014), the paper that introduced the Zipf scale. It is carried so that the British against American gap described above can be tabulated as the stated limitation it is. No analysis should be run on it.
+
+### 6.2 Provenance of the Wikipedia counts
+
+`assets/enwiki-2023-04-13.txt` is `results/enwiki-2023-04-13.txt` from [github.com/IlyaSemenov/wikipedia-word-frequency](https://github.com/IlyaSemenov/wikipedia-word-frequency), MIT licensed. The identification rests on four independent matches: the filename is exact and is the only `enwiki` file that repository publishes, the top twenty words appear in the same order as the repository's README reports them, the format is the same `word count` pair per line, and the minimum count in the file is 3, which is the repository's stated floor of appearing in at least three articles. The README quotes 2,747,823 types against the 2,765,377 this file holds, a gap of 0.6 percent that reflects a stale README figure rather than a different file.
+
+The file totals **2,765,377 types over 2,474,589,909 tokens**. Three properties of the extraction carry into every number derived from it.
+
+- **Counts are token counts, not document counts.** `the` occurs 186,631,452 times against the roughly 6.6 million articles English Wikipedia held in 2023, which settles it.
+- **Words appearing in fewer than three articles are absent entirely**, rather than present with a low count. This is harmless here, since the rarest stimulus is `footstool` at 183.
+- **Punctuation is stripped, unicode dashes and apostrophes are normalised, and tokens containing digits are dropped**, so these counts are not directly comparable against a raw dump.
+
+This closes the provenance gap earlier revisions of this page flagged as open.
+
+### 6.3 The Zipf scale
+
+Every frequency column is reported as a Zipf value, which is the base ten logarithm of occurrences per billion words, so that
+
+$$\mathrm{Zipf} = \log_{10}(f_{\text{per million}}) + 3.$$
+
+For a raw count in a corpus of $N$ tokens this is $\log_{10}(f) + \log_{10}(10^9 / N)$, which for the Wikipedia file means $\mathrm{Zipf} = \log_{10}(f) - 0.3935$. `wikipedia_corpus_tokens()` sums the file rather than hardcoding that constant, so replacing the dump cannot silently leave the values scaled to the wrong corpus. Across the 205 stimuli the Wikipedia column runs from 1.87 for `footstool` to 5.39 for `radio`, against a conventional reading of below 3 as low frequency and above 4 as high.
+
+One consequence is worth stating plainly, because it prevents a wasted comparison. Zipf is an affine transform of $\log_{10} f$, so every Pearson correlation, Spearman correlation, partial correlation and significance test is numerically identical to what the raw `frequency` column already produced. The scale buys interpretability and comparability with published norms, and nothing else. Only the summation in 6.4 changes a number.
+
+### 6.4 Summing singular and plural
+
+A concept is counted across every surface form that carries its sense, and across no form that does not. Where both the singular and the plural denote the concept, their counts are summed. Where only one form does, only that form is counted. The decision is held in three explicit tables in `frequency_preparer.py` rather than inferred, because every automatic alternative tested was wrong on this stimulus set. A part of speech tagged lemma map, for instance, both invented forms, folding a stray `bi` into `bus`, and missed real ones, dropping `mirrors` at 15,777 and `ministers` at 73,239 whenever the tagger read the plural as a verb or a surname.
+
+**Regular inflection.** `plural_of()` applies the ordinary English suffix rules, adding `es` after a sibilant so that `bus` gives `buses` and `ostrich` gives `ostriches`, turning a consonant plus `y` into `ies` for `cherry` and `canary`, and turning a final `f` into `ves` for `scarf`.
+
+**`IRREGULAR_PLURALS`** holds the five the rules get wrong, namely `fireman`, `policeman` and `postman`, which take `men`, and `tomato` and `potato`, which take `oes`.
+
+**`PLURAL_FORM_LISTED`** holds the thirteen concepts the source table writes in the plural whose singular denotes the same thing, and so is summed with it. Five are the category labels `birds`, `professions`, `sports`, `vegetables` and `vehicles`, and the rest are `beans`, `gloves`, `grapes`, `mittens`, `pajamas`, `panties`, `sneakers` and `socks`.
+
+**`SINGLE_FORM`** holds the forty-two concepts scored on the listed form alone, in three groups.
+
+| Group | Members | Why |
+|---|---|---|
+| Mass nouns | `furniture`, `clothing`, `asparagus`, `broccoli`, `cauliflower`, `celery`, `corn`, `lettuce`, `spinach` | no count plural, and the generated form either does not occur or is under one percent of the singular |
+| Activity nouns | all 27 sports | the activity has no count plural, and the plurals that do exist denote something else, since ballets are works and runnings are instances |
+| Garments with a divergent singular | `boots`, `boxers`, `jeans`, `overalls`, `pants`, `shorts` | the singular is a different word or sense |
+
+That last group is where an unguarded summation does the most damage, and the Wikipedia counts show the scale of it. `overall` the adverb outnumbers `overalls` the garment by 298 to 1, `short` the adjective outnumbers `shorts` by 26 to 1, `jean` as a name outnumbers `jeans` by 16 to 1, and `boxer` the fighter and dog breed outnumbers `boxers` the garment by 4.6 to 1. `boots` and `pants` are admitted to the same group on the same reasoning, since `boot` is largely a car boot or a verb and `pant` is a verb. Summing any of these would move the word further than the entire real spread of its category.
+
+The net effect is 163 concepts summed over two forms and 42 scored on one. The step shifts the Wikipedia column by a median of 0.118 Zipf and correlates with the unsummed column at r = 0.989, so it is a correctness measure rather than one that will move a result. The largest single correction is `professions`, which the surface form undercounts badly because the source table writes the label in the plural while the word is normally used in the singular, at 3.61 Zipf against 4.31 after summing, and 9.04 per million against 0.37 in SUBTLEX-US.
+
+### 6.5 Coverage
+
+| Column | Coverage | Gap |
+|---|---|---|
+| `frequency_zipf_wikipedia` | 206 of 206 | |
+| `frequency_zipf_wikipedia_lemma` | 206 of 206 | |
+| `frequency_zipf_subtlex_us` | 205 of 206 | `physiotherapist` |
+| `frequency_zipf_subtlex_us_lemma` | 205 of 206 | `physiotherapist` |
+| `frequency_zipf_subtlex_uk` | 206 of 206 | |
+
+`physiotherapist` is the British term for what American subtitles render as the two words physical therapist, which a unigram list cannot hold. It resolves to null rather than being dropped from the dataset, because every module already drops rows with a missing covariate on a per analysis basis, so the null costs one point in the frequency analyses alone, taking professions to 26 there, and keeps the concept in the expert set, Average Precision, Jaccard and typicality analyses where nothing is missing.
+
+### 6.6 How it is used
+
+Frequency enters as a predictor in its own right, asking whether a more frequent word recruits more experts, and as a control in module 4's frequency-partialled correlations, asking whether a typicality effect survives once frequency is held fixed. It never touches expert extraction, so changing a frequency column cannot alter an Average Precision or an expert set, only the analyses that read it.
+
+The raw `frequency` column is retained unchanged so that earlier results stay reproducible. Module 1's `save_expert_counts_metadata` still maps it to $\log_{10} f_c$ and drops rows with a missing or non-positive count.
+
+### 6.7 Caveats the columns carry
+
+- **Homographs are conflated**, because a corpus count cannot separate senses. `squash__vegetables` and `squash__sports` are separate concepts with separate expert sets, but they share one Wikipedia count and one SUBTLEX rate, since no corpus frequency list distinguishes the two. The same applies to every word the sense audit touched.
+- **The British column is not register matched** to this stimulus set, by 0.215 Spearman in professions, which is why it is a reference column rather than an analysis column.
+- **Wikipedia is a formal register.** Corpora built from written material overestimate the frequency of formal words relative to how often a person meets them (Brysbaert, Mandera and Keuleers, 2018). This is the accepted cost of choosing a corpus that approximates pretraining exposure instead of human familiarity.
+- **Corpus choice matters more than the summation.** The Wikipedia and SUBTLEX-US columns correlate at only r = 0.73, so roughly half the variance is corpus specific and a frequency-partialled result genuinely can differ between them. Reporting both is what turns that into evidence rather than an unexamined choice.
 
 ## 7. Regenerating the metadata
 
-Two scripts, in this order, both run from `abstractiveness/scripts/`.
+One command, run from `abstractiveness/scripts/`.
 
 ```bash
-python prepare_metadata_richie_hsj.py   # writes assets/metadata_Richie_HSJ.json
-python compile_typicality_hsj.py        # adds the two HSJ columns in place
+python -m utils.preparers.metadata_preparer   # writes assets/metadata_Richie_HSJ.json
 ```
 
-The first reads the word list, the frequency file and the THINGS ratings and **writes** the JSON, producing the `concept`, `abstraction_level`, `frequency`, `typicality` and `category` fields. The second reads the pairwise and SpAM data and **updates the same file in place**, adding `typicality_HSJ_pairwise` and `typicality_HSJ_spam`. Running them in the other order loses the HSJ columns, since the first script rewrites the file wholesale.
+`metadata_preparer` is the package's only entry point. It reads the word list, builds the `concept`, `word`, `abstraction_level` and `category` fields itself, then composes the columns the other two preparers own by calling `frequency_columns` and `typicality_columns`. All three follow the same contract, `load_*` for a memoised reader of one external input and `<name>_columns` for the metadata fields that preparer owns, so adding a covariate means writing one more `*_columns` function and one more `row.update` call.
 
-Both print coverage counts on completion, and those are the check to read. Expect 205 entries from the first and `197/197` plus `195/197` from the second. Both scripts warn and continue when an input file is missing rather than failing, so a silent all-null column is the failure mode to watch for, and the printed counts are what catches it.
+It prints coverage on completion and those counts are the check to read. Expect 206 entries, `frequency_zipf_subtlex_us_lemma` at 205 of 206, `frequency_zipf_wikipedia_lemma` at 206 of 206, `typicality_HSJ_pairwise` at 198 of 198 and `typicality_HSJ_spam` at 196 of 198. A silent all-null column is the failure mode to watch for when an input file is missing, and the printed counts are what catches it.
 
 Neither script regenerates sentences, responses or expertise. Changing the stimulus list means regenerating all three, which is the expensive path documented in module 1, subchapter 1.1, and the dataset config must be kept aligned one to one with the metadata or `compute_responses.py` will skip the mismatched word without raising anything.
 
 ## 8. The metadata schema
 
-`assets/metadata_Richie_HSJ.json` is a flat JSON list of 205 objects, 8 at level 1 and 197 at level 2.
+`assets/metadata_Richie_HSJ.json` is a flat JSON list of 206 objects, 8 at level 1 and 198 at level 2.
 
 | Field | Type | Null when | Meaning |
 |---|---|---|---|
-| `concept` | string | never | the lowercased word, the join key against every expert table |
+| `concept` | string | never | the join key against every expert table. The lowercased word, or `word__category` when the source table lists that word under two categories |
+| `word` | string | never | the bare lowercased surface form. What WordNet, the sentence generator and the frequency tables read |
 | `abstraction_level` | int, 1 or 2 | never | 1 for a category label, 2 for a member concept |
 | `frequency` | int | never in this file | raw Wikipedia count $f_c$ |
-| `typicality` | float in [0, 1] | level 1, and level 2 outside the THINGS mapping | THINGS mean typicality rating |
 | `category` | string | level 1 | parent category of a level 2 concept |
 | `typicality_HSJ_pairwise` | float in [0, 1] | level 1 | family-resemblance score from the pairwise ratings |
 | `typicality_HSJ_spam` | float in [0, 1] | level 1, and `truck`, `van` | family-resemblance score from the SpAM arrangements |
@@ -223,18 +297,18 @@ A level 1 row and a level 2 row:
 ```json
 {
     "concept": "furniture",
+    "word": "furniture",
     "abstraction_level": 1,
     "frequency": 44365,
-    "typicality": null,
     "category": null,
     "typicality_HSJ_pairwise": null,
     "typicality_HSJ_spam": null
 }
 {
     "concept": "bed",
+    "word": "bed",
     "abstraction_level": 2,
     "frequency": 60242,
-    "typicality": 0.765,
     "category": "furniture",
     "typicality_HSJ_pairwise": 0.707,
     "typicality_HSJ_spam": 0.229
@@ -245,12 +319,12 @@ Two kinds of null have to be told apart when reading any downstream table, and m
 
 ## 9. Known limitations
 
-- **The typicality target is derived, not measured.** `typicality_HSJ_pairwise` is a family-resemblance proxy computed from similarity ratings, not a typicality rating. It is a defensible and standard operationalization, but any claim about typicality rests on that operationalization rather than on a direct measurement. The THINGS column is the only directly measured typicality in the repository, and it covers under half the concepts and none of two categories.
+- **The typicality target is derived, not measured.** `typicality_HSJ_pairwise` is a family-resemblance proxy computed from similarity ratings, not a typicality rating. It is a defensible and standard operationalization, but any claim about typicality rests on that operationalization rather than on a direct measurement. The THINGS column was the only directly measured typicality in the repository, and it has been retired from this dataset, having covered under half the concepts and none of two categories.
 - **The derived typicality columns are within-category ordinal.** Min-max normalization per category destroys the between-category level. Pooled analyses of this column measure rank agreement, not agreement in degree.
 - **The similarity ratings are within-category only.** No pair crossing two categories was ever rated, so the human target can validate the structure the model recovers inside a category and says nothing about the distance between categories.
-- **The frequency source is unrecorded.** See section 6. Reproducible today only by reusing the existing JSON.
-- **Frequency is a surface-form count.** No lemmatization, no sense disambiguation, and plural category labels compared against singular members.
-- **One word was edited out of the source list.** `squash` under sports, for a reason internal to this pipeline rather than to the source data, which makes the sports category 27 members here against 28 in the published table.
+- **Frequency carries no sense disambiguation.** Singular and plural are summed where both carry the concept's sense, as section 6.4 sets out, but a corpus count still cannot separate two senses of one spelling, so `squash` carries the sport as well as the vegetable.
+- **The British frequency column is not register matched** to this American stimulus set, by 0.215 Spearman in professions, and is carried as a reference column only.
+- **One word carries two concepts.** `squash` appears under both vegetables and sports and is admitted as two concepts sharing one surface form, so it contributes two expert sets, two typicality scores and one frequency value. Nothing else in the stimulus set is ambiguous this way.
 - **The two elicitations do not cover the same words.** SpAM is missing `truck` and `van`, so a comparison of the two typicality columns is over 195 concepts, not 197.
 
 ## 10. The older 150-concept dataset

@@ -15,15 +15,17 @@ carries between 19 and 39 raters. Unequal rater counts make some pair means nois
 others, which attenuates any correlation rather than inflating it, and the split-half
 ceiling below is what turns that into a number you can divide by.
 
-The source table lists "squash" under both sports and vegetables. This dataset admits it
-under vegetables only (see documentation/fixes.md), so sports pairs containing it are
-dropped, leaving 2,391 pairs, which is exactly the pair count module 9's ranker already
-enumerates combinatorially from the same word list.
+The source table lists "squash" under both sports and vegetables, and both senses are in
+the dataset, each under its own concept key ("squash__vegetables", "squash__sports"). All
+2,418 rated pairs are therefore kept. Because a word can map to two concepts, every row
+carries concept_a and concept_b alongside word_a and word_b, and any join against an
+expert-side table must use the concept columns.
 
 Nothing here depends on the AP threshold or the analysis scope, so both entry points are
 memoised: the executor calls them 40 times per model and the answer never changes.
 """
 import functools
+import json
 import pathlib
 
 import numpy as np
@@ -35,6 +37,7 @@ from utils.helpers import spearman_brown
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[3]
 DATA_DIR = (REPO_ROOT / "abstractiveness/assets/Richie_and_Bhatia-HSJ"
             / "study1_pairwise_data/data_individual_level")
+METADATA_FILE = REPO_ROOT / "abstractiveness/assets/metadata_Richie_HSJ.json"
 
 # Metadata uses lowercase category names, the files are capitalised.
 CATEGORY_FILES = {
@@ -48,9 +51,6 @@ CATEGORY_FILES = {
     "vehicles": "Vehicles_pairwise.csv",
 }
 
-# (category, word) combinations present in the source files but not in this dataset.
-EXCLUDED_MEMBERS = {("sports", "squash")}
-
 # A split half with fewer overlapping pairs than this cannot support a stable correlation.
 MIN_SPLIT_OVERLAP = 10
 
@@ -62,16 +62,24 @@ def _parse_pair(column: str) -> tuple:
     return (left, right) if left < right else (right, left)
 
 
+@functools.lru_cache(maxsize=1)
+def _concept_keys() -> dict:
+    """(category, word) to the concept key that pair member joins on. A word listed under
+    two categories carries a per-sense key, so the mapping cannot be the identity."""
+    with open(METADATA_FILE, "r", encoding="utf-8") as handle:
+        return {(e["category"], e.get("word", e["concept"])): e["concept"]
+                for e in json.load(handle) if e["category"]}
+
+
+def concept_for(category: str, word: str) -> str:
+    """The concept key for one pair member, falling back to the bare word."""
+    return _concept_keys().get((category, word), word)
+
+
 def _category_frame(category: str) -> tuple:
     """The raw subject-by-pair frame for one category, and its usable column names."""
     frame = pd.read_csv(DATA_DIR / CATEGORY_FILES[category], index_col=0)
-    keep = []
-    for column in frame.columns:
-        word_a, word_b = _parse_pair(column)
-        if (category, word_a) in EXCLUDED_MEMBERS or (category, word_b) in EXCLUDED_MEMBERS:
-            continue
-        keep.append(column)
-    return frame, keep
+    return frame, list(frame.columns)
 
 
 @functools.lru_cache(maxsize=1)
@@ -79,8 +87,9 @@ def load_human_similarity() -> pd.DataFrame:
     """
     One row per rated within-category pair.
 
-    Columns: category, word_a, word_b (canonical order), mean_rating (1 to 7, higher is
-    more similar, averaged over the subjects who rated that pair), n_raters.
+    Columns: category, word_a, word_b (canonical order), concept_a, concept_b (the keys
+    to join on), mean_rating (1 to 7, higher is more similar, averaged over the subjects
+    who rated that pair), n_raters.
     """
     rows = []
     for category in CATEGORY_FILES:
@@ -89,6 +98,8 @@ def load_human_similarity() -> pd.DataFrame:
             word_a, word_b = _parse_pair(column)
             values = frame[column].dropna()
             rows.append({"category": category, "word_a": word_a, "word_b": word_b,
+                         "concept_a": concept_for(category, word_a),
+                         "concept_b": concept_for(category, word_b),
                          "mean_rating": float(values.mean()), "n_raters": int(len(values))})
     return pd.DataFrame(rows)
 

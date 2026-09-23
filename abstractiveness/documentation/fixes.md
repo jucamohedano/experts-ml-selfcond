@@ -106,3 +106,53 @@ The word is admitted once, under the vegetables sense, because vegetables is the
 The rename matters more than it looks. `compute_responses.py` locates a concept's sentences at `<group>/<concept>.json`, reading the `concept` column of `concept_list.csv` rather than the `storage_key` column, so it looked for `squash.json`, found nothing, and skipped the concept without any error. That silent skip, not the metadata exclusion alone, is why `squash` is absent from the responses of both models.
 
 The dataset side is done: `metadata_Richie_HSJ.json` and the dataset config both carry 205 concepts aligned one to one, `custom/squash.json` holds the vegetables sentences, the sports files are parked under `excluded_senses/` so their sentences cannot leak into any other concept's negative pool, and `prepare_metadata_richie_hsj.py` now carries an `EXCLUDED_SENSES` set so regenerating the metadata does not reintroduce the sports row. What remains is computing responses and expertise for `squash` in both models, together with the regeneration above.
+
+**Superseded in September 2026 by the section below.**
+
+## Both squash senses admitted (September 2026)
+
+The exclusion above was reversed. Both senses are in the dataset as separate concepts, so the sports category is whole at 28 members and the stimulus set is 206 concepts over 205 distinct words.
+
+### The concept key
+
+A word the source table lists under two categories now gets one row per sense, keyed `word__category`. The identity moved off the surface form and onto a key, and the bare form lives in a new `word` field beside it. Anything lexical reads `word`, which is what WordNet is queried with, what the sentence generator sends to the model, and what the frequency tables are keyed on. Anything joining against an expert-side table reads `concept`. That split is what lets one spelling carry two expert sets.
+
+The rationale recorded for the original exclusion was mistaken, and it is worth stating why, because it survived into two later drafts. It held that one sense's sentences would sit in the negative pool of the other and corrupt the Average Precision. They do sit there, under separate keys exactly as before, 5 sports sentences among the negatives of `squash__vegetables` and 4 in the other direction, and nothing is corrupted by it. A label is corrupt when it is false, and a sentence about the game genuinely is not about the vegetable, so its label of 0 is true. Such cross-sense sentences are hard negatives that favour units responding to the meaning over units responding to the shared spelling, and the effect is small, since only 1 of the 1,000 negatives drawn for the vegetable sense contains the token `squash`. The real obstacle was always identity, which is what the silent skip described above actually was.
+
+The key is derived, never listed. `metadata_preparer` computes the ambiguous set as the surface forms appearing under more than one category in the word list, and `storage_key_for` in `generate_definitions_dspy.py` reaches the same key independently from the config. Nothing names `squash`. A different duplicate word would be keyed the same way with no code change, which was verified by building a throwaway word list with `bass` under two categories and watching `bass__birds` and `bass__sports` appear.
+
+`select_wordnet_sense` already resolved the two senses through the per-category anchors introduced by the sense fix above, returning `squash.n.02`, the edible fruit of a squash plant, for vegetables and `squash.n.03`, the game played in an enclosed court, for sports. No override was needed for either.
+
+### What was removed
+
+`EXCLUDED_SENSES`, `EXCLUDED_MEMBERS` and the `excluded_senses/` folder are gone. The sports sentence files moved into `custom/` and `custom/squash.json` became `custom/squash__vegetables.json`. Human similarity went from 2,391 rated pairs to 2,418, sports rising from 351 to the full 378, and because one word can now map to two concepts every pair row carries `concept_a` and `concept_b` beside `word_a` and `word_b`.
+
+### What the rebuild costs
+
+Nothing was regenerated. Both sets of positives already existed, the sports set having been parked rather than deleted when the exclusion was made, so no sentence was written and the paid endpoint was never called. What had to change is the negative pool, because `build_negatives_stratified` splits each concept's quota across all other concepts, so moving from 205 to 206 changes the quota and the sampling order for every concept. That is a local rebuild from the existing intermediate files through `--fix-intermediate`, which forces the negatives-only phase and makes no LM calls. Responses and expertise then have to be recomputed for all 206 in both models, since every concept's negatives moved.
+
+### Provenance of the `source` field
+
+The rebuild rewrites every `custom/*.json`, and `source` is computed once per run and stamped on all of them, so the field no longer distinguishes the concepts regenerated by the sense fix above. It recorded a real distinction and this is where that record now lives instead. These seventeen files carried `dspy_openai_Qwen_Qwen3-30B-A3B-Instruct-2507_sensefix`, meaning their positives came from the sense-fix regeneration rather than the original sweep:
+
+`canary`, `carriage`, `cuckoo`, `cushion`, `date`, `fencing`, `fireman`, `gloves`, `handball`, `minister`, `radio`, `scooter`, `secretary`, `sports`, `squash__vegetables`, `trailer`, `van`
+
+The other 189 carried the plain `dspy_openai_Qwen_Qwen3-30B-A3B-Instruct-2507`. Do not pass `--source-tag` on the negatives rebuild. The flag exists to mark a targeted regeneration of positives, and using it here would assert that all 206 positive sets came from this run, which is false for every one of them.
+
+See section 2 of [dataset_and_metadata.md](dataset_and_metadata.md) for the key scheme and section 8 for the schema.
+
+### The silent skip, returning and closed
+
+The first negatives rebuild reproduced the original failure exactly. `write_concept_list_csv` wrote the surface form into the `concept` column and the key into a separate `storage_key` column, but `selfcond.data.concept_list_to_df`, which both `compute_responses.py` and `compute_expertise.py` read the file through, takes only `group` and `concept` and then opens `<group>/<concept>.json`. Both squash rows therefore said `squash`, pointing at a `custom/squash.json` that no longer exists, and `compute_responses.py` answers a missing file with one line of output and a `return`, which is invisible inside a 206 concept loop.
+
+The column now holds the storage key and the surface form moved to a `word` column, matching the concept files themselves. A guard was added beside it: writing the CSV first checks that every row resolves to a file and raises `FileNotFoundError` naming the offenders, because a row that does not resolve is a silent skip rather than a loud failure, and this is the second time that has cost a concept.
+
+### A sentence labelled both positive and negative
+
+`build_negatives_stratified` excluded the target concept from its list of SOURCES but never checked sentence identity, and that is not the same guarantee. The generator sometimes writes one sentence verbatim for two related concepts, `radish` and `turnip` both receiving "The plant belongs to the Brassicaceae family, which includes cabbage and mustard.", so drawing that line from `turnip` placed a `radish` positive into the negatives of `radish`. The same string then carried both labels, which is a direct corruption of that concept's Average Precision.
+
+It surfaced only on the rebuild, at one sentence in one concept. The pre-rebuild dataset had zero such collisions, but by luck rather than by construction, since moving from 205 to 206 concepts changes both the per-source quota and the shuffle order and so re-rolls every draw. The sampler now filters each source pool against the target's own positives, at the per-source draw, at the deficit borrow and at the final fallback. A sentence shared between two concepts is still a legitimate negative for every OTHER concept, which is what the guard preserves.
+
+### Recomputing after the rebuild
+
+Every concept's negatives changed, not only squash's, because `build_negatives_stratified` splits each quota across all other concepts and the count moved from 205 to 206. Cached responses cannot be reused. `check_responses_complete` compares the sample COUNT against the expected 1,400 and nothing about the content, so a stale concept directory reports complete and is skipped rather than recomputed. The response trees of both models have to be removed by hand before the pipeline is rerun.
