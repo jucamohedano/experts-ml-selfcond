@@ -1,6 +1,6 @@
 # Logical fixes
 
-This file records logical corrections made to the analysis pipeline. It is kept short and is meant to be extended as further fixes are applied.
+This file records logical corrections made to the analysis pipeline. It is kept short and is meant to be extended as further fixes are applied. Each entry keeps the module numbering of its date. In the current layout former modules 1, 2 and the entropy panel of 4 are module 1, former modules 3, 5, 7 and the rest of 4 are module 2 (3 is section 2.1, 5 is sections 2.2 and 2.3, 7 is section 2.4), and former modules 6, 8 and 9 are modules 3, 4 and 5.
 
 ## Expert identity keyed on (layer, unit) pairs (modules 3 and 5)
 
@@ -58,7 +58,7 @@ Three supporting corrections landed with it. WordNet synsets are resolved lazily
 
 ### Detecting it again
 
-`scripts/audit_concept_senses.py` re-runs the check that found the problem. Each concept is represented by its positive sentences with its own name stripped out, the documents are TF-IDF vectorised, and each concept is scored by cosine similarity against every category profile with itself held out. A concept whose assigned category is not the best match is describing something other than what its category-mates describe. The report writes `results/concept_sense_audit.csv` and exits non-zero on any flag, so it can gate a regeneration run.
+`scripts/core/data_preparation/audit_stimulus_word_senses.py` re-runs the check that found the problem. Each concept is represented by its positive sentences with its own name stripped out, the documents are TF-IDF vectorised, and each concept is scored by cosine similarity against every category profile with itself held out. A concept whose assigned category is not the best match is describing something other than what its category-mates describe. The report writes `results/concept_sense_audit.csv` and exits non-zero on any flag, so it can gate a regeneration run.
 
 The audit is a screen rather than a proof. It catches errors that cross a category boundary, such as a bird described as a person, but not errors within a category, such as a railway van described instead of a road van, since both talk about vehicles. For those the report prints the currently chosen gloss beside each concept, which makes the mismatch readable even when the similarity ranking is clean.
 
@@ -119,13 +119,15 @@ A word the source table lists under two categories now gets one row per sense, k
 
 The rationale recorded for the original exclusion was mistaken, and it is worth stating why, because it survived into two later drafts. It held that one sense's sentences would sit in the negative pool of the other and corrupt the Average Precision. They do sit there, under separate keys exactly as before, 5 sports sentences among the negatives of `squash__vegetables` and 4 in the other direction, and nothing is corrupted by it. A label is corrupt when it is false, and a sentence about the game genuinely is not about the vegetable, so its label of 0 is true. Such cross-sense sentences are hard negatives that favour units responding to the meaning over units responding to the shared spelling, and the effect is small, since only 1 of the 1,000 negatives drawn for the vegetable sense contains the token `squash`. The real obstacle was always identity, which is what the silent skip described above actually was.
 
-The key is derived, never listed. `metadata_preparer` computes the ambiguous set as the surface forms appearing under more than one category in the word list, and `storage_key_for` in `generate_definitions_dspy.py` reaches the same key independently from the config. Nothing names `squash`. A different duplicate word would be keyed the same way with no code change, which was verified by building a throwaway word list with `bass` under two categories and watching `bass__birds` and `bass__sports` appear.
+The key is derived, never listed. `build_concept_metadata` computes the ambiguous set as the surface forms appearing under more than one category in the word list, and `storage_key_for` in `generate_definitions_dspy.py` reaches the same key independently from the config. Nothing names `squash`. A different duplicate word would be keyed the same way with no code change, which was verified by building a throwaway word list with `bass` under two categories and watching `bass__birds` and `bass__sports` appear.
 
 `select_wordnet_sense` already resolved the two senses through the per-category anchors introduced by the sense fix above, returning `squash.n.02`, the edible fruit of a squash plant, for vegetables and `squash.n.03`, the game played in an enclosed court, for sports. No override was needed for either.
 
 ### What was removed
 
 `EXCLUDED_SENSES`, `EXCLUDED_MEMBERS` and the `excluded_senses/` folder are gone. The sports sentence files moved into `custom/` and `custom/squash.json` became `custom/squash__vegetables.json`. Human similarity went from 2,391 rated pairs to 2,418, sports rising from 351 to the full 378, and because one word can now map to two concepts every pair row carries `concept_a` and `concept_b` beside `word_a` and `word_b`.
+
+**Correction, 28 September 2026.** The two joins that read the ratings, module 2's human validation (formerly module 5) and module 9's pair-similarity study, still matched pairs on `word_a` and `word_b` rather than on the concept keys, so every pair of `squash__sports` and `squash__vegetables` was silently dropped and the pipeline kept using 2,372 of the 2,418 rated pairs. Both now join on `concept_a` and `concept_b`, and `tests/check_module2_human_validation.py` requires every rated pair to be used. On Qwen3 at AP 0.5 the whole-model Jaccard agreement moved from 0.5045 to 0.5219 in sports (351 to 378 pairs) and from 0.2920 to 0.2832 in vegetables (171 to 190 pairs), and the mean over categories from 0.5070 to 0.5081.
 
 ### What the rebuild costs
 
