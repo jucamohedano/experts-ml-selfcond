@@ -6,7 +6,7 @@ relates to human similarity judgments, typicality and frequency. Explanations li
   2.2 pairwise similarities           every word pair, matrices, heatmaps, Jaccard against layer profile
   2.3 human similarity validation     pairwise matrices against the human pair ratings
   2.4 typicality                      cosine typicality and every correlation with human typicality
-  2.5 frequency correlations          US and Wikipedia frequency against the expert measures
+  2.5 frequency correlations          the model's corpus frequency against the expert measures
 """
 
 import logging
@@ -28,8 +28,8 @@ from modules.shared_layer_profile_measures import (pair_layer_profile_vectors,
 from core.analysis_scopes import to_block_axis, axis_variants, scope_section_dir, scope_summary_row
 from core.expert_data_loading import expert_counts_with_metadata
 from core.correlation_reporting import (panel_r_columns, run_regression_panel, run_regression_grid,
-                                        regression_row, regression_grid_rows, MIN_ABSOLUTE_N,
-                                        MIN_COVERAGE_FRACTION)
+                                        regression_row, regression_grid_rows, note_coverage_skip,
+                                        MIN_ABSOLUTE_N, MIN_COVERAGE_FRACTION)
 from core.human_similarity_ratings import load_human_similarity, human_noise_ceiling
 from utils.plotting import (_plot_bar_with_leaders, _plot_heatmap_with_leaders,
                             apply_rotated_leader_labels, build_category_color_map, fig_width_for,
@@ -549,12 +549,21 @@ def _within_category_vectors(concepts: list, matrix: np.ndarray, pairs: pd.DataF
     return np.asarray(model, dtype=float), np.asarray(human, dtype=float), positions
 
 
+def _spearman_rho(model, human) -> float:
+    """Spearman rho, NaN without scipy's ConstantInputWarning when either side is constant."""
+    if np.ptp(model) == 0 or np.ptp(human) == 0:
+        return float("nan")
+    return float(spearmanr(model, human).statistic)
+
+
 def _mantel_within_category(model: np.ndarray, human: np.ndarray, positions: list,
                             matrix: np.ndarray, rng) -> float:
-    """Mantel p permuting concept labels within the category."""
+    """Mantel p permuting concept labels within the category, NaN when rho is undefined."""
     if len(model) < 3:
         return float("nan")
-    observed = abs(spearmanr(model, human).statistic)
+    observed = abs(_spearman_rho(model, human))
+    if not np.isfinite(observed):
+        return float("nan")
     members = np.array(sorted({position for pair in positions for position in pair}))
     slot = {member: index for index, member in enumerate(members)}
     rows = np.array([slot[a] for a, _ in positions])
@@ -568,7 +577,7 @@ def _mantel_within_category(model: np.ndarray, human: np.ndarray, positions: lis
         if usable.sum() < 3:
             continue
         drawn += 1
-        if abs(spearmanr(permuted[usable], human[usable]).statistic) >= observed:
+        if abs(_spearman_rho(permuted[usable], human[usable])) >= observed:
             hits += 1
     if drawn == 0:
         return float("nan")
@@ -601,7 +610,7 @@ def plot_human_vs_expert(concepts: list, matrix: np.ndarray, metric_label: str,
             axis.set_visible(False)
             continue
         axis.scatter(model, human, s=12, alpha=0.5, color=CORRELATION_COLORS["points"], edgecolors="none")
-        rho = spearmanr(model, human).statistic
+        rho = _spearman_rho(model, human)
         if len(np.unique(model)) > 1:
             try:
                 from sklearn.isotonic import IsotonicRegression
@@ -684,7 +693,7 @@ def validate_against_human(concepts: list, matrices: dict, out_dir,
                                                                category, with_experts)
             if len(model) < 3:
                 continue
-            rho = float(spearmanr(model, human).statistic)
+            rho = _spearman_rho(model, human)
             ceiling = ceilings[category]
             rows.append({"metric": key, "metric_label": label, "category": category,
                          "coefficient": HUMAN_COEFFICIENT.lower(), "test": "mantel",
@@ -698,7 +707,7 @@ def validate_against_human(concepts: list, matrices: dict, out_dir,
             per_category_rho.append(rho)
 
         if per_category_rho:
-            pooled = float(spearmanr(pooled_model, pooled_human).statistic)
+            pooled = _spearman_rho(pooled_model, pooled_human)
             mean_ceiling = float(np.mean([ceilings[c] for c in sorted(ceilings)]))
             mean_rho = float(np.nanmean(per_category_rho))
             for name, value in [("POOLED", pooled), ("POOLED_MEAN", mean_rho)]:
@@ -997,33 +1006,34 @@ def _summarize_typicality(global_typicality_df: pd.DataFrame) -> dict:
 HUMAN_TYPICALITY_LABEL = "Human typicality (Richie and Bhatia, pairwise)"
 
 
-FREQUENCY_US_LABEL = "US frequency (SUBTLEX-US lemma, Zipf)"
+# Training-exposure frequency per corpus, (metadata column, axis label), chosen per model config.
+FREQUENCY_CORPORA = {
+    "openwebtext": ("frequency_zipf_openwebtext_lemma", "OpenWebText frequency (lemma, Zipf)"),
+    "fineweb": ("frequency_zipf_fineweb_lemma", "FineWeb frequency (lemma, Zipf)"),
+}
 
 
-FREQUENCY_WIKI_LABEL = "Wikipedia frequency (lemma, Zipf)"
-
-
-def grouped_correlation_figures(n_words: int, n_categorized: int) -> list:
-    """Specification of the three grouped figures, the measure on x against its covariates on y."""
+def grouped_correlation_figures(n_words: int, n_categorized: int, frequency_corpus: str) -> list:
+    """Specification of the two grouped figures, the measure on x against its covariates on y."""
+    frequency_col, frequency_label = FREQUENCY_CORPORA[frequency_corpus]
+    frequency_name = f"frequency_{frequency_corpus}"
     expert_count = ("expert_count", "Expert count", "expert_count", n_words)
     jaccard = ("jaccard_pct", "Jaccard % with category label", "jaccard", n_categorized)
     overlap = ("overlap_pct", "Overlap % with category label", "overlap", n_categorized)
     typicality = ("human_typicality", HUMAN_TYPICALITY_LABEL, "human_typicality", n_words)
-    frequency_us = ("frequency_zipf_subtlex_us_lemma", FREQUENCY_US_LABEL, "frequency_us", n_words)
+    frequency = (frequency_col, frequency_label, frequency_name, n_words)
     return [
         ("human_typicality", HUMAN_TYPICALITY_LABEL, "human_typicality", "Human typicality against expert measures and frequency",
-         [expert_count, jaccard, overlap, frequency_us]),
-        ("frequency_zipf_subtlex_us_lemma", FREQUENCY_US_LABEL, "frequency_us",
-         "US frequency (SUBTLEX-US) against expert measures and human typicality",
-         [expert_count, jaccard, overlap, typicality]),
-        ("frequency_zipf_wikipedia_lemma", FREQUENCY_WIKI_LABEL, "frequency_wiki",
-         "Wikipedia frequency against expert measures and human typicality",
+         [expert_count, jaccard, overlap, frequency]),
+        (frequency_col, frequency_label, frequency_name,
+         f"{frequency_label.split(' (')[0]} against expert measures and human typicality",
          [expert_count, jaccard, overlap, typicality]),
     ]
 
 
 def plot_grouped_correlations(merged_metadata_df: pd.DataFrame, similarity_metrics_df: pd.DataFrame,
-                              concept_metadata: pd.DataFrame, corr_dir, x_names: list) -> list:
+                              concept_metadata: pd.DataFrame, corr_dir, x_names: list,
+                              frequency_corpus: str) -> list:
     """The grouped figures named in x_names, each measure on x against expert count, Jaccard, overlap and the others."""
     wide = merged_metadata_df.copy()
     if similarity_metrics_df is not None and not similarity_metrics_df.empty:
@@ -1033,7 +1043,8 @@ def plot_grouped_correlations(merged_metadata_df: pd.DataFrame, similarity_metri
         wide["jaccard_pct"], wide["overlap_pct"] = np.nan, np.nan
     n_categorized = int(concept_metadata["category"].notna().sum())
     summary_rows = []
-    for x_col, x_label, x_name, title, panels in grouped_correlation_figures(len(concept_metadata), n_categorized):
+    for x_col, x_label, x_name, title, panels in grouped_correlation_figures(
+            len(concept_metadata), n_categorized, frequency_corpus):
         if x_name not in x_names:
             continue
         if x_col not in wide.columns:
@@ -1055,53 +1066,82 @@ def _residualize(values: pd.Series, control: pd.Series) -> pd.Series:
     return values - (slope * control + intercept)
 
 
-def plot_partial_correlation_jaccard_human_typicality(corr_data: pd.DataFrame, corr_dir, n_total_relevant: int) -> dict:
-    """Jaccard against typicality, both residualized on log frequency."""
-    clean_data = corr_data.dropna(subset=["jaccard_pct", "human_typicality", "log_frequency"]).copy()
+JACCARD_PARTIAL_AXIS = ("jaccard_pct", "jaccard", "Jaccard with category label (%)")
+
+
+def _frequency_short_label(frequency_corpus: str) -> str:
+    """The corpus frequency label without its unit, as used in titles and residual axes."""
+    return FREQUENCY_CORPORA[frequency_corpus][1].split(" (")[0]
+
+
+def _partial_correlation(corr_data: pd.DataFrame, corr_dir, n_total_relevant: int, plot_name: str, title: str,
+                         x: tuple, y: tuple, control: tuple) -> list:
+    """Pearson r of x and y after both are residualized on control, x and y as (column, name, label), control as (column, label)."""
+    (x_col, x_name, x_label), (y_col, y_name, y_label), (control_col, control_label) = x, y, control
+    missing = [col for col in (x_col, y_col, control_col) if col not in corr_data.columns]
+    if missing:
+        log.warning(f"  Skipping {plot_name}: no {', '.join(missing)} column.")
+        return []
+    clean_data = corr_data.dropna(subset=[x_col, y_col, control_col]).copy()
     n = len(clean_data)
     coverage = n / n_total_relevant if n_total_relevant else 0.0
+    x_resid, y_resid = f"{x_name}_resid", f"{y_name}_resid"
     summary_row = {
-        "plot_name": "partial_correlation_jaccard_human_typicality", "x_variable": "jaccard_resid",
-        "y_variable": "human_typicality_resid", "pearson_r": None, "pearson_p": None,
+        "plot_name": plot_name, "x_variable": x_resid, "y_variable": y_resid, "pearson_r": None, "pearson_p": None,
         "n_points": n, "n_total_relevant": n_total_relevant, "coverage_pct": round(100 * coverage, 1),
-        "controlling_for": "log_frequency",
+        "controlling_for": control_col,
     }
     if n < MIN_ABSOLUTE_N or coverage < MIN_COVERAGE_FRACTION:
-        log.warning(f"  Skipping partial_correlation_jaccard_human_typicality: n={n} covers {coverage:.0%} of "
-                    f"{n_total_relevant} relevant concepts (need >={MIN_ABSOLUTE_N} and >={MIN_COVERAGE_FRACTION:.0%}).")
-        return summary_row
+        note_coverage_skip(plot_name, n, n_total_relevant)
+        return [summary_row]
 
-    clean_data["jaccard_resid"] = _residualize(clean_data["jaccard_pct"], clean_data["log_frequency"])
-    clean_data["human_typicality_resid"] = _residualize(clean_data["human_typicality"], clean_data["log_frequency"])
-    r, p = stats.pearsonr(clean_data["jaccard_resid"], clean_data["human_typicality_resid"])
+    clean_data[x_resid] = _residualize(clean_data[x_col], clean_data[control_col])
+    clean_data[y_resid] = _residualize(clean_data[y_col], clean_data[control_col])
+    r, p = stats.pearsonr(clean_data[x_resid], clean_data[y_resid])
     summary_row["pearson_r"], summary_row["pearson_p"] = r, p
     if corr_dir is None:
-        return summary_row
-    save_dataframe(
-        clean_data[["concept", "category", "log_frequency", "jaccard_pct", "human_typicality", "jaccard_resid", "human_typicality_resid"]],
-        corr_dir / "partial_correlation_jaccard_human_typicality.csv"
-    )
+        return [summary_row]
+    save_dataframe(clean_data[["concept", "category", control_col, x_col, y_col, x_resid, y_resid]],
+                   corr_dir / f"{plot_name}.csv")
 
     fig, ax = plt.subplots(figsize=(7.5, 6.5))
-    draw_regression(ax, clean_data, "human_typicality_resid", "jaccard_resid")
-    set_title(ax, "Jaccard against human typicality, controlling for frequency",
-              stats_line("Partial r", r, p, n))
-    ax.set_xlabel("Human typicality, residual after log frequency")
-    ax.set_ylabel("Jaccard with category label (%), residual after log frequency")
+    draw_regression(ax, clean_data, x_resid, y_resid)
+    set_title(ax, title, stats_line("Partial r", r, p, n))
+    ax.set_xlabel(f"{x_label}, residual after {control_label}")
+    ax.set_ylabel(f"{y_label}, residual after {control_label}")
     fig.tight_layout()
-    fig.savefig(corr_dir / "partial_correlation_jaccard_human_typicality.png", dpi=300)
+    fig.savefig(corr_dir / f"{plot_name}.png", dpi=300)
     plt.close(fig)
-    return summary_row
+    return [summary_row]
 
 
 def plot_partial_correlation(merged_metadata_df: pd.DataFrame, similarity_metrics_df: pd.DataFrame,
-                             concept_metadata: pd.DataFrame, corr_dir) -> list:
-    """The frequency-controlled partial correlation of Jaccard and human typicality."""
+                             concept_metadata: pd.DataFrame, corr_dir, frequency_corpus: str) -> list:
+    """Jaccard against human typicality, both residualized on the model's corpus frequency."""
     corr_data = _concept_parent_frame(merged_metadata_df, similarity_metrics_df)
     if corr_data.empty:
         return []
-    return [plot_partial_correlation_jaccard_human_typicality(corr_data, corr_dir,
-                                                              concept_metadata['category'].notna().sum())]
+    frequency_col = FREQUENCY_CORPORA[frequency_corpus][0]
+    return _partial_correlation(
+        corr_data, corr_dir, concept_metadata['category'].notna().sum(),
+        "partial_correlation_jaccard_human_typicality", "Jaccard against human typicality, controlling for frequency",
+        ("human_typicality", "human_typicality", "Human typicality"), JACCARD_PARTIAL_AXIS,
+        (frequency_col, _frequency_short_label(frequency_corpus)))
+
+
+def plot_partial_correlation_jaccard_frequency(merged_metadata_df: pd.DataFrame, similarity_metrics_df: pd.DataFrame,
+                                               concept_metadata: pd.DataFrame, corr_dir, frequency_corpus: str) -> list:
+    """Jaccard against the model's corpus frequency, both residualized on human typicality."""
+    corr_data = _concept_parent_frame(merged_metadata_df, similarity_metrics_df)
+    if corr_data.empty:
+        return []
+    frequency_col = FREQUENCY_CORPORA[frequency_corpus][0]
+    short_label = _frequency_short_label(frequency_corpus)
+    return _partial_correlation(
+        corr_data, corr_dir, concept_metadata['category'].notna().sum(),
+        "partial_correlation_jaccard_frequency", "Jaccard against frequency, controlling for human typicality",
+        (frequency_col, "frequency", f"{short_label} (Zipf)"), JACCARD_PARTIAL_AXIS,
+        ("human_typicality", "human typicality"))
 
 
 def plot_jaccard_vs_cosine_typicality(similarity_metrics_df: pd.DataFrame, global_typicality_df: pd.DataFrame,
@@ -1121,7 +1161,7 @@ def plot_jaccard_vs_cosine_typicality(similarity_metrics_df: pd.DataFrame, globa
 
 
 def run_typicality(scope, concept_metadata: pd.DataFrame, merged_meta: pd.DataFrame,
-                   similarity_metrics_df: pd.DataFrame, out_dir) -> dict:
+                   similarity_metrics_df: pd.DataFrame, out_dir, frequency_corpus: str) -> dict:
     """Cosine typicality of one scope, global and per layer, and every correlation with human typicality."""
     log.info(f"  [{scope.label}] Computing Empirical Cosine Typicality...")
     typ_global_df = compute_global_typicality(scope.expert_df, concept_metadata, out_dir)
@@ -1134,8 +1174,8 @@ def run_typicality(scope, concept_metadata: pd.DataFrame, merged_meta: pd.DataFr
 
     log.info(f"  [{scope.label}] Generating human typicality correlation plots...")
     rows = plot_grouped_correlations(merged_meta, similarity_metrics_df, concept_metadata, out_dir,
-                                     ["human_typicality"])
-    rows += plot_partial_correlation(merged_meta, similarity_metrics_df, concept_metadata, out_dir)
+                                     ["human_typicality"], frequency_corpus)
+    rows += plot_partial_correlation(merged_meta, similarity_metrics_df, concept_metadata, out_dir, frequency_corpus)
     rows += plot_jaccard_vs_cosine_typicality(similarity_metrics_df, typ_global_df, concept_metadata, out_dir)
     summary_df = _write_correlation_summary(rows, out_dir)
     return scope_summary_row(scope, **_summarize_typicality(typ_global_df), **panel_r_columns(summary_df))
@@ -1146,16 +1186,23 @@ def run_typicality(scope, concept_metadata: pd.DataFrame, merged_meta: pd.DataFr
 # ---------------------------------------------------------------------------
 
 FREQUENCY_SUMMARY_LABELS = {
-    "r_frequency_us_vs_expert_count": "r, US frequency vs expert count",
+    **{f"r_frequency_{corpus}_vs_{y_name}": f"r, {_frequency_short_label(corpus)} vs {y_label}"
+       for corpus in FREQUENCY_CORPORA
+       for y_name, y_label in (("expert_count", "expert count"), ("jaccard", "Jaccard"), ("overlap", "overlap"),
+                               ("human_typicality", "human typicality"))},
+    "r_partial_correlation_jaccard_frequency": "Partial r, Jaccard vs frequency given human typicality",
 }
 
 
 def run_frequency_correlations(scope, concept_metadata: pd.DataFrame, merged_meta: pd.DataFrame,
-                               similarity_metrics_df: pd.DataFrame, out_dir) -> dict:
-    """US and Wikipedia frequency against expert count, Jaccard, overlap and human typicality."""
+                               similarity_metrics_df: pd.DataFrame, out_dir, frequency_corpus: str) -> dict:
+    """The model's corpus frequency against expert count, Jaccard, overlap and human typicality, and the
+    Jaccard against frequency partial correlation controlling human typicality."""
     log.info(f"  [{scope.label}] Generating frequency correlation plots...")
     rows = plot_grouped_correlations(merged_meta, similarity_metrics_df, concept_metadata, out_dir,
-                                     ["frequency_us", "frequency_wiki"])
+                                     [f"frequency_{frequency_corpus}"], frequency_corpus)
+    rows += plot_partial_correlation_jaccard_frequency(merged_meta, similarity_metrics_df, concept_metadata,
+                                                       out_dir, frequency_corpus)
     summary_df = _write_correlation_summary(rows, out_dir)
     return scope_summary_row(scope, **panel_r_columns(summary_df))
 
@@ -1174,7 +1221,7 @@ SECTION_SUMMARY_LABELS = {
 
 
 def execute_module_2_similarities(scope, concept_metadata: pd.DataFrame, module_dir,
-                                  write_outputs: bool = True) -> dict:
+                                  write_outputs: bool = True, *, frequency_corpus: str) -> dict:
     """Run every section on one scope, returns {section: sublayer_comparison row}.
 
     With write_outputs False nothing is written and only the default profile metric is computed,
@@ -1197,6 +1244,8 @@ def execute_module_2_similarities(scope, concept_metadata: pd.DataFrame, module_
     matrices, rows["2.2"] = run_pairwise_similarities(scope, concept_metadata, out("2.2"), profile("heatmaps"), metrics)
     rows["2.3"] = run_human_similarity_validation(scope, matrices, out("2.3"), profile("heatmaps"),
                                                   profile("similarity_correlation"))
-    rows["2.4"] = run_typicality(scope, concept_metadata, merged_meta, similarity_metrics_df, out("2.4"))
-    rows["2.5"] = run_frequency_correlations(scope, concept_metadata, merged_meta, similarity_metrics_df, out("2.5"))
+    rows["2.4"] = run_typicality(scope, concept_metadata, merged_meta, similarity_metrics_df, out("2.4"),
+                                 frequency_corpus)
+    rows["2.5"] = run_frequency_correlations(scope, concept_metadata, merged_meta, similarity_metrics_df, out("2.5"),
+                                             frequency_corpus)
     return rows

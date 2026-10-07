@@ -10,6 +10,7 @@ from core.expert_data_loading import (load_experts_data, init_global_layer_mappi
                                       filter_expert_data_to_sublayer)
 from core.embedding_cache import load_or_build_concept_embeddings
 from core.analysis_scopes import build_analysis_scopes, load_or_build_sublayer_rank
+from core.correlation_reporting import pop_coverage_skips
 from modules import (module_1_expert_distribution, module_2_similarities, module_3_dual_category_jsd,
                      module_5_typicality_prediction)
 from modules.module_4_embedding_rsa import execute_module_4_embedding_rsa
@@ -65,6 +66,9 @@ root_logger.addHandler(console_handler)
 #                        restricted to; module 1 still sees everything (whole-model
 #                        plots + the informativeness ranking justifying this choice).
 #                        Set to None to analyze all sublayers as before.
+#   frequency_corpus   : training-exposure frequency module 2 reads, a key of
+#                        module_2_similarities.FREQUENCY_CORPORA, "openwebtext" for
+#                        GPT-2 (WebText proxy) and "fineweb" for Qwen3 (web-dominated corpus)
 #   embedding_cache_file : concept embedding cache under assets/, consumed by module 4.
 #                        Built from the response pkls on the first run with module 4
 #                        enabled, then reused, see core/embedding_cache.py.
@@ -79,6 +83,7 @@ MODEL_CONFIGS = {
         "typicality_column": "typicality",
         "output_subdir": "research_plots_150_final",
         "sublayer_filter": "mlp.c_fc",
+        "frequency_corpus": "openwebtext",
         "embedding_cache_file": "concept_embeddings_gpt2_150.npz",
     },
     "qwen3_richie_hsj": {
@@ -90,6 +95,7 @@ MODEL_CONFIGS = {
         "typicality_column": "typicality_HSJ_pairwise",
         "output_subdir": "research_plots_qwen_richie_hsj_restructured_final",
         "sublayer_filter": "mlp.gate_proj",
+        "frequency_corpus": "fineweb",
         "embedding_cache_file": "concept_embeddings_qwen3_richie_hsj.npz",
     },
     # GPT-2 on the same Richie-HSJ dataset -- the architecture comparison against
@@ -103,6 +109,7 @@ MODEL_CONFIGS = {
         "typicality_column": "typicality_HSJ_pairwise",
         "output_subdir": "research_plots_gpt2_richie_hsj_restructured_final",
         "sublayer_filter": "mlp.c_fc",
+        "frequency_corpus": "openwebtext",
         "embedding_cache_file": "concept_embeddings_gpt2_richie_hsj.npz",
     },
 }
@@ -205,7 +212,8 @@ if __name__ == "__main__":
                     entries += section_entries(
                         module_2_similarities, module_dirs[2],
                         module_2_similarities.execute_module_2_similarities(
-                            scope, concept_metadata, module_dirs[2], write))
+                            scope, concept_metadata, module_dirs[2], write,
+                            frequency_corpus=cfg["frequency_corpus"]))
                 if 3 in ENABLED_MODULES:
                     _, _, row = module_3_dual_category_jsd.execute_module_3_dual_category_jsd(
                         scope, concept_metadata, module_dirs[3], write)
@@ -217,6 +225,8 @@ if __name__ == "__main__":
 
                 for folder, labels, title, row in entries:
                     summaries.setdefault(folder, (labels, title, []))[2].append(row)
+                if coverage_skips := pop_coverage_skips():
+                    log.info(f"  [{scope.label}] {coverage_skips}")
 
             # One cross-scope comparison table per module or section, the readable summary of
             # a sweep that would otherwise be seven folders deep at every AP threshold.

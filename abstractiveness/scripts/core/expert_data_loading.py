@@ -113,6 +113,7 @@ def expert_counts_with_metadata(expert_allocation_df: pd.DataFrame, concept_meta
         merged['log_frequency'] = np.log10(merged['frequency'])
     desired_order = ["concept", "category", "abstraction_level", "frequency", "log_frequency",
                      "frequency_zipf_subtlex_us_lemma", "frequency_zipf_wikipedia_lemma",
+                     "frequency_zipf_openwebtext_lemma", "frequency_zipf_fineweb_lemma",
                      "human_typicality", "expert_count"]
     merged = merged[[col for col in desired_order if col in merged.columns]]
     if 'abstraction_level' in merged.columns:

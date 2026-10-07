@@ -158,3 +158,7 @@ It surfaced only on the rebuild, at one sentence in one concept. The pre-rebuild
 ### Recomputing after the rebuild
 
 Every concept's negatives changed, not only squash's, because `build_negatives_stratified` splits each quota across all other concepts and the count moved from 205 to 206. Cached responses cannot be reused. `check_responses_complete` compares the sample COUNT against the expected 1,400 and nothing about the content, so a stale concept directory reports complete and is skipped rather than recomputed. The response trees of both models have to be removed by hand before the pipeline is rerun.
+
+## Mantel p on a constant similarity vector (module 2, October 2026)
+
+Section 2.3 tests each category's Spearman $\rho_k$ with a within-category Mantel permutation. At strict thresholds on thin sublayers every rated pair of a category can share the same model value, typically Jaccard 0, and Spearman is then undefined. The observed $|\rho_k|$ was NaN, no permuted value compares as greater or equal to NaN, so the hit count stayed at zero and the test returned its floor $1/(B+1) = 0.001$, a spurious significance for a correlation that does not exist. The row now carries NaN for both $\rho_k$ and $\hat p_k$, and every Spearman call of the section returns NaN for constant input without calling scipy, which also removes its `ConstantInputWarning` from the log. Rows with a defined $\rho_k$ are unchanged.

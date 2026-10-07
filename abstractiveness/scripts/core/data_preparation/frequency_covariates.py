@@ -2,7 +2,8 @@
 Word frequency covariates on the Zipf scale, from Wikipedia and the two SUBTLEX corpora.
 
 Read by build_concept_metadata through frequency_columns(). The unsummed and British reference
-values (wikipedia_zipf, subtlex_us_zipf, subtlex_uk_zipf) stay public for auditing.
+values (wikipedia_zipf, surface_zipf, subtlex_us_zipf, subtlex_uk_zipf) stay public for auditing.
+The OpenWebText and FineWeb count files are written by corpus_word_counts.
 
 Explanations: documentation/dataset_and_metadata.md, section 6.
 """
@@ -15,6 +16,8 @@ import pathlib
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[4]
 ASSETS_DIR = REPO_ROOT / "abstractiveness/assets"
 WIKIPEDIA_FILE = ASSETS_DIR / "enwiki-2023-04-13.txt"
+OPENWEBTEXT_FILE = ASSETS_DIR / "openwebtext-word-counts.txt"
+FINEWEB_FILE = ASSETS_DIR / "fineweb-sample-10BT-word-counts.txt"
 SUBTLEX_US_FILE = ASSETS_DIR / "SUBTLEX-US.txt"
 SUBTLEX_UK_FILE = ASSETS_DIR / "SUBTLEX-UK.txt"
 SUBTLEX_ENCODING = "latin-1"
@@ -88,11 +91,13 @@ def zipf_from_per_million(per_million: float) -> float:
     return math.log10(per_million) + PER_MILLION_TO_BILLION
 
 
-@functools.lru_cache(maxsize=1)
-def load_wikipedia_counts() -> dict:
-    """Lowercased surface form to raw token count."""
+@functools.lru_cache(maxsize=None)
+def load_counts(path: pathlib.Path) -> dict:
+    """Lowercased surface form to raw token count, from a 'word count' file."""
+    if not path.exists():
+        raise FileNotFoundError(f"{path} is missing, see documentation/dataset_and_metadata.md section 6")
     counts = {}
-    with open(WIKIPEDIA_FILE, "r", encoding="utf-8") as handle:
+    with open(path, "r", encoding="utf-8") as handle:
         for line in handle:
             parts = line.strip().rsplit(None, 1)
             if len(parts) != 2:
@@ -105,10 +110,20 @@ def load_wikipedia_counts() -> dict:
     return counts
 
 
-@functools.lru_cache(maxsize=1)
+@functools.lru_cache(maxsize=None)
+def corpus_tokens(path: pathlib.Path) -> int:
+    """Total tokens in a count file."""
+    return sum(load_counts(path).values())
+
+
+def load_wikipedia_counts() -> dict:
+    """Lowercased surface form to raw Wikipedia token count."""
+    return load_counts(WIKIPEDIA_FILE)
+
+
 def wikipedia_corpus_tokens() -> int:
-    """Total tokens in the count file."""
-    return sum(load_wikipedia_counts().values())
+    """Total tokens in the Wikipedia count file."""
+    return corpus_tokens(WIKIPEDIA_FILE)
 
 
 @functools.lru_cache(maxsize=1)
@@ -142,17 +157,37 @@ def load_subtlex_uk() -> dict:
     return zipfs
 
 
+def surface_zipf(path: pathlib.Path, word: str):
+    """Zipf of the listed surface form in a count file."""
+    count = load_counts(path).get(word.lower())
+    return None if not count else zipf_from_count(count, corpus_tokens(path))
+
+
+def lemma_zipf(path: pathlib.Path, word: str):
+    """Zipf of a count file's counts summed over inflected_forms()."""
+    counts = load_counts(path)
+    total = sum(counts.get(form, 0) for form in inflected_forms(word))
+    return None if not total else zipf_from_count(total, corpus_tokens(path))
+
+
 def wikipedia_zipf(word: str):
     """Zipf of the listed surface form in the Wikipedia dump."""
-    count = load_wikipedia_counts().get(word.lower())
-    return None if not count else zipf_from_count(count, wikipedia_corpus_tokens())
+    return surface_zipf(WIKIPEDIA_FILE, word)
 
 
 def wikipedia_lemma_zipf(word: str):
     """Zipf of the Wikipedia counts summed over inflected_forms()."""
-    counts = load_wikipedia_counts()
-    total = sum(counts.get(form, 0) for form in inflected_forms(word))
-    return None if not total else zipf_from_count(total, wikipedia_corpus_tokens())
+    return lemma_zipf(WIKIPEDIA_FILE, word)
+
+
+def openwebtext_lemma_zipf(word: str):
+    """Zipf of the OpenWebText counts summed over inflected_forms(), the GPT-2 exposure proxy."""
+    return lemma_zipf(OPENWEBTEXT_FILE, word)
+
+
+def fineweb_lemma_zipf(word: str):
+    """Zipf of the FineWeb sample counts summed over inflected_forms(), the Qwen3 exposure proxy."""
+    return lemma_zipf(FINEWEB_FILE, word)
 
 
 def subtlex_us_zipf(word: str):
@@ -184,4 +219,6 @@ def frequency_columns(word: str) -> dict:
         "frequency": wikipedia_count(word),
         "frequency_zipf_subtlex_us_lemma": subtlex_us_lemma_zipf(word),
         "frequency_zipf_wikipedia_lemma": wikipedia_lemma_zipf(word),
+        "frequency_zipf_openwebtext_lemma": openwebtext_lemma_zipf(word),
+        "frequency_zipf_fineweb_lemma": fineweb_lemma_zipf(word),
     }

@@ -85,7 +85,8 @@ def main():
     filled = lambda key: sum(1 for row in rows if row[key] is not None)
     print(f"Wrote {len(rows)} entries to {OUTPUT_JSON} "
           f"({n_level1} level 1, {n_level2} level 2)")
-    for key in ("frequency_zipf_subtlex_us_lemma", "frequency_zipf_wikipedia_lemma"):
+    for key in ("frequency_zipf_subtlex_us_lemma", "frequency_zipf_wikipedia_lemma",
+                "frequency_zipf_openwebtext_lemma", "frequency_zipf_fineweb_lemma"):
         print(f"  {key}: {filled(key)}/{len(rows)}")
     for key in ("typicality_HSJ_pairwise", "typicality_HSJ_spam"):
         print(f"  {key}: {filled(key)}/{n_level2} level 2")

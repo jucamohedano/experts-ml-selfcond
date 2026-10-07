@@ -28,9 +28,13 @@ sys.path.insert(0, str(REPO_ROOT))
 
 # --- Model selection: keep exactly one block uncommented. -------------------
 
-# Qwen3-1.7B
-MODEL          = "Qwen/Qwen3-1.7B"
-RESPONSES_PATH = str(REPO_ROOT / "abstractiveness" / "responses" / "Qwen3_1.7B_abstractiveness_Richie_HSJ_responses")
+# Qwen3-1.7B-Base (pre-trained)
+MODEL          = "Qwen/Qwen3-1.7B-Base"
+RESPONSES_PATH = str(REPO_ROOT / "abstractiveness" / "responses" / "Qwen3_1.7B_Base_abstractiveness_Richie_HSJ_responses")
+
+# Qwen3-1.7B (post-trained)
+# MODEL          = "Qwen/Qwen3-1.7B"
+# RESPONSES_PATH = str(REPO_ROOT / "abstractiveness" / "responses" / "Qwen3_1.7B_abstractiveness_Richie_HSJ_responses")
 
 # GPT-2
 # MODEL          = "gpt2"

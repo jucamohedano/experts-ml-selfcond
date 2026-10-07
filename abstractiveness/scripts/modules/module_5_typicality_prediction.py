@@ -2145,6 +2145,9 @@ def _layout_coordinates(distance: np.ndarray) -> np.ndarray:
     signature = MDS.__init__.__code__.co_varnames
     kwargs = dict(n_components=2, normalized_stress=True, n_init=4, max_iter=500,
                   random_state=CLUSTER_SEED)
+    # sklearn 1.8 warns on every fit unless init is explicit, random is its current default.
+    if "init" in signature:
+        kwargs["init"] = "random"
     model = (MDS(metric="precomputed", metric_mds=True, **kwargs)
              if "metric_mds" in signature
              else MDS(dissimilarity="precomputed", metric=True, **kwargs))
@@ -2201,6 +2204,17 @@ def plot_concept_graph(coords: np.ndarray, edges: pd.DataFrame, items: list,
     plt.close(fig)
 
 
+def _usable_words_summary(spaces: dict, n_items: int) -> str:
+    """Words with a usable profile per space, spaces sharing a count folded into one clause."""
+    by_count = {}
+    for space, (_, usable) in spaces.items():
+        by_count.setdefault(int(usable.sum()), []).append(space)
+    clauses = [f"{count} of {n_items} usable in "
+               + (names[0] if len(names) == 1 else f"{len(names)} spaces")
+               for count, names in sorted(by_count.items(), reverse=True)]
+    return ", ".join(clauses)
+
+
 def run_dendrograms(space: str, distance: np.ndarray, usable: np.ndarray, items: list,
                     prob_matrix: pd.DataFrame, meta: pd.DataFrame, descriptors: pd.DataFrame,
                     out_dir, axis_label: str) -> dict:
@@ -2221,7 +2235,6 @@ def run_dendrograms(space: str, distance: np.ndarray, usable: np.ndarray, items:
         log.warning(f"    [{space}] Skipping this space: {len(keep)} of {len(items)} words "
                     f"carry a usable profile, need more than the k={CLUSTER_CUT_K} cut.")
         return {}
-    log.info(f"    [{space}] {len(keep)} of {len(items)} words carry a usable profile")
 
     out_dir.mkdir(parents=True, exist_ok=True)
     kept_items = [items[i] for i in keep]
@@ -2438,9 +2451,6 @@ def execute_study_c_concept_structure(scope, concept_metadata: pd.DataFrame,
     CLUSTER_COLOR_MAP[0] = build_category_color_map(
         concept_metadata.sort_values(["abstraction_level", "concept"])["category"])
 
-    log.info(f"  [{scope.label}] Study C: {len(items)} words, {prob_matrix.shape[1]} "
-             f"{axis_label} bins, {int(count_matrix.to_numpy().sum())} expert rows")
-
     spaces, agreements = cluster_spaces(expert_axis_df, items)
 
     # The expert-set space, on the SCOPE frame rather than the depth-aggregated one, since a
@@ -2451,6 +2461,9 @@ def execute_study_c_concept_structure(scope, concept_metadata: pd.DataFrame,
     jaccard_distance = 1.0 - jaccard
     np.fill_diagonal(jaccard_distance, 0.0)
     spaces[EXPERT_SET_SPACE] = (jaccard_distance, np.ones(len(items), dtype=bool))
+    log.info(f"  [{scope.label}] Study C: {len(items)} words, {prob_matrix.shape[1]} "
+             f"{axis_label} bins, {int(count_matrix.to_numpy().sum())} expert rows, "
+             f"{_usable_words_summary(spaces, len(items))}")
 
     tree_rows = [row for space in spaces
                  if (row := run_dendrograms(space, *spaces[space], items, prob_matrix,

@@ -824,7 +824,11 @@ def run_sublayer_informativeness(scope, concept_metadata: pd.DataFrame, out_dir)
     """Sublayers ranked by category alignment and descriptor means, whole-model scope only."""
     log.info("  Computing sublayer informativeness (AUC + Mantel permutation)...")
     informativeness = compute_sublayer_informativeness(scope.expert_df, concept_metadata, out_dir)
-    log.info("  Sublayer ranking by category alignment:\n" + informativeness.to_string(index=False))
+    ranked = informativeness[(informativeness["abstraction_level"] == 2) & informativeness["roc_auc"].notna()]
+    if not ranked.empty:
+        top = ranked.iloc[0]
+        log.info(f"  Sublayer informativeness written, top by level-2 category alignment: {top['sublayer']} "
+                 f"(ROC-AUC {top['roc_auc']:.3f}, r {top['category_alignment_r']:.3f})")
 
 
 # ---------------------------------------------------------------------------

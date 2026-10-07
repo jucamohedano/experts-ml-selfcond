@@ -19,6 +19,8 @@ Two stimulus sets exist in the repository. The **Richie-HSJ** set (206 concepts 
 | `assets/enwiki-2023-04-13.txt` | English Wikipedia word count list, one `word count` pair per line | the `frequency` column and the Wikipedia Zipf columns |
 | `assets/SUBTLEX-US.txt` | SUBTLEX-US subtitle frequencies, 74,286 entries | the primary Zipf columns |
 | `assets/SUBTLEX-UK.txt` | SUBTLEX-UK subtitle frequencies, 160,022 entries | the British reference Zipf column |
+| `assets/openwebtext-word-counts.txt` | OpenWebText (`Skylion007/openwebtext`) word count list in the Wikipedia format, built by `corpus_word_counts`, with a `.json` provenance sidecar | `frequency_zipf_openwebtext_lemma`, the GPT-2 exposure proxy |
+| `assets/fineweb-sample-10BT-word-counts.txt` | FineWeb sample-10BT (`HuggingFaceFW/fineweb`) word count list in the Wikipedia format, built by `corpus_word_counts`, with a `.json` provenance sidecar | `frequency_zipf_fineweb_lemma`, the Qwen3 exposure proxy |
 | `assets/metadata_Richie_HSJ.json` | **Output.** One row per word with all covariates merged | every module, through `load_experts_data` |
 | `dataset_config_Qwen3-30B-A3B-Instruct-2507-abstractiveness_Richie_HSJ.json` | **Output.** The same 206 concepts plus the sentence generation parameters | the sentence generation stage |
 
@@ -181,21 +183,25 @@ Coverage after the mapping is 96 of 197 concepts:
 
 ## 6. Word frequency
 
-Three corpora are read, and they do three different jobs. All of the logic lives in `scripts/core/data_preparation/frequency_covariates.py`, which carries no rationale of its own and points here instead.
-
-**Status.** The preparer computes every column described below, and `check_data_preparation.py` verifies them, but `build_concept_metadata.py` does not yet write them into `metadata_Richie_HSJ.json`. That file still carries the raw `frequency` column alone, which is what section 8 documents and what every module currently reads. Wiring the writer is the outstanding step.
+Five corpora are read, and they do four different jobs. SUBTLEX-US stands for the exposure of the human raters, OpenWebText and FineWeb sample-10BT stand for the pretraining exposure of GPT-2 and Qwen3 respectively, Wikipedia is the written-register reference the earlier analyses were run on, and SUBTLEX-UK is a dialect reference. The word counts of the two web corpora are produced by `scripts/core/data_preparation/corpus_word_counts.py`, and every column is computed by `scripts/core/data_preparation/frequency_covariates.py`. Neither file carries rationale of its own, both point here instead.
 
 ### 6.1 Which corpus, and why
 
-**SUBTLEX-US is the primary source.** 51 million tokens of American film and television subtitles over 74,286 entries, from Brysbaert and New (2009), which is the most widely used modern English frequency norm. The stimulus list and the human similarity ratings both come from Richie and Bhatia, an American study run on American participants, so the frequency covariate sitting beside those ratings should be American as well.
+**SUBTLEX-US is the human-side source.** 51 million tokens of American film and television subtitles over 74,286 entries, from Brysbaert and New (2009), which is the most widely used modern English frequency norm. The stimulus list and the human similarity ratings both come from Richie and Bhatia, an American study run on American participants, so the frequency covariate sitting beside those ratings should be American as well.
 
 That choice was measured rather than assumed. Substituting the British norms moves the per-category Spearman correlation between `typicality_HSJ_pairwise` and frequency by 0.075 on average, and by 0.215 for professions, which falls from 0.276 to 0.061. The mechanism is visible word by word. British English uses `minister` overwhelmingly for a government minister rather than for clergy, at Zipf 5.44 against 4.27, it prefers solicitor and barrister to `lawyer`, and it says vet rather than `veterinarian`. No category changes the sign of its correlation under either corpus, so the qualitative conclusions are stable either way, but the magnitudes are not, and professions in particular would be misreported.
 
-**Wikipedia is the secondary source.** 2.47 billion tokens. It answers a different question rather than the same question worse. The confound module 2's frequency panels control for is whether the model allocated more units to a word because it met that word more often during pretraining, which is model exposure and not human familiarity. Neither model studied here publishes its pretraining corpus, so counting the training data directly is not available, and a large encyclopedic web corpus is the closest proxy on hand. The two primary columns correlate at only r = 0.73 across the stimulus set, so repeating a frequency-partialled result under both is a genuine robustness check rather than a redundant one.
+Those figures compare the two surface-form columns, the listed word alone on both sides. Repeated with singular and plural summed on both sides by the rule of section 6.4, over the same words, the mean shift is 0.080 and professions falls from 0.264 to 0.065, so the gap is a dialect effect and not an artefact of the lemma rule. Lemmatisation alone moves these correlations by only 0.024 within SUBTLEX-US and 0.016 within SUBTLEX-UK. The tagger-based lemma counts SUBTLEX-UK ships in its `DomPoSLemma` columns must not be substituted for the section 6.4 rule. They count only the dominant part of speech, which scores `cabinet`, `turkey` and `minister` as names, and they map 7 of the 205 words to another lemma, `running` to run, `walking` to walk, `dove` to dive, `boxers` to boxer, which widens the gap to 0.107.
+
+**OpenWebText is the GPT-2 exposure proxy.** The confound the frequency panels control for is whether a model allocated more units to a word because it met that word more often during pretraining, which is model exposure and not human familiarity. GPT-2 was trained on WebText, which OpenAI never released, and the sample of it OpenAI once hosted is no longer downloadable. OpenWebText is the open reproduction of WebText, built from the URLs of Reddit submissions, deduplicated, restricted to English with FastText, cleared of near-duplicate documents by locality-sensitive hashing on 5-grams and of documents under 128 tokens, so it is the closest available stand-in for what GPT-2 read. Its published procedure states neither WebText's three-karma threshold nor WebText's removal of Wikipedia documents, so those two properties of the original are not guaranteed in the reproduction.
+
+**FineWeb sample-10BT is the Qwen3 exposure proxy.** Qwen3 was pretrained on about 36 trillion tokens whose composition is described only by broad source category, with web text the bulk of it. FineWeb is the standard open reconstruction of modern Common Crawl pretraining data, 15 trillion tokens from 96 snapshots between 2013 and 2024, and sample-10BT is a random 10 billion token sample of it. It approximates the kind of text Qwen3 was trained on, not its exact content, since the multilingual, synthetic and distilled parts of Qwen3's training have no open counterpart.
+
+**Wikipedia is the written-register reference.** 2.47 billion tokens. It was the pretraining proxy before the two web corpora were counted, and it is kept so that earlier results stay reproducible and the raw `frequency` column keeps its meaning. It is a weaker proxy for both models, for GPT-2 because WebText excluded Wikipedia, and for both because encyclopedic prose is a narrower register than web text. Wikipedia and SUBTLEX-US correlate at only r = 0.73 across the stimulus set, while both web corpora reach 0.86 against SUBTLEX-US, see section 6.8.
 
 **SUBTLEX-UK is a reference column only.** 201 million tokens of BBC broadcast subtitles, from van Heuven, Mandera, Keuleers and Brysbaert (2014), the paper that introduced the Zipf scale. It is carried so that the British against American gap described above can be tabulated as the stated limitation it is. No analysis should be run on it.
 
-### 6.2 Provenance of the Wikipedia counts
+### 6.2 Provenance of the count files
 
 `assets/enwiki-2023-04-13.txt` is `results/enwiki-2023-04-13.txt` from [github.com/IlyaSemenov/wikipedia-word-frequency](https://github.com/IlyaSemenov/wikipedia-word-frequency), MIT licensed. The identification rests on four independent matches: the filename is exact and is the only `enwiki` file that repository publishes, the top twenty words appear in the same order as the repository's README reports them, the format is the same `word count` pair per line, and the minimum count in the file is 3, which is the repository's stated floor of appearing in at least three articles. The README quotes 2,747,823 types against the 2,765,377 this file holds, a gap of 0.6 percent that reflects a stale README figure rather than a different file.
 
@@ -206,6 +212,20 @@ The file totals **2,765,377 types over 2,474,589,909 tokens**. Three properties 
 - **Punctuation is stripped, unicode dashes and apostrophes are normalised, and tokens containing digits are dropped**, so these counts are not directly comparable against a raw dump.
 
 This closes the provenance gap earlier revisions of this page flagged as open.
+
+**The two web count files** were built on 1 October 2026 by `corpus_word_counts.py`, which downloads a corpus at the dataset commit current on that day and records it, together with every total below, in a `.json` sidecar next to the count file. The script applies exactly the rules of the Wikipedia list's own `gather_wordfreq.py`, the en dash and right single quotation mark normalised to a hyphen and an apostrophe, the text lowercased, split on every character that is not a letter, digit, underscore, hyphen or apostrophe, a token kept only if it starts and ends with a word character or is a single one, tokens containing a digit dropped, and a word kept only if it appears in at least three documents. The Zipf denominator is the sum of the kept counts, as for Wikipedia, so the three written-corpus columns share one scale and differ only in the text they were counted on.
+
+| | OpenWebText | FineWeb sample-10BT |
+|---|---|---|
+| Hugging Face dataset | `Skylion007/openwebtext` | `HuggingFaceFW/fineweb`, `sample/10BT` |
+| Revision | `79d93d786212f7344586290adb811d4ae6a1762c` | `9bb295ddab0e05d785b879661af7260fed5140fc` |
+| Parquet files | 80, 24.19 GB | 15, 30.64 GB |
+| Documents | 8,013,769 | 14,868,862 |
+| Tokens counted | 6,396,110,620 | 7,508,557,048 |
+| Tokens kept, the Zipf denominator | 6,378,456,703 (99.72%) | 7,485,930,592 (99.70%) |
+| Types kept | 3,054,509 | 3,877,756 |
+
+OpenWebText's document total equals the 8,013,769 its dataset card publishes, which confirms the whole corpus was read. The rarest stimuli remain well attested, `footstool` at 552 occurrences in OpenWebText and `hovercraft` the rarest in FineWeb at Zipf 2.48.
 
 ### 6.3 The Zipf scale
 
@@ -248,12 +268,16 @@ The net effect is 163 concepts summed over two forms and 42 scored on one. The s
 | `frequency_zipf_subtlex_us` | 205 of 206 | `physiotherapist` |
 | `frequency_zipf_subtlex_us_lemma` | 205 of 206 | `physiotherapist` |
 | `frequency_zipf_subtlex_uk` | 206 of 206 | |
+| `frequency_zipf_openwebtext_lemma` | 206 of 206 | |
+| `frequency_zipf_fineweb_lemma` | 206 of 206 | |
 
 `physiotherapist` is the British term for what American subtitles render as the two words physical therapist, which a unigram list cannot hold. It resolves to null rather than being dropped from the dataset, because every module already drops rows with a missing covariate on a per analysis basis, so the null costs one point in the frequency analyses alone, taking professions to 26 there, and keeps the concept in the expert set, Average Precision, Jaccard and typicality analyses where nothing is missing.
 
 ### 6.6 How it is used
 
 Frequency enters as a predictor in its own right, asking whether a more frequent word recruits more experts, and as a control in section 2.4's frequency-partialled correlation, asking whether a typicality effect survives once frequency is held fixed. It never touches expert extraction, so changing a frequency column cannot alter an Average Precision or an expert set, only the analyses that read it.
+
+Module 2 reads one frequency column per run, the one matched to the model through the config's `frequency_corpus` field, `frequency_zipf_openwebtext_lemma` for GPT-2 and `frequency_zipf_fineweb_lemma` for Qwen3. It is the x variable of the section 2.5 figure, the frequency panel of section 2.4, the control of the section 2.4 partial correlation, and the variable of the section 2.5 partial correlation, which holds human typicality fixed instead. The SUBTLEX-US, Wikipedia and SUBTLEX-UK columns stay in the metadata for reference and for the source comparison of section 6.8, and no analysis reads them.
 
 The raw `frequency` column is retained unchanged so that earlier results stay reproducible. `expert_counts_with_metadata` in `core/expert_data_loading.py` still maps it to $\log_{10} f_c$ and drops rows with a missing or non-positive count.
 
@@ -264,17 +288,37 @@ The raw `frequency` column is retained unchanged so that earlier results stay re
 - **Wikipedia is a formal register.** Corpora built from written material overestimate the frequency of formal words relative to how often a person meets them (Brysbaert, Mandera and Keuleers, 2018). This is the accepted cost of choosing a corpus that approximates pretraining exposure instead of human familiarity.
 - **Corpus choice matters more than the summation.** The Wikipedia and SUBTLEX-US columns correlate at only r = 0.73, so roughly half the variance is corpus specific and a frequency-partialled result genuinely can differ between them. Reporting both is what turns that into evidence rather than an unexamined choice.
 
+### 6.8 How the sources compare
+
+`compare_frequency_sources.py` correlates every pair of lemma Zipf columns and writes `results/frequency_sources/frequency_source_correlations.csv`. The unit is the unique surface word, so `squash` counts once and n is 205, or 204 for every pair with SUBTLEX-US, which lacks `physiotherapist`. Because the three written-corpus columns share one scale, the mean difference is a meaningful offset as well as the correlations.
+
+| Source a | Source b | n | Pearson r | Spearman ρ | Mean Zipf difference, a minus b |
+|---|---|---|---|---|---|
+| Wikipedia | OpenWebText | 205 | 0.892 | 0.891 | 0.079 |
+| Wikipedia | FineWeb | 205 | 0.811 | 0.814 | −0.106 |
+| Wikipedia | SUBTLEX-US | 204 | 0.727 | 0.739 | 0.045 |
+| OpenWebText | FineWeb | 205 | 0.947 | 0.947 | −0.185 |
+| OpenWebText | SUBTLEX-US | 204 | 0.863 | 0.875 | −0.033 |
+| FineWeb | SUBTLEX-US | 204 | 0.864 | 0.877 | 0.150 |
+
+Three readings follow. The two web corpora agree closely with each other, at r = 0.947, so the choice between them matters far less than the choice between web text and Wikipedia. Both web corpora agree with the subtitle norms much better than Wikipedia does, 0.86 against 0.73, which places encyclopedic prose as the outlier register among the four rather than speech. And FineWeb sits 0.185 Zipf above OpenWebText on these words, so the two proxies differ in level as well as in rank, which matters for any analysis that reads absolute values rather than correlations.
+
 ## 7. Regenerating the metadata
 
-One command, run from `abstractiveness/scripts/`.
+Run from `abstractiveness/scripts/`, in this order.
 
 ```bash
-python -m core.data_preparation.build_concept_metadata   # writes assets/metadata_Richie_HSJ.json
+python -m core.data_preparation.corpus_word_counts openwebtext   # assets/openwebtext-word-counts.txt and .json
+python -m core.data_preparation.corpus_word_counts fineweb       # assets/fineweb-sample-10BT-word-counts.txt and .json
+python -m core.data_preparation.build_concept_metadata           # writes assets/metadata_Richie_HSJ.json
+python -m core.data_preparation.compare_frequency_sources        # results/frequency_sources/frequency_source_correlations.csv
 ```
+
+The two counting runs are needed only when a count file is missing or a corpus is to be recounted. They download 24.19 GB and 30.64 GB of parquet into `assets/corpora/`, kept for later recounts, and then count on CPU in about 12 and 14 minutes with the default ten workers. `--workers` lowers the parallelism if memory runs short. `build_concept_metadata` raises a `FileNotFoundError` naming the missing count file rather than writing a null column.
 
 `build_concept_metadata` is the package's only entry point. It reads the word list, builds the `concept`, `word`, `abstraction_level` and `category` fields itself, then composes the columns the other two preparers own by calling `frequency_columns` and `typicality_columns`. All three follow the same contract, `load_*` for a memoised reader of one external input and `<name>_columns` for the metadata fields that preparer owns, so adding a covariate means writing one more `*_columns` function and one more `row.update` call.
 
-It prints coverage on completion and those counts are the check to read. Expect 206 entries, `frequency_zipf_subtlex_us_lemma` at 205 of 206, `frequency_zipf_wikipedia_lemma` at 206 of 206, `typicality_HSJ_pairwise` at 198 of 198 and `typicality_HSJ_spam` at 196 of 198. A silent all-null column is the failure mode to watch for when an input file is missing, and the printed counts are what catches it.
+It prints coverage on completion and those counts are the check to read. Expect 206 entries, `frequency_zipf_subtlex_us_lemma` at 205 of 206, `frequency_zipf_wikipedia_lemma`, `frequency_zipf_openwebtext_lemma` and `frequency_zipf_fineweb_lemma` at 206 of 206, `typicality_HSJ_pairwise` at 198 of 198 and `typicality_HSJ_spam` at 196 of 198. A silent all-null column is the failure mode to watch for when an input file is missing, and the printed counts are what catches it.
 
 Neither script regenerates sentences, responses or expertise. Changing the stimulus list means regenerating all three, which is the expensive path documented in module 1's *From responses to expert sets*, and the dataset config must be kept aligned one to one with the metadata or `compute_responses.py` will skip the mismatched word without raising anything.
 
@@ -287,7 +331,11 @@ Neither script regenerates sentences, responses or expertise. Changing the stimu
 | `concept` | string | never | the join key against every expert table. The lowercased word, or `word__category` when the source table lists that word under two categories |
 | `word` | string | never | the bare lowercased surface form. What WordNet, the sentence generator and the frequency tables read |
 | `abstraction_level` | int, 1 or 2 | never | 1 for a category label, 2 for a member concept |
-| `frequency` | int | never in this file | raw Wikipedia count $f_c$ |
+| `frequency` | int | never in this file | raw Wikipedia count $f_c$ of the listed surface form |
+| `frequency_zipf_subtlex_us_lemma` | float | `physiotherapist` | SUBTLEX-US Zipf, singular and plural summed by section 6.4 |
+| `frequency_zipf_wikipedia_lemma` | float | never | Wikipedia Zipf, singular and plural summed by section 6.4 |
+| `frequency_zipf_openwebtext_lemma` | float | never | OpenWebText Zipf, the GPT-2 exposure proxy, summed by section 6.4 |
+| `frequency_zipf_fineweb_lemma` | float | never | FineWeb sample-10BT Zipf, the Qwen3 exposure proxy, summed by section 6.4 |
 | `category` | string | level 1 | parent category of a level 2 concept |
 | `typicality_HSJ_pairwise` | float in [0, 1] | level 1 | family-resemblance score from the pairwise ratings |
 | `typicality_HSJ_spam` | float in [0, 1] | level 1, and `truck`, `van` | family-resemblance score from the SpAM arrangements |

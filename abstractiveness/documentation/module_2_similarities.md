@@ -10,7 +10,7 @@ Outputs are written to `AP_<t>/2_similarities/`, one folder per section plus one
 | 2.2 Pairwise similarities | `2.2_pairwise_similarities/` | every word pair: Jaccard, overlap and shared-count matrices, heatmaps, category contrast, and Jaccard against layer profile over all pairs |
 | 2.3 Human similarity validation | `2.3_human_similarity_validation/` | every pairwise matrix against Richie and Bhatia's human pair ratings |
 | 2.4 Typicality | `2.4_typicality/` | cosine typicality, and every correlation with human typicality |
-| 2.5 Frequency correlations | `2.5_frequency_correlations/` | US and Wikipedia frequency against the expert measures and human typicality |
+| 2.5 Frequency correlations | `2.5_frequency_correlations/` | the corpus frequency matched to the model, OpenWebText for GPT-2 and FineWeb for Qwen3, against the expert measures and human typicality, and Jaccard against that frequency controlling for human typicality |
 | per-metric layer profiles | `layer_profile_measures/` | `hierarchy/` (section 2.1), `heatmaps/` (sections 2.2 and 2.3) and `similarity_correlation/` (section 2.3) |
 
 Every section runs once per analysis scope. The whole model writes to the folders above, and a sublayer scope computes only its `sublayer_comparison` rows unless the executor's `WRITE_SUBLAYER_OUTPUTS` is switched on, in which case it writes the same folders under `sublayers/<rank>_<sublayer>/`. Module 1 defines the scopes, the rank prefix and the two layer axes in *Analysis scopes and the two layer axes*. Example tables below cite the run that produced them, in that run's folder layout.
@@ -67,7 +67,7 @@ $$n \ge \texttt{MIN\_ABSOLUTE\_N} \quad \text{and} \quad \frac{n}{n_{\text{total
 
 where $n$ is the number of complete pairs after `dropna` and $n_{\text{total}}$ is a fixed count of concepts that could in principle have contributed to that panel, read once from `concept_metadata` and independent of the AP threshold: the full metadata row count for panels that only need metadata and expert counts, or the count of concepts with a defined category for the Jaccard/overlap/Cosine-Typicality panels (root labels never appear there by construction and are excluded from the denominator). Because $n_{\text{total}}$ does not move with the AP threshold, `coverage_pct` in the summary reports how much of the concept set a given panel rests on at any threshold. The gate suppresses reporting on small or non-representative subsets, since survivors at a strict AP are systematically the higher-frequency or better-populated concepts rather than a random sample.
 
-When a panel clears both bars, the Pearson statistic and the fitted regression line are computed and drawn. When it does not, the scatter of the remaining points is drawn unfitted (with the coverage shortfall on the grey line under the title) and the CSV holds the cleaned data, but `pearson_r`/`pearson_p` are left empty in `correlation_summary.csv`. Every panel gets a summary row either way, with `n_points`, `n_total_relevant`, and `coverage_pct` always populated.
+When a panel clears both bars, the Pearson statistic and the fitted regression line are computed and drawn. When it does not, the scatter of the remaining points is drawn unfitted (with the coverage shortfall on the grey line under the title) and the CSV holds the cleaned data, but `pearson_r`/`pearson_p` are left empty in `correlation_summary.csv`. Every panel gets a summary row either way, with `n_points`, `n_total_relevant`, and `coverage_pct` always populated. A skipped panel is not a fault, so the log carries one line per scope counting the skipped panels with their range of $n$ and coverage, while the per-panel detail is written at DEBUG level only.
 
 **Generated data structures.** Each section with panels writes its own `correlation_summary.csv`, one row per panel of that section, recording the Pearson statistic computed on the corresponding $(x, y)$ columns.
 
@@ -404,7 +404,7 @@ Ranks rather than raw values for three reasons. The layer-profile metric is comp
 
 $$\hat p_k = \frac{1 + \#\{b : |\rho_k^{(\pi_b)}| \ge |\rho_k^{\mathrm{obs}}|\}}{B + 1},$$
 
-with the $+1$ in both places making the test exact rather than anticonservative and flooring the attainable value at $1/(B+1) = 0.001$, which is why every supported row reads exactly `0.001`. Measured on Qwen3 at AP 0.6 for the layer profile, the parametric Pearson p calls 4 of the 8 categories significant and this test calls 1, with professions at parametric $p = 0.0008$ against Mantel $p = 0.169$. The parametric column is therefore not reported anywhere.
+with the $+1$ in both places making the test exact rather than anticonservative and flooring the attainable value at $1/(B+1) = 0.001$, which is why every supported row reads exactly `0.001`. When either vector is constant, as at strict thresholds on thin sublayers where every rated pair of a category has Jaccard 0, $\rho_k$ is undefined and the row carries NaN for both $\rho_k$ and $\hat p_k$ (see `fixes.md`). Measured on Qwen3 at AP 0.6 for the layer profile, the parametric Pearson p calls 4 of the 8 categories significant and this test calls 1, with professions at parametric $p = 0.0008$ against Mantel $p = 0.169$. The parametric column is therefore not reported anywhere.
 
 **Which pairs enter.** A rated pair is dropped for three reasons, all of which appear only at strict thresholds. Either concept can be missing from the concept list, the matrix cell can be NaN, which happens for the layer-profile matrices when a word holds fewer than 2 experts and so has no usable profile, or a word can hold **no experts at all**. The third case needs explicit handling because it does not produce a NaN: `expert_set_overlap_matrices` defines the Jaccard index as 0 when the union is empty, deliberately, so that an empty-set concept does not fill the heatmap with NaNs. Read as data, though, that 0 asserts that two expert sets share nothing when one of them does not exist, and feeding it to the correlation scores a missing measurement as maximal dissimilarity. Those pairs are therefore excluded by name.
 
@@ -564,13 +564,13 @@ the Pearson correlation (computed only when both variables have nonzero variance
 
 #### Human typicality against expert count, Jaccard, overlap and frequency
 
-**Mathematical formulation.** One grouped figure of four regression panels sharing the x variable, human typicality $t_c$, against expert count $n_c$, Jaccard $J_c$ and overlap $O_c$ with the category label, and US frequency on the Zipf scale. Each panel is the Pearson statistic of the coverage rule above, so the question per panel is whether more typical concepts recruit more experts, share more experts with their category label under either set measure, or are more frequent words. The Jaccard and overlap panels use the categorized concepts as their coverage denominator, the other two the full metadata count.
+**Mathematical formulation.** One grouped figure of four regression panels sharing the x variable, human typicality $t_c$, against expert count $n_c$, Jaccard $J_c$ and overlap $O_c$ with the category label, and the training-exposure frequency $f_c$ of the model being run on the Zipf scale, `frequency_zipf_openwebtext_lemma` for GPT-2 and `frequency_zipf_fineweb_lemma` for Qwen3, chosen by the config's `frequency_corpus` field. Each panel is the Pearson statistic of the coverage rule above, so the question per panel is whether more typical concepts recruit more experts, share more experts with their category label under either set measure, or are more frequent words. The Jaccard and overlap panels use the categorized concepts as their coverage denominator, the other two the full metadata count.
 
-**Generated data structures.** `human_typicality_correlations.png`, one row of four panels, and `human_typicality_correlations.csv`, one wide table with `concept`, `category`, `human_typicality` and the four y columns. Each panel adds a row named `human_typicality_vs_<y>` to this section's `correlation_summary.csv`, with `<y>` one of `expert_count`, `jaccard`, `overlap` and `frequency_us`.
+**Generated data structures.** `human_typicality_correlations.png`, one row of four panels, and `human_typicality_correlations.csv`, one wide table with `concept`, `category`, `human_typicality` and the four y columns. Each panel adds a row named `human_typicality_vs_<y>` to this section's `correlation_summary.csv`, with `<y>` one of `expert_count`, `jaccard`, `overlap` and `frequency_<corpus>`, where `<corpus>` is `openwebtext` or `fineweb`.
 
 #### Partial correlation: Jaccard against human typicality, controlling for frequency
 
-**Mathematical formulation.** If frequency were correlated with both typicality and Jaccard similarity, their pairwise correlation could be partly a frequency artifact rather than a direct typicality-alignment association. To isolate the direct component, both variables are residualized against the control $z_c = \tilde{f}_c$. For a variable $v$ regressed on $z$ by simple OLS,
+**Mathematical formulation.** If frequency were correlated with both typicality and Jaccard similarity, their pairwise correlation could be partly a frequency artifact rather than a direct typicality-alignment association. To isolate the direct component, both variables are residualized against the control $z_c = f_c$, the Zipf frequency of the corpus matched to the model, OpenWebText for GPT-2 and FineWeb for Qwen3. Zipf is $\log_{10}$ of the count plus a constant, so this is a log-frequency control on that corpus. Until 1 October 2026 the control was $\log_{10}$ of the raw Wikipedia count of the listed surface form, the old `log_frequency` column. For a variable $v$ regressed on $z$ by simple OLS,
 
 $$\beta_v = \frac{\operatorname{Cov}(z, v)}{\operatorname{Var}(z)}, \qquad \alpha_v = \bar{v} - \beta_v \bar{z}, \qquad \tilde{v}_c = v_c - (\beta_v z_c + \alpha_v),$$
 
@@ -578,9 +578,9 @@ the residual $\tilde{v}_c$ is the part of $v_c$ that a linear function of freque
 
 $$r_{Jt \cdot f} = \operatorname{corr}\!\left(\tilde{J}, \tilde{t}\right),$$
 
-which is algebraically identical to the standard partial-correlation formula $r_{Jt\cdot f} = \dfrac{r_{Jt} - r_{Jf}\, r_{tf}}{\sqrt{(1 - r_{Jf}^2)(1 - r_{tf}^2)}}$. A non-zero $r_{Jt\cdot f}$ indicates a typicality-alignment association not attributable to frequency. Missingness here is the union of the sources listed under the coverage rule for `jaccard_pct` and `human_typicality`, plus `log_frequency`, and the same coverage rule applies, against the categorized-concepts denominator, since this panel needs a defined category throughout.
+which is algebraically identical to the standard partial-correlation formula $r_{Jt\cdot f} = \dfrac{r_{Jt} - r_{Jf}\, r_{tf}}{\sqrt{(1 - r_{Jf}^2)(1 - r_{tf}^2)}}$. A non-zero $r_{Jt\cdot f}$ indicates a typicality-alignment association not attributable to frequency. Missingness here is the union of the sources listed under the coverage rule for `jaccard_pct` and `human_typicality`, plus the frequency column, and the same coverage rule applies, against the categorized-concepts denominator, since this panel needs a defined category throughout.
 
-**Generated data structures.** One CSV, one PNG, and one row appended to `correlation_summary.csv` (with `controlling_for = log_frequency`):
+**Generated data structures.** One CSV, one PNG, and one row appended to `correlation_summary.csv`, whose `controlling_for` names the frequency column. Both are written through `_partial_correlation`, which the frequency-side partial of section 2.5 shares:
 
 - `partial_correlation_jaccard_human_typicality.csv`, the full working table (only rows complete in all three variables):
 
@@ -588,13 +588,13 @@ which is algebraically identical to the standard partial-correlation formula $r_
 |--------|------|--------|-------------|
 | concept | string | $c$ | Concept identifier. |
 | category | string | $k$ | Parent category. |
-| log_frequency | float | $z_c = \tilde{f}_c$ | Control variable. |
+| frequency_zipf_<corpus>_lemma | float | $z_c = f_c$ | Control variable, the model's corpus frequency on the Zipf scale. |
 | jaccard_pct | float | $J_c$ | Raw Jaccard similarity to the category (section 2.1). |
 | human_typicality | float | $t_c$ | Raw Human Typicality score. |
 | jaccard_resid | float | $\tilde{J}_c$ | Jaccard residual after removing the linear frequency component. |
 | human_typicality_resid | float | $\tilde{t}_c$ | Typicality residual after removing the linear frequency component. |
 
-Example (head of `AP_0.6/4_correlations/partial_correlation_jaccard_typicality.csv` in `research_plots_150_revised_executor_again`, written before the rename, so its last column is today's `human_typicality_resid`):
+Example (head of `AP_0.6/4_correlations/partial_correlation_jaccard_typicality.csv` in `research_plots_150_revised_executor_again`, written before the rename and before the model-matched control, so its last column is today's `human_typicality_resid` and its control is the old `log_frequency`):
 
 | concept | category | log_frequency | jaccard_pct | human_typicality | jaccard_resid | typicality_resid |
 |---|---|---|---|---|---|---|
@@ -604,7 +604,7 @@ Example (head of `AP_0.6/4_correlations/partial_correlation_jaccard_typicality.c
 | anvil | tool | 3.4951 | 0.4454 | 0.347 | -2.9337 | -0.1231 |
 | bag | container | 4.4427 | 2.2727 | 0.696 | -2.7566 | 0.1296 |
 
-- `partial_correlation_jaccard_human_typicality.png`, a **scatter plot with a linear regression line**, x: `human_typicality_resid` ($\tilde{t}_c$, "Human Typicality (residual after removing Frequency)"), y: `jaccard_resid` ($\tilde{J}_c$, "Jaccard Similarity Index % (residual after removing Frequency)"), with the partial $r$, $p$ and $n$ on the grey line under the title.
+- `partial_correlation_jaccard_human_typicality.png`, a **scatter plot with a linear regression line**, x: `human_typicality_resid` ($\tilde{t}_c$, "Human typicality, residual after OpenWebText frequency" or FineWeb), y: `jaccard_resid` ($\tilde{J}_c$, "Jaccard with category label (%), residual after" the same), with the partial $r$, $p$ and $n$ on the grey line under the title.
 
 #### Jaccard against cosine typicality
 
@@ -634,9 +634,21 @@ Example (head of `AP_0.6/4_correlations/jaccard_vs_cosine_typicality.csv` in `re
 
 Whether word frequency relates to the expert measures. Written to `2.5_frequency_correlations/`.
 
-**Mathematical formulation.** Two grouped figures of four regression panels each, one per frequency measure on the Zipf scale, the metadata's `frequency_zipf_subtlex_us_lemma` (SUBTLEX-US, register matched to the American stimuli) and `frequency_zipf_wikipedia_lemma` (a pretraining exposure proxy). Each is plotted on x against expert count, Jaccard and overlap with the category label, and human typicality. The frequency against human typicality panel reads no expert data, so it is identical in every scope, and it is drawn in every scope's figure so each figure reads as a complete row. Where the old single panels used the log10 of the raw Wikipedia count, these use the Zipf columns, which are already logarithmic. The partial correlation of section 2.4 keeps the log10 raw count as its control.
+**Mathematical formulation.** One grouped figure of four regression panels, the training-exposure frequency $f_c$ of the model being run on x, `frequency_zipf_openwebtext_lemma` for GPT-2 and `frequency_zipf_fineweb_lemma` for Qwen3, against expert count, Jaccard and overlap with the category label, and human typicality. The corpus is the config's `frequency_corpus` field, a key of `FREQUENCY_CORPORA`, and the reasons for each corpus are in the dataset and metadata page, section 6.1. The frequency against human typicality panel reads no expert data, so it is identical in every scope, and it is drawn in every scope's figure so each figure reads as a complete row. Until 1 October 2026 this section drew two figures, SUBTLEX-US and Wikipedia, for every model.
 
-**Generated data structures.** `frequency_us_correlations.png` and `frequency_wiki_correlations.png` with their wide tables `frequency_us_correlations.csv` and `frequency_wiki_correlations.csv`, and one `correlation_summary.csv` row per panel, named `frequency_us_vs_<y>` and `frequency_wiki_vs_<y>`.
+**Generated data structures.** `frequency_<corpus>_correlations.png` with its wide table `frequency_<corpus>_correlations.csv`, and one `correlation_summary.csv` row per panel named `frequency_<corpus>_vs_<y>`.
+
+#### Partial correlation: Jaccard against frequency, controlling for human typicality
+
+**Mathematical formulation.** The mirror image of the section 2.4 partial. There the question is whether Jaccard tracks typicality beyond what frequency explains, here it is whether Jaccard tracks frequency beyond what typicality explains. Both Jaccard $J_c$ and frequency $f_c$ are residualized on human typicality $t_c$ by the same OLS step, and
+
+$$r_{Jf \cdot t} = \operatorname{corr}\!\left(\tilde{J}, \tilde{f}\right) = \dfrac{r_{Jf} - r_{Jt}\, r_{ft}}{\sqrt{(1 - r_{Jt}^2)(1 - r_{ft}^2)}}.$$
+
+The two partials share the three pairwise correlations but not their numerators, $r_{Jt} - r_{Jf} r_{tf}$ against $r_{Jf} - r_{Jt} r_{ft}$, so they coincide only when $r_{Jt} = r_{Jf}$. Read together they apportion the Jaccard signal. If both survive, typicality and frequency each carry their own share. If one vanishes once the other is held fixed, the other accounts for it. The coverage rule and the categorized-concepts denominator are those of the section 2.4 partial.
+
+**Generated data structures.** `partial_correlation_jaccard_frequency.csv`, with `concept`, `category`, the control `human_typicality`, `frequency_zipf_<corpus>_lemma`, `jaccard_pct`, `frequency_resid` and `jaccard_resid`, `partial_correlation_jaccard_frequency.png`, a scatter of `jaccard_resid` against `frequency_resid` with its regression line and the partial $r$, $p$ and $n$ under the title, and a `correlation_summary.csv` row with `controlling_for = human_typicality`.
+
+**Caveat shared by both partials.** Human typicality is min-max normalised within each category, so it orders the members of one category and is not comparable across categories, and both partials pool all categorized concepts into one regression. A category whose members all sit high on Jaccard or on frequency can therefore move either partial through between-category differences that typicality cannot express. Adding category as a second control, or computing each partial within category, would remove that component.
 
 ## Results
 
@@ -924,7 +936,7 @@ The defensible statement is therefore narrower than either run alone suggests: *
 
 ### Typicality and frequency correlations (sections 2.4 and 2.5)
 
-> **Provenance of these figures.** The correlation numbers below come from the whole-model `_sensefix` runs, which drew one single panel per pair and used the log10 of the raw Wikipedia count as frequency. The grouped figures of sections 2.4 and 2.5 reproduce every human typicality panel exactly, since the typicality, expert count, Jaccard and overlap columns did not change, while the frequency panels now read the Zipf columns and will move slightly when the full sweep is refreshed.
+> **Provenance of these figures.** Since 1 October 2026 every frequency panel and the section 2.4 partial read the model-matched corpus frequency, OpenWebText for GPT-2 and FineWeb for Qwen3, so the frequency numbers below are stale until the full sweep is refreshed. On GPT-2 at AP 0.5, whole model, the new code gives frequency against expert count r = -0.245, against Jaccard 0.262, the section 2.4 partial 0.324 (0.315 under the old Wikipedia control) and the new Jaccard against frequency partial 0.287, and on Qwen3 -0.384, 0.271, 0.455 and 0.301. The correlation numbers below come from the whole-model `_sensefix` runs, which drew one single panel per pair and used the log10 of the raw Wikipedia count as frequency. The grouped figures of sections 2.4 and 2.5 reproduce every human typicality panel exactly, since the typicality, expert count, Jaccard and overlap columns did not change, while the frequency panels now read the Zipf columns and will move slightly when the full sweep is refreshed.
 
 *Scope note.* All values below are **whole-model scope** from the corrected `_sensefix` runs, 205 words = 197 concepts with a defined category (including `squash`) plus 8 category labels. Per-sublayer replications sit in each panel's `sublayers/<rank>_<sublayer>/` folder.
 

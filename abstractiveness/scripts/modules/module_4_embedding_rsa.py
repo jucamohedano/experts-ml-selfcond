@@ -725,7 +725,9 @@ def _scatter_binned(shared: np.ndarray, y: np.ndarray, same: np.ndarray, out_pat
             slope, intercept = np.polyfit(xb, yb, 1)
             ax.plot(xs, intercept + slope * BIN_CENTERS_FOR_FIT, color=palette[key],
                     linestyle="--", linewidth=1.4, alpha=0.85, label=f"{name}, OLS")
-            smoothed = lowess(yb, xb, frac=0.4, return_sorted=True)
+            # Heavy ties at x = 0 make some local fits degenerate, statsmodels handles them but warns.
+            with np.errstate(divide="ignore", invalid="ignore"):
+                smoothed = lowess(yb, xb, frac=0.4, return_sorted=True)
             lowess_at_centers = np.interp(BIN_CENTERS_FOR_FIT, smoothed[:, 0], smoothed[:, 1])
             ax.plot(xs, lowess_at_centers, color=palette[key], linestyle=":", linewidth=1.8,
                     alpha=0.85, label=f"{name}, LOWESS")

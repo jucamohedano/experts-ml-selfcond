@@ -23,6 +23,30 @@ MIN_ABSOLUTE_N = 30
 
 MIN_COVERAGE_FRACTION = 0.75
 
+# Panels the floors left empty since the last pop_coverage_skips, summarized once per scope by the executor.
+_coverage_skips: list[tuple[int, float]] = []
+
+
+def note_coverage_skip(plot_name: str, n: int, n_total_relevant: int) -> None:
+    """Record a panel left empty by the coverage floors, logged per panel at DEBUG only."""
+    coverage = n / n_total_relevant if n_total_relevant else 0.0
+    _coverage_skips.append((n, coverage))
+    log.debug(f"  Skipping correlation for {plot_name}: n={n} covers {coverage:.0%} of "
+              f"{n_total_relevant} relevant concepts (need >={MIN_ABSOLUTE_N} and >={MIN_COVERAGE_FRACTION:.0%}).")
+
+
+def pop_coverage_skips() -> str | None:
+    """One line on the panels skipped since the last call, None when there were none."""
+    if not _coverage_skips:
+        return None
+    ns, coverages = zip(*_coverage_skips)
+    _coverage_skips.clear()
+    n_range = f"{min(ns)}" if min(ns) == max(ns) else f"{min(ns)} to {max(ns)}"
+    coverage_range = (f"{min(coverages):.0%}" if f"{min(coverages):.0%}" == f"{max(coverages):.0%}"
+                      else f"{min(coverages):.0%} to {max(coverages):.0%}")
+    return (f"{len(ns)} correlations below the coverage floor left without r (n {n_range}, "
+            f"coverage {coverage_range}, need >={MIN_ABSOLUTE_N} and >={MIN_COVERAGE_FRACTION:.0%})")
+
 
 def regression_row(data: pd.DataFrame, x_col: str, y_col: str, plot_name: str,
                    n_total_relevant: int) -> tuple[pd.DataFrame, dict]:
@@ -36,8 +60,7 @@ def regression_row(data: pd.DataFrame, x_col: str, y_col: str, plot_name: str,
     if n >= MIN_ABSOLUTE_N and coverage >= MIN_COVERAGE_FRACTION:
         row["pearson_r"], row["pearson_p"] = stats.pearsonr(clean_data[x_col], clean_data[y_col])
     else:
-        log.warning(f"  Skipping correlation for {plot_name}: n={n} covers {coverage:.0%} of "
-                    f"{n_total_relevant} relevant concepts (need >={MIN_ABSOLUTE_N} and >={MIN_COVERAGE_FRACTION:.0%}).")
+        note_coverage_skip(plot_name, n, n_total_relevant)
     return clean_data, row
 
 

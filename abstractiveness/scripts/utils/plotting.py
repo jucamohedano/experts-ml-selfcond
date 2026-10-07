@@ -289,7 +289,9 @@ def plot_hexbin_with_trends(x, y, same, out_path, x_label: str, y_label: str,
             xs_line = np.array([xb.min(), xb.max()])
             ax.plot(xs_line, intercept + slope * xs_line, color=CORRELATION_COLORS["line"],
                     linewidth=1.8, label=f"Linear fit, Pearson r = {pearson_r:.2f}")
-            smoothed = lowess(yb, xb, frac=0.4, return_sorted=True)
+            # Heavy ties at x = 0 make some local fits degenerate, statsmodels handles them but warns.
+            with np.errstate(divide="ignore", invalid="ignore"):
+                smoothed = lowess(yb, xb, frac=0.4, return_sorted=True)
             ax.plot(smoothed[:, 0], smoothed[:, 1], color="#1a1a1a", linestyle=":",
                     linewidth=1.8, label="LOWESS")
         set_title(ax, title)
