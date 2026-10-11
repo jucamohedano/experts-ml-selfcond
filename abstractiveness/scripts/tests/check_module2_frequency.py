@@ -6,9 +6,11 @@ Checks:
      both reading the corpus's Zipf column, with no SUBTLEX-US or Wikipedia column left in any figure.
   2. Partial correlations: on synthetic data, Jaccard against typicality controlling frequency and
      Jaccard against frequency controlling typicality both equal the closed-form first-order partial
-     correlation, record their control column, and differ from each other.
-  3. Section rows: section 2.5 computed without writing reports the corpus-named panels and the
-     new partial, every key it reports is labelled, and a metadata without the corpus column is
+     correlation, record their control column, and differ from each other. With category added as a
+     control, both equal the partial correlation read off the inverse correlation matrix of the
+     variables and the category indicators, and record both controls.
+  3. Section rows: section 2.5 computed without writing reports the corpus-named panels and both
+     partials, every key it reports is labelled, and a metadata without the corpus column is
      skipped rather than raising.
   4. Loader: expert_counts_with_metadata carries both corpus columns through to module 2.
 
@@ -57,6 +59,14 @@ def closed_form_partial(x, y, z) -> float:
     return (rxy - rxz * ryz) / math.sqrt((1 - rxz ** 2) * (1 - ryz ** 2))
 
 
+def matrix_partial(x, y, controls: pd.DataFrame) -> float:
+    """Partial correlation of x and y given the controls, from the inverse correlation matrix."""
+    design = pd.get_dummies(controls, drop_first=True, dtype=float)
+    data = np.column_stack([np.asarray(x, float), np.asarray(y, float), design.to_numpy(dtype=float)])
+    precision = np.linalg.inv(np.corrcoef(data, rowvar=False))
+    return -precision[0, 1] / math.sqrt(precision[0, 0] * precision[1, 1])
+
+
 def check_figures() -> str:
     """Each corpus gets the typicality figure and its own frequency figure, nothing else."""
     for corpus, (column, _) in m2.FREQUENCY_CORPORA.items():
@@ -89,8 +99,26 @@ def check_partials() -> str:
     assert typicality_row["controlling_for"] == column, f"controls for {typicality_row['controlling_for']}"
     assert frequency_row["controlling_for"] == "human_typicality", f"controls for {frequency_row['controlling_for']}"
     assert abs(typicality_row["pearson_r"] - frequency_row["pearson_r"]) > 0.05, "the two partials coincide"
+
+    meta = meta.assign(human_typicality=meta["human_typicality"] + np.where(meta["category"] == "a", 0.5, 0.0))
+    joined = meta.merge(sim, on=["concept", "category"])
+    typicality_cat = m2.plot_partial_correlation(meta, sim, meta, None, "openwebtext", with_category=True)[0]
+    frequency_cat = m2.plot_partial_correlation_jaccard_frequency(meta, sim, meta, None, "openwebtext",
+                                                                   with_category=True)[0]
+    expected_typicality_cat = matrix_partial(joined["jaccard_pct"], joined["human_typicality"],
+                                             joined[[column, "category"]])
+    expected_frequency_cat = matrix_partial(joined["jaccard_pct"], joined[column],
+                                            joined[["human_typicality", "category"]])
+    assert abs(typicality_cat["pearson_r"] - expected_typicality_cat) < 1e-9, \
+        f"category partial {typicality_cat['pearson_r']:.6f}, matrix form {expected_typicality_cat:.6f}"
+    assert abs(frequency_cat["pearson_r"] - expected_frequency_cat) < 1e-9, \
+        f"category partial {frequency_cat['pearson_r']:.6f}, matrix form {expected_frequency_cat:.6f}"
+    assert typicality_cat["controlling_for"] == f"{column} + category", f"controls {typicality_cat['controlling_for']}"
+    assert frequency_cat["controlling_for"] == "human_typicality + category", f"controls {frequency_cat['controlling_for']}"
     return (f"partials: Jaccard-typicality given frequency {typicality_row['pearson_r']:.3f}, "
-            f"Jaccard-frequency given typicality {frequency_row['pearson_r']:.3f}, both equal the closed form")
+            f"Jaccard-frequency given typicality {frequency_row['pearson_r']:.3f}, both equal the closed form, "
+            f"and with category {typicality_cat['pearson_r']:.3f} and {frequency_cat['pearson_r']:.3f}, "
+            f"both equal the matrix form")
 
 
 def check_section_rows() -> str:
@@ -99,7 +127,7 @@ def check_section_rows() -> str:
     scope = SimpleNamespace(label="whole_model", is_whole_model=True, expert_df=pd.DataFrame())
     row = m2.run_frequency_correlations(scope, meta, meta, sim, None, "fineweb")
     expected = {f"r_frequency_fineweb_vs_{y}" for y in ("expert_count", "jaccard", "overlap", "human_typicality")}
-    expected.add("r_partial_correlation_jaccard_frequency")
+    expected |= {"r_partial_correlation_jaccard_frequency", "r_partial_correlation_jaccard_frequency_category"}
     assert expected <= set(row), f"missing {sorted(expected - set(row))}"
     stale = [key for key in row if "frequency_us" in key or "frequency_wiki" in key]
     assert not stale, f"stale keys {stale}"

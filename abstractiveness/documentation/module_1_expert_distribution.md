@@ -6,9 +6,9 @@ Outputs are written to `AP_<t>/1_expert_distribution/`, one folder per section:
 
 | Section | Folder | Contents |
 |---|---|---|
-| 1.1 Layer expert distribution | `1.1_layer_expert_distribution/` | expert counts, mean and cumulative layer distributions, per-concept plots, peak layer, average layer and peak dominance gap |
-| 1.2 Distribution shape | `1.2_distribution_shape/` | Shannon entropy, Geary's C, the profile-shape map, entropy against expert count |
-| 1.3 Sublayer informativeness | `1.3_sublayer_informativeness/` | sublayer types ranked by category alignment, whole model only |
+| 1.1 Layer expert distribution | `1.1_layer_expert_distribution/` | expert counts, mean and cumulative layer distributions with their per-level summary, per-concept plots, peak layer, average layer and peak dominance gap |
+| 1.2 Distribution shape | `1.2_distribution_shape/` | Shannon entropy, normalised entropy, Geary's C, each category label against its own members, entropy against expert count |
+| 1.3 Sublayer informativeness | `1.3_sublayer_informativeness/` | sublayer types ranked by category alignment, a compact level-2 summary and the ROC-AUC against expert share scatter, whole model only |
 
 Sections 1.1 and 1.2 run once per analysis scope, the whole model in the section folders and each sublayer type under `sublayers/<rank>_<sublayer>/<section>/`. The per-concept plots and the sublayer scopes are written only at the thresholds in the executor's `DETAILED_AP_THRESHOLDS`, currently 0.5, 0.6 and 0.7. Example tables below cite the run that produced them, in that run's folder layout.
 
@@ -38,7 +38,7 @@ $$E_c = \{(\ell, u) : \mathrm{AP}_c(\ell, u) \ge \tau\},$$
 
 and concatenates all words' surviving rows into the (concept, layer, unit) table every module works on. All results folders are parameterized by this $\tau$ (`AP_0.5` … `AP_0.9`).
 
-**A neuron can be an expert for many words.** Because $\mathrm{AP}_c(\ell,u)$ is computed independently per word, nothing restricts a unit to a single word, so the expert sets $E_c$ *overlap* rather than partition the network. This is not a corner case but the norm. In the Qwen3 Richie-HSJ run at AP=0.6, the 414,089 expert rows collapse to 170,001 distinct $(\ell, u)$ neurons, and **54.9% of expert neurons are experts for two or more of the 205 words** (mean 2.44 words per expert neuron, maximum 33). Restricted to the `mlp.gate_proj` sublayer the sharing is even denser (63.7% serve ≥ 2 words, mean 3.10). Three consequences matter for reading everything downstream. First, $n_c$ counts word-neuron *associations*, not private neurons, so $\sum_c n_c$ greatly exceeds the number of distinct experts. Second, two words' layer profiles are not built from disjoint resources, so comparing them compares allocation *shapes*, not competing claims on separate neurons. Third, the overlap itself is signal, since sections 2.1 and 2.2 of module 2 measure exactly this cross-word sharing, and section 1.3 uses it to rank sublayers.
+**A neuron can be an expert for many words.** Because $\mathrm{AP}_c(\ell,u)$ is computed independently per word, nothing restricts a unit to a single word, so the expert sets $E_c$ *overlap* rather than partition the network. This is not a corner case but the norm. In the Qwen3-1.7B-Base Richie-HSJ run at AP=0.6, the 569,820 expert rows collapse to 214,988 distinct $(\ell, u)$ neurons, and **58.4% of expert neurons are experts for two or more of the 206 words** (mean 2.65 words per expert neuron, maximum 34). Restricted to the `mlp.gate_proj` sublayer the sharing is even denser (65.9% serve ≥ 2 words, mean 3.31). Three consequences matter for reading everything downstream. First, $n_c$ counts word-neuron *associations*, not private neurons, so $\sum_c n_c$ greatly exceeds the number of distinct experts. Second, two words' layer profiles are not built from disjoint resources, so comparing them compares allocation *shapes*, not competing claims on separate neurons. Third, the overlap itself is signal, since sections 2.1 and 2.2 of module 2 measure exactly this cross-word sharing, and section 1.3 uses it to rank sublayers.
 
 **A word can also end up with zero experts.** The definition of $E_c$ makes $E_c = \varnothing$ perfectly possible: if no unit reaches $\tau$ for word $c$, the word contributes no rows at all. Such words are *silently absent* from every downstream table (they do not appear as zero-count rows), which shrinks sample sizes at strict thresholds without any explicit marker in the CSVs. The Results section quantifies where this actually happens.
 
@@ -52,11 +52,11 @@ This part defines the machinery every module shares. The other module docs refer
 
 $$\ell = b \cdot S + s + 1,$$
 
-with $b$ the block, $S$ the number of sublayers per block, and $s$ the sublayer's position inside the block, so on Qwen3 indices 1 to 7 all belong to block 0. Adjacent indices are therefore different projection types of the *same* block, not different depths. Geary's C, which differences adjacent indices, then measures the alternation between projection types rather than depth smoothness, and the peak layer $\arg\max_\ell \bar{P}_\ell$ returns whichever sublayer is densest for nearly every word. Measured on GPT-2 at AP 0.6, the flat whole-model axis gives a mean per-concept Geary's C of 1.036, which is exactly the value meaning *no spatial structure at all*, and 68% of concepts peak in an `mlp.c_fc` layer.
+with $b$ the block, $S$ the number of sublayers per block, and $s$ the sublayer's position inside the block, so on Qwen3 indices 1 to 7 all belong to block 0. Adjacent indices are therefore different projection types of the *same* block, not different depths. Geary's C, which differences adjacent indices, then measures the alternation between projection types rather than depth smoothness, and the peak layer $\arg\max_\ell \bar{P}_\ell$ returns whichever sublayer is densest for nearly every word. Measured on GPT-2 at AP 0.6 in `research_plots_gpt2_richie_hsj_restructured_final`, the flat whole-model axis gives a mean per-word Geary's C of 1.027, which is the value meaning *no spatial structure at all*, and 85% of the words peak in an `mlp.c_fc` layer.
 
 The whole-model scope therefore produces every order-based output twice:
 
-- **`_by_block`** (canonical): the sublayers within each block are summed into one bin, $N_{cb} = \sum_{s} N_{c, bS+s+1}$, giving $B$ bins (12 for GPT-2, 28 for Qwen3) that carry the model's full expert mass on a genuine depth axis. The same GPT-2 run gives mean Geary's C 0.361 here. This is the variant downstream modules consume.
+- **`_by_block`** (canonical): the sublayers within each block are summed into one bin, $N_{cb} = \sum_{s} N_{c, bS+s+1}$, giving $B$ bins (12 for GPT-2, 28 for Qwen3) that carry the model's full expert mass on a genuine depth axis. The same GPT-2 tree gives mean Geary's C 0.357 here. This is the variant downstream modules consume.
 - **`_by_layer`**: the flat axis at full resolution ($L$ = 48 or 196 bins), kept because it is the only view that separates projection types, with the caveat above attached to any depth reading of it.
 
 A sublayer scope holds exactly one layer per block, so block aggregation would be an identity relabel there and only one variant is written, with no suffix.
@@ -79,13 +79,13 @@ $$p_{c\ell} = \frac{N_{c\ell}}{\sum_{\ell'} N_{c\ell'}}, \qquad p_c = (p_{c\ell}
 
 For a category $k$, $M_k$ denotes its member concepts (restricted to those present in the matrix).
 
-Two structural facts about the underlying data qualify every comparison below (both are established quantitatively in *From responses to expert sets* above). First, **expert sets overlap across words**: a single neuron is typically an expert for several words (54.9% of expert neurons serve ≥ 2 of the 205 words in the Qwen3 run at AP=0.6, and 63.7% within `mlp.gate_proj`), so the distributions $p_c$ of different words are not built from disjoint neuron populations. Comparing two words' entropies therefore compares the *shapes* of their allocations over depth, not how they divide a fixed pool of neurons between them. Second, **expert counts differ systematically between the groups being compared**, addressed in the dedicated paragraph below.
+Two structural facts about the underlying data qualify every comparison below (both are established quantitatively in *From responses to expert sets* above). First, **expert sets overlap across words**: a single neuron is typically an expert for several words (58.4% of expert neurons serve ≥ 2 of the 206 words in the Qwen3-1.7B-Base run at AP=0.6, and 65.9% within `mlp.gate_proj`), so the distributions $p_c$ of different words are not built from disjoint neuron populations. Comparing two words' entropies therefore compares the *shapes* of their allocations over depth, not how they divide a fixed pool of neurons between them. Second, **expert counts differ systematically between the groups being compared**, addressed in the dedicated paragraph below.
 
 **Mathematical formulation.** For each item $c$ (every word with at least one expert, including category labels, since they are words with expert sets too), six scalar descriptors of the distribution $p_c$ are computed by the shared `layer_distribution_descriptors` helper. The Shannon entropy (via `scipy.stats.entropy`, base 2, in bits) measures how spread out the allocation is:
 
 $$H(c) = -\sum_{\ell} p_{c\ell}\,\log_2 p_{c\ell},$$
 
-with the convention $0 \log_2 0 = 0$. Entropy is minimal ($H = 0$) when all experts sit in a single layer, and maximal ($H = \log_2 L$, e.g. $\log_2 28 \approx 4.807$ bits on the Qwen3 `mlp.gate_proj` support) when the allocation is uniform, so *lower entropy = more concentrated*. Entropy is invariant under any permutation of the layers, so it sees concentration but is blind to depth order. Its order-sensitive complement is **Geary's C**, the adjacent-layer spatial autocorrelation of the profile in depth order:
+with the convention $0 \log_2 0 = 0$. Entropy is minimal ($H = 0$) when all experts sit in a single layer, and maximal ($H = \log_2 L$, e.g. $\log_2 28 \approx 4.807$ bits on the Qwen3 `mlp.gate_proj` support) when the allocation is uniform, so *lower entropy = more concentrated*. Dividing by that maximum gives the normalised entropy $\tilde H(c) = H(c)/\log_2 L \in [0, 1]$, the form to use whenever two axes of different length are compared, for instance the 12 GPT-2 and the 28 Qwen3 blocks. Entropy is invariant under any permutation of the layers, so it sees concentration but is blind to depth order. Its order-sensitive complement is **Geary's C**, the adjacent-layer spatial autocorrelation of the profile in depth order:
 
 $$C(c) = \frac{\sum_{i} \left(p_{c,\ell_{i+1}} - p_{c,\ell_i}\right)^2}{2 \sum_{i} \left(p_{c,\ell_i} - \overline{p_c}\right)^2},$$
 
@@ -113,14 +113,15 @@ The full average is dragged toward mid-network by the low-mass tail (a near-unif
 
 $$H(c) \;\le\; \log_2 \min(n_c,\, L),$$
 
-since $n_c$ experts can occupy at most $n_c$ distinct layers. A word with many experts *can in principle spread quite evenly over the layers*, while a word with few experts *cannot produce an even distribution at all*: with $n_c < L$ a uniform allocation is impossible, and even for $n_c \gtrsim L$ the attainable shares are coarse multiples of $1/n_c$ whose sampling noise biases entropy downward. Group comparisons must therefore be read against the groups' counts. This matters concretely here because category labels systematically have *fewer* experts than concepts (Qwen3 at AP=0.6: label mean 331 experts vs. concept mean 964, and in the 150-concept run, e.g. `animal` 231 vs. member concepts often 500–1,000), so part of any "labels are more concentrated" gap could in principle be a count artifact rather than an organizational fact. Two checks bound this concern. At moderate thresholds the counts are large relative to $L$ (hundreds to thousands of experts over 28–48 layers), so the bound is slack, and section 1.2's entropy against expert count panel finds essentially no relationship at AP=0.6 (Pearson r = 0.02, p = 0.87, n = 205 in the Qwen3 run), so the entropy differences there are not driven by set size. At strict thresholds, however, counts collapse into the regime where the bound binds (the Results of section 1.1 report minimum counts of 2 at AP=0.7 and 1 at AP ≥ 0.8 in the 150-concept run, with most surviving words under 30 experts at AP ≥ 0.8), so the across-AP entropy collapse in the Results table below is partly mechanical, and level comparisons at AP ≥ 0.8 inherit the count confound.
+since $n_c$ experts can occupy at most $n_c$ distinct layers. A word with many experts *can in principle spread quite evenly over the layers*, while a word with few experts *cannot produce an even distribution at all*: with $n_c < L$ a uniform allocation is impossible, and even for $n_c \gtrsim L$ the attainable shares are coarse multiples of $1/n_c$ whose sampling noise biases entropy downward. Group comparisons must therefore be read against the groups' counts. This matters concretely here because category labels systematically have *fewer* experts than concepts (Qwen3-1.7B-Base at AP=0.6, whole model: label mean 598 experts vs. concept mean 2,854, and in the legacy 150-concept run, e.g. `animal` 231 vs. member concepts often 500 to 1,000), so part of any "labels are more concentrated" gap could in principle be a count artifact rather than an organizational fact. Two checks bound this concern. At moderate thresholds the counts are large relative to $L$ (hundreds to thousands of experts over 28–48 layers), so the bound is slack, and section 1.2's entropy against expert count panel finds essentially no relationship at AP=0.6 (Pearson r = 0.02, p = 0.87, n = 205 in the Qwen3 run), so the entropy differences there are not driven by set size. At strict thresholds, however, counts collapse into the regime where the bound binds (the Results of section 1.1 report minimum counts of 2 at AP=0.7 and 1 at AP ≥ 0.8 in the legacy 150-concept run, with most surviving words under 30 experts at AP ≥ 0.8), so the across-AP entropy collapse in the Results table below is partly mechanical, and level comparisons at AP ≥ 0.8 inherit the count confound.
 
-**Generated data structures.** The descriptors are computed once per axis variant and written as two tables per level, split by what they describe. Section 1.1 writes the location descriptors, `layer_location_concepts.csv` with `peak_layer`, `peak_gap_pct`, `avg_layer`, `avg_layer_top25pct` and `experts_count`, and section 1.2 writes the shape descriptors, `shannon_entropy_concepts.csv` with `shannon_entropy`, `gearys_c` and `experts_count`. Both tables have one row per word, concepts and category labels alike, keyed by `concept`:
+**Generated data structures.** The descriptors are computed once per axis variant and written as two tables per level, split by what they describe. Section 1.1 writes the location descriptors, `layer_location_concepts.csv` with `peak_layer`, `peak_gap_pct`, `avg_layer`, `avg_layer_top25pct` and `experts_count`, and section 1.2 writes the shape descriptors, `shannon_entropy_concepts.csv` with `shannon_entropy`, `shannon_entropy_norm`, `gearys_c` and `experts_count`. Both tables have one row per word, concepts and category labels alike, keyed by `concept`:
 
 | Column | Type | Symbol | Description |
 |--------|------|--------|-------------|
 | concept | string | $c$ | Word identifier (concepts *and* category labels). |
 | shannon_entropy | float | $H(c)$ | Entropy of the word's layerwise expert distribution. |
+| shannon_entropy_norm | float | $\tilde H(c)$ | Entropy divided by $\log_2 L$, in $[0, 1]$. |
 | gearys_c | float | $C(c)$ | Adjacent-layer autocorrelation of the profile in depth order. |
 | peak_layer | int | $\ell^{\ast}_c$ | Absolute index of the layer with the strongest concentration. |
 | peak_gap_pct | float | $\gamma_c$ | Percentage-point lead of the peak layer over the runner-up. |
@@ -128,13 +129,19 @@ since $n_c$ experts can occupy at most $n_c$ distinct layers. A word with many e
 | avg_layer_top25pct | float | $\bar{\ell}^{\,25\%}_c$ | Expected layer over the top 25% most-loaded layers, renormalized. |
 | experts_count | int | $n_c$ | Number of expert rows used to compute the distribution. |
 
-Example (head of the combined table the run wrote before the split, `AP_0.6/2_shannon_entropy_analysis/shannon_entropy_concepts.csv` in `research_plots_qwen_richie_hsj_with_sublayer_analysis`, where peak/average layers are absolute indices in 1–196, on the 28-layer `mlp.gate_proj` support):
+Examples (heads of `AP_0.6/1_expert_distribution/1.1_layer_expert_distribution/layer_location_concepts_by_block.csv` and `AP_0.6/1_expert_distribution/1.2_distribution_shape/shannon_entropy_concepts_by_block.csv` in `research_plots_qwen_base_richie_hsj_FINAL`, whole model on the block axis, so peak and average layers are bin indices from 1 to 28, one per block):
 
-| concept | shannon_entropy | gearys_c | peak_layer | peak_gap_pct | avg_layer | avg_layer_top25pct | experts_count |
-|---|---|---|---|---|---|---|---|
-| accountant | 4.4946 | 0.1866 | 166 | 0.3052 | 101.83 | 113.46 | 3277 |
-| actor | 4.5028 | 0.5474 | 12 | 6.0443 | 93.02 | 75.98 | 1489 |
-| airplane | 4.1070 | 0.2584 | 173 | 0.5579 | 119.88 | 152.29 | 717 |
+| concept | peak_layer | peak_gap_pct | avg_layer | avg_layer_top25pct | experts_count |
+|---|---|---|---|---|---|
+| accountant | 7 | 0.1612 | 12.70 | 6.47 | 8065 |
+| actor | 2 | 4.7651 | 12.56 | 5.71 | 4470 |
+| airplane | 7 | 2.0526 | 14.83 | 17.26 | 1900 |
+
+| concept | shannon_entropy | shannon_entropy_norm | gearys_c | experts_count |
+|---|---|---|---|---|
+| accountant | 4.5131 | 0.9388 | 0.2040 | 8065 |
+| actor | 4.5557 | 0.9476 | 0.3479 | 4470 |
+| airplane | 4.2981 | 0.8941 | 0.4307 | 1900 |
 
 #### Dual category definitions: label distribution against member average
 
@@ -161,18 +168,23 @@ set to 0 when both vectors exist but either has zero variance, and NaN when one 
 | shannon_entropy, gearys_c, peak_layer, peak_gap_pct, avg_layer, avg_layer_top25pct | float/int | $H(p_k)$, $C(p_k)$, $\ell^{\ast}_k$, $\gamma_k$, $\bar{\ell}_k$, $\bar{\ell}^{\,25\%}_k$ | The six descriptors of the category-label distribution (Definition A). |
 | shannon_entropy_average, gearys_c_average, peak_layer_average, peak_gap_pct_average, avg_layer_average, avg_layer_average_top25pct | float/int | $H(\bar{q}_k)$, $C(\bar{q}_k)$, … | The same six descriptors of the average member distribution (Definition B). |
 | pearson_correlation_distributions | float | $r_k$ | Correlation between the label distribution and the member-average distribution. |
-| member_count | int | $|M_k|$ | Number of valid members contributing to the category summary. |
+| member_count | int | $\lvert M_k \rvert$ | Number of valid members contributing to the category summary. |
 
-The category table is split the same way as the concept table. `layer_location_categories.csv` in section 1.1 holds the four location descriptors for both definitions plus `pearson_correlation_distributions` and `member_count`, and `shannon_entropy_categories.csv` in section 1.2 holds entropy and Geary's C for both definitions plus `member_count`.
+The category table is split the same way as the concept table. `layer_location_categories.csv` in section 1.1 holds the four location descriptors for both definitions plus `pearson_correlation_distributions` and `member_count`, and `shannon_entropy_categories.csv` in section 1.2 holds entropy, normalised entropy and Geary's C for both definitions plus `member_count`.
 
-Example (first rows of the combined table the run wrote before the split, `AP_0.6/2_shannon_entropy_analysis/shannon_entropy_categories.csv` in `research_plots_qwen_richie_hsj_with_sublayer_analysis`, location columns abbreviated):
+Examples (first rows of `AP_0.6/1_expert_distribution/1.2_distribution_shape/shannon_entropy_categories_by_block.csv` and `AP_0.6/1_expert_distribution/1.1_layer_expert_distribution/layer_location_categories_by_block.csv` in `research_plots_qwen_base_richie_hsj_FINAL`, block axis, layers as bin indices from 1 to 28):
 
-| category | shannon_entropy | gearys_c | peak_layer | peak_gap_pct | shannon_entropy_average | gearys_c_average | peak_layer_average | pearson_correlation_distributions | member_count |
-|---|---|---|---|---|---|---|---|---|---|
-| furniture | 4.1739 | 0.3904 | 47 | 0.0 | 4.3876 | 0.2708 | 19 | 0.7158 | 20 |
-| clothing | 4.0994 | 0.4497 | 47 | 6.1404 | 4.2417 | 0.2587 | 19 | 0.4351 | 29 |
+| category | shannon_entropy | shannon_entropy_norm | gearys_c | shannon_entropy_average | shannon_entropy_norm_average | gearys_c_average | member_count |
+|---|---|---|---|---|---|---|---|
+| furniture | 4.1462 | 0.8625 | 0.5162 | 4.3710 | 0.9092 | 0.3751 | 20 |
+| clothing | 3.9478 | 0.8212 | 0.6822 | 4.2860 | 0.8916 | 0.3317 | 29 |
 
-- `category_shannon_entropies_bar.png` (section 1.2), a horizontal **bar chart** of `shannon_entropy` ($H(p_k)$, x-axis) per `category` ($k$, y-axis), sorted descending, ranking categories by how distributed (top) versus localized (bottom) their label's expert allocation is.
+| category | peak_layer | peak_gap_pct | avg_layer | avg_layer_top25pct | peak_layer_average | peak_gap_pct_average | avg_layer_average | avg_layer_average_top25pct | pearson_correlation_distributions | member_count |
+|---|---|---|---|---|---|---|---|---|---|---|
+| furniture | 7 | 2.0000 | 15.86 | 16.75 | 1 | 0.3693 | 13.95 | 14.39 | 0.8487 | 20 |
+| clothing | 7 | 12.3529 | 15.31 | 16.89 | 1 | 0.5998 | 14.20 | 14.87 | 0.6082 | 29 |
+
+- `category_shannon_entropies_bar{suffix}.png` (section 1.2, **not generated by the current code**, its generator line being commented out in favour of the per-category figure of section 1.2), a horizontal **bar chart** of `shannon_entropy` ($H(p_k)$, x-axis) per `category` ($k$, y-axis), sorted descending, ranking categories by how distributed (top) versus localized (bottom) their label's expert allocation is.
 
 #### Level comparisons for the location and shape descriptors
 
@@ -196,7 +208,7 @@ $$\tilde{f}_c = \log_{10} f_c, \qquad f_c > 0,$$
 
 with items at $f_c \le 0$ (missing frequency) dropped from the merged table. The log transform compresses the heavy right tail of word-frequency distributions so that downstream linear correlation operates on a roughly scale-invariant quantity rather than being dominated by a few extremely frequent words. The result is one row per item pairing the model-derived quantity $n_c$ with the human-sourced covariates $f_c$, $\tilde{f}_c$, and Human Typicality $t_c$. Words with $E_c = \varnothing$ (see *From responses to expert sets*) have no expert rows and therefore no row here either, so the table's row count *is* the count of words that retained at least one expert.
 
-**Generated data structures.** One CSV, `expert_counts_with_metadata.csv`, built by grouping the expert rows with `groupby("concept").size()` and merging on `concept` with `concept_metadata` (the metadata table, with its typicality field renamed to `human_typicality` at load time to distinguish it from the model-computed Cosine Typicality of section 2.4). It also carries the metadata's Zipf frequency columns, `frequency_zipf_subtlex_us_lemma` and `frequency_zipf_wikipedia_lemma`, which the frequency panels of module 2 read. Rows are sorted by `(abstraction_level, concept)`, so all level-1 items form one block followed by the level-2 block. This table is not plotted here. It is the input for the correlation panels and the typicality analysis of module 2.
+**Generated data structures.** One CSV, `expert_counts_with_metadata.csv`, built by grouping the expert rows with `groupby("concept").size()` and merging on `concept` with `concept_metadata` (the metadata table, with its typicality field renamed to `human_typicality` at load time to distinguish it from the model-computed Cosine Typicality of section 2.4). It also carries the metadata's four Zipf frequency columns, SUBTLEX-US, Wikipedia, OpenWebText and FineWeb, of which the frequency panels of module 2 read the one named by the config's `frequency_corpus`, OpenWebText for GPT-2 and FineWeb for Qwen3. Rows are sorted by `(abstraction_level, concept)`, so all level-1 items form one block followed by the level-2 block. This table is not plotted here. It is the input for the correlation panels and the typicality analysis of module 2.
 
 | Column | Type | Symbol | Description |
 |--------|------|--------|-------------|
@@ -207,18 +219,20 @@ with items at $f_c \le 0$ (missing frequency) dropped from the merged table. The
 | log_frequency | float | $\tilde{f}_c$ | Base-10 logarithm of the frequency. |
 | frequency_zipf_subtlex_us_lemma | float | | SUBTLEX-US lemma frequency on the Zipf scale. |
 | frequency_zipf_wikipedia_lemma | float | | Wikipedia lemma frequency on the Zipf scale. |
+| frequency_zipf_openwebtext_lemma | float | | OpenWebText lemma frequency on the Zipf scale, read by module 2 for GPT-2. |
+| frequency_zipf_fineweb_lemma | float | | FineWeb lemma frequency on the Zipf scale, read by module 2 for Qwen3. |
 | human_typicality | float | $t_c$ | Human-judged typicality score from the metadata. |
 | expert_count | int | $n_c$ | Number of expert rows retained for the concept. |
 
-Example (head of `AP_0.6/1_layer_expert_distribution/expert_counts_with_metadata.csv` in `research_plots_qwen_richie_hsj_with_sublayer_analysis`, where the level-1 block comes first because of the sort):
+Example (head of `AP_0.6/1_expert_distribution/1.1_layer_expert_distribution/expert_counts_with_metadata.csv` in `research_plots_qwen_base_richie_hsj_FINAL`, where the level-1 block comes first because of the sort):
 
-| concept | category | abstraction_level | frequency | log_frequency | human_typicality | expert_count |
-|---|---|---|---|---|---|---|
-| birds | | 1 | 132116 | 5.1210 | | 431 |
-| clothing | | 1 | 69314 | 4.8408 | | 114 |
-| fruit | | 1 | 86371 | 4.9364 | | 182 |
-| furniture | | 1 | 44365 | 4.6470 | | 259 |
-| professions | | 1 | 10176 | 4.0076 | | 612 |
+| concept | category | abstraction_level | frequency | log_frequency | frequency_zipf_subtlex_us_lemma | frequency_zipf_wikipedia_lemma | frequency_zipf_openwebtext_lemma | frequency_zipf_fineweb_lemma | human_typicality | expert_count |
+|---|---|---|---|---|---|---|---|---|---|---|
+| birds | | 1 | 132116 | 5.1210 | 4.8533 | 4.9814 | 4.7259 | 4.8426 | | 801 |
+| clothing | | 1 | 69314 | 4.8408 | 4.0350 | 4.4473 | 4.3961 | 4.6136 | | 170 |
+| fruit | | 1 | 86371 | 4.9364 | 4.3897 | 4.6830 | 4.5626 | 4.9036 | | 434 |
+| furniture | | 1 | 44365 | 4.6470 | 4.1784 | 4.2535 | 4.0447 | 4.7484 | | 400 |
+| professions | | 1 | 10176 | 4.0076 | 3.9736 | 4.3066 | 4.1692 | 4.3917 | | 1048 |
 
 #### Concept-by-layer allocation profiles (percentages and counts)
 
@@ -295,9 +309,11 @@ $$\ell^{(a)}_{50} = \min\{\ell : C^{(a)}_{\ell} \ge 50\}, \qquad \ell^{(a)}_{90}
 
 The *Pareto-sorted* view instead orders the layers of each level by descending $\bar{P}^{(a)}_{\ell}$ and accumulates in that order, which answers "how many layers hold the bulk of the mass" independent of where they sit in the network: the milestones are the smallest $k$ such that the top-$k$ layers hold 50% (resp. 90%) of the total mass. The two views are deliberately different summaries, since a distribution can be very concentrated (small $k_{50}$) while reaching depth-ordered 50% late, if its dominant layers sit deep in the network.
 
-**Generated data structures.** No new CSVs, since both plots are drawn from `mean_expert_layer_distribution*.csv`. Two plots per layer-axis variant, so two in a sublayer scope and four in the whole-model scope:
+**Generated data structures.** One summary table and two plots per layer-axis variant, so three files in a sublayer scope and six in the whole-model scope:
 
-- `mean_expert_layer_distribution_cumulative{suffix}.png`: depth-ordered bars ($\bar{P}^{(a)}_{\ell}$, both abstraction levels side by side, left y-axis) with each level's cumulative curve $C^{(a)}_{\ell}$ on a secondary 0–100% axis. The 50% and 90% crossings are flagged with diamond markers, dotted projection lines onto both axes, and legend labels naming the crossing layers.
+- `mean_expert_layer_distribution_summary{suffix}.csv`, one row per abstraction level with the milestones of both views: `n_words`, `n_experts`, `n_bins` ($L$), `cumulative_50pct_position` and `cumulative_90pct_position` (the position of $\ell^{(a)}_{50}$ and $\ell^{(a)}_{90}$ along the axis counted from 0, which on the block axis is the block number) with their `_layer_name`, `top_bins_50pct` and `top_bins_90pct` ($k_{50}$ and $k_{90}$ of the Pareto view), and the share of the mean profile in each third of depth, `first_third_pct`, `middle_third_pct` and `last_third_pct`, each beside its expert count (`_experts`). The thirds cut the $L$ bins into three contiguous runs as equal as possible, longer runs first, so 4, 4 and 4 blocks for GPT-2 and 10, 9 and 9 for Qwen3. Writing the table also checks that each level's mean profile sums to 100% and logs a warning otherwise.
+
+- `mean_expert_layer_distribution_cumulative{suffix}.png`: depth-ordered bars ($\bar{P}^{(a)}_{\ell}$, both abstraction levels side by side, left y-axis) with each level's cumulative curve $C^{(a)}_{\ell}$ on a secondary 0–100% axis. The 50% and 90% crossings are flagged with diamond markers, dotted projection lines onto both axes, and legend labels naming the crossing layers. On the block axis the ticks are block numbers counted from 0, as in the models' own module names (`h.0`, `layers.0`), and the legend names the crossing block, while the flat layer axis keeps the full layer names.
 - `mean_expert_layer_distribution_cumulative_sorted{suffix}.png`: the Pareto view, one panel per abstraction level (the sort order differs between levels, so they cannot share an x-axis). Bars are the sorted $\bar{P}^{(a)}_{\ell}$, the line is the cumulative mass recomputed in sorted order, diamonds mark the top-$k_{50}$/top-$k_{90}$ milestones and the panel title states them (e.g. "top 8 layers hold 50% of the mass").
 
 `{suffix}` is `_by_block` or `_by_layer` in the whole-model scope and empty in a sublayer scope. Within a sublayer scope each concept's percentages are renormalized to sum to 100 *within* that sublayer's layers, so the profiles describe where inside the projection type the experts sit, not how much of the model's total mass the type holds, which is `share_of_all_experts_pct` in section 1.3.
@@ -350,17 +366,31 @@ $$\mathrm{AUC} = 1 - \frac{U}{n_1 n_2} = P\big(H(\text{random category}) < H(\te
 
 where 0.5 means no effect and 1.0 means every category label is more concentrated than every concept, which keeps "significant" and "large" visibly separate. A significant result means category labels' allocations are systematically more concentrated (lower $H$) than concepts', not just different in shape. Per the count-dependence paragraph of *Layer descriptors*, the comparison should be read jointly with the entropy against expert count panel below, since the two groups differ in typical expert count.
 
-**Generated data structures.** The $U$ statistic, p-value, and AUC are logged to `main.log` (not saved as CSV). The comparison is visualized in:
+**Generated data structures.** The $U$ statistic, p-value, and AUC are logged to `main.log` (not saved as CSV). The comparison used to be drawn as the plot below, whose generator line is now commented out because pooling 198 members against 8 labels hides the categories, and the per-category figure further down replaces it:
 
-- `category_concept_shannon_entropies.png`, a **violin plot** (drawn by the shared `plot_comparison_violin` helper: quartile lines with Q1/median/Q3 text labels, violins clipped to the observed data range, and a strip plot of the raw points overlaid so small groups stay honest) comparing `shannon_entropy` ($H$, y-axis) across the two groups Specific Concepts vs. Broad Categories (x-axis).
+- `category_concept_shannon_entropies{suffix}.png` (**not generated by the current code**, its generator line being commented out in favour of the per-category figure below), a **violin plot** (drawn by the shared `plot_comparison_violin` helper: quartile lines with Q1/median/Q3 text labels, violins clipped to the observed data range, and a strip plot of the raw points overlaid so small groups stay honest) comparing `shannon_entropy` ($H$, y-axis) across the two groups Specific Concepts vs. Broad Categories (x-axis).
 
 #### Profile-shape map: Geary's C against Shannon entropy
+
+No longer drawn. Its generator line is commented out, since the map does not show which members belong to which label, and the per-category figure below replaces it. The description stays for reference.
 
 **Mathematical formulation.** Entropy and Geary's C answer orthogonal questions about a layer profile, namely *how concentrated* (order-blind) versus *how smooth in depth* (order-sensitive), so plotting every word at coordinates $(H(c), C(c))$ maps the space of profile shapes. The four corners of the map read: concentrated & smooth (low $H$, low $C$: one compact band of layers), concentrated & jagged (low $H$, high $C$: a few isolated spikes), spread & smooth (high $H$, low $C$: broad contiguous mass), spread & jagged (high $H$, high $C$: scattered mass with no depth locality). The dashed horizontal line at $C = 1$ marks "no depth structure", and dotted lines through the middle of each axis quarter the map.
 
 **Generated data structures.** One plot (inputs are the descriptor tables):
 
-- `gearys_entropy_scatter.png`, a **scatter plot**: every specific concept as a small dot (category-label words are excluded from the dots, since they appear in the concepts CSV too, and would otherwise be plotted twice), every category label as a larger named diamond, the 5 most extreme concepts on each end of *both* axes annotated by name, and quadrant guides and the $C=1$ reference line drawn as described, with corner glosses naming the four shape regimes.
+- `gearys_entropy_scatter{suffix}.png` (**not generated by the current code**, commented out in favour of the same per-category figure), a **scatter plot**: every specific concept as a small dot (category-label words are excluded from the dots, since they appear in the concepts CSV too, and would otherwise be plotted twice), every category label as a larger named diamond, the 5 most extreme concepts on each end of *both* axes annotated by name, and quadrant guides and the $C=1$ reference line drawn as described, with corner glosses naming the four shape regimes.
+
+#### Per-category spread and smoothness, members against their category label
+
+**Mathematical formulation.** The violin and the shape map above pooled the 8 category labels against all members, which hid the categories and let one label be compared with another category's members. This figure compares each label $k$ with its own members $M_k$ only. Spread is the entropy normalised by the number of bins, $\tilde H(c) = H(c)/\log_2 L$, which lies in $[0, 1]$ and is comparable between the 12 GPT-2 and the 28 Qwen3 blocks, and smoothness is Geary's C as defined above. For either descriptor $x$, the label's percentile among its members is
+
+$$\pi_k = \frac{1}{|M_k|} \sum_{c \in M_k} \Big( \mathbb{1}[x_c < x_k] + \tfrac{1}{2}\, \mathbb{1}[x_c = x_k] \Big),$$
+
+0.5 when the label sits at its members' median. Labels hold fewer experts than their members, and a sparse profile is by construction both less spread and rougher, so the comparison is repeated at the label's own expert count $n_k$. Each member with at least $n_k$ experts is subsampled to exactly $n_k$ of them, without replacement and with its block shares preserved in expectation (200 multivariate hypergeometric draws, seed 0), its descriptor is averaged over the draws, and $\pi_k$ is recomputed against these count-matched values. Members with fewer experts than their label cannot be subsampled up and are left out of the matched comparison, and `n_members_matched` reports how many remain.
+
+**Generated data structures.** Per axis variant, `category_entropy_gearys{_by_block,_by_layer}.png` and its table `category_entropy_gearys{_by_block,_by_layer}.csv`, one row per category with `n_members`, `label_expert_count`, `n_members_matched` and, for `entropy_norm` and `gearys_c`, the members' median and quartiles (`_members_median`, `_members_q1`, `_members_q3`), the label's value (`_label`), its percentile (`_label_percentile`), the members' median at the label's count (`_members_matched_median`) and the label's percentile against those (`_label_percentile_matched`). The figure has two panels sharing one row per category, the members as a box over their quartiles with their points, the label as a diamond, a grey tick at the count-matched member median, and the two percentiles printed above each row. `check_module1_category_shape` pins the percentile, the normalised entropy, the agreement with `gearys_c`, and the exclusion of members too small to match.
+
+**What it shows**, at AP 0.6 on the block axis. In Qwen3 the label's percentiles barely move under count matching, except `professions` in smoothness (0.61 to 0.32), three of the eight labels sit above their members' median in spread (four once counts are matched), and six are rougher than their members' median (five once matched). In GPT-2 matching changes the picture: the labels hold only 25 to 189 experts, and their Geary's C percentiles fall once the members are cut to the same count, in professions from 0.61 to 0.04, vehicles from 0.59 to 0.23 and vegetables from 0.30 to 0.06, so GPT-2's label-member differences in smoothness are mostly an effect of the labels' small expert sets.
 
 #### Shannon entropy against expert count (both abstraction levels)
 
@@ -381,15 +411,15 @@ over *every* word in the concept descriptor table, which contains both abstracti
 | shannon_entropy | float | $H(c)$ | Entropy of the word's layer distribution. |
 | experts_count | int | $n_c$ | Number of expert rows behind the distribution. |
 
-Example (head of `AP_0.6/4_correlations/shannon_entropy_vs_expert_count.csv` in `research_plots_qwen_richie_hsj_with_sublayer_analysis`):
+Example (head of `AP_0.6/1_expert_distribution/1.2_distribution_shape/shannon_entropy_vs_expert_count.csv` in `research_plots_qwen_base_richie_hsj_FINAL`, block axis):
 
 | concept | group | shannon_entropy | experts_count |
 |---|---|---|---|
-| accountant | Specific Concepts | 4.4946 | 3277 |
-| actor | Specific Concepts | 4.5028 | 1489 |
-| airplane | Specific Concepts | 4.1070 | 717 |
-| apple | Specific Concepts | 4.0195 | 160 |
-| apricot | Specific Concepts | 3.9250 | 1975 |
+| accountant | Specific Concepts | 4.5131 | 8065 |
+| actor | Specific Concepts | 4.5557 | 4470 |
+| airplane | Specific Concepts | 4.2981 | 1900 |
+| apple | Specific Concepts | 3.9472 | 564 |
+| apricot | Specific Concepts | 4.0371 | 5592 |
 
 - `shannon_entropy_vs_expert_count.png`, a **scatter plot with a linear regression line** over the pooled sample, x: `shannon_entropy` ($H(c)$), y: `experts_count` ($n_c$), with concepts drawn as small dots and category labels as larger diamonds, and the pooled Pearson $r$, $p$ and $n$ on the grey line under the title.
 
@@ -431,31 +461,35 @@ the adjacent-neighbor spatial autocorrelation, where $C \approx 1$ means no dept
 | n_experts | int | | Raw expert count behind the share. |
 | n_words | int | | Words of that level with at least one expert in the sublayer. |
 | mean_entropy_bits | float | $\overline{H}$ | Mean Shannon entropy of the words' profiles on the sublayer's own block axis. |
+| mean_entropy_norm | float | $\overline{\tilde H}$ | The same mean divided by $\log_2 L$. |
 | reliable_peak_pct | float | | Share of words whose peak leads the runner-up by at least `PEAK_GAP_RELIABLE_PP` (1 pp). |
 | mean_depth_top25_block | float | $\overline{\ell}^{\,25\%}$ | Mean top-25% average depth, in blocks. |
+| mean_depth_norm | float | $\bar d$ | Mean full average depth rescaled to $[0, 1]$, $d_c = (\bar{\ell}_c - 1)/(L - 1)$ with blocks numbered 1 to $L$. |
 | mean_expert_count | float | $\bar{n}$ | Mean experts per word in the sublayer. |
 
-Example (level-2 block of `AP_0.6/1_layer_expert_distribution/sublayer_informativeness.csv` in `research_plots_qwen_richie_hsj_with_sublayer_analysis`, values rounded):
+Example (level-2 block of `AP_0.6/1_expert_distribution/1.3_sublayer_informativeness/sublayer_informativeness.csv` in `research_plots_qwen_base_richie_hsj_FINAL`, first eight columns, values rounded):
 
 | abstraction_level | sublayer | gearys_c | roc_auc | category_alignment_r | mantel_p | share_of_all_experts_pct | n_experts |
 |---|---|---|---|---|---|---|---|
-| 2 | mlp.gate_proj | 0.317 | 0.927 | 0.620 | 0.0001 | 45.62 | 188907 |
-| 2 | mlp.up_proj | 0.241 | 0.923 | 0.562 | 0.0001 | 24.62 | 101964 |
-| 2 | self_attn.o_proj | 0.955 | 0.879 | 0.549 | 0.0001 | 10.20 | 42256 |
-| 2 | self_attn.v_proj | 0.492 | 0.779 | 0.417 | 0.0001 | 3.68 | 15220 |
-| 2 | self_attn.k_proj | 0.510 | 0.714 | 0.362 | 0.0001 | 2.55 | 10565 |
-| 2 | self_attn.q_proj | 0.452 | 0.698 | 0.304 | 0.0001 | 4.13 | 17122 |
-| 2 | mlp.down_proj | 0.785 | 0.626 | 0.168 | 0.0001 | 8.24 | 34118 |
+| 2 | mlp.gate_proj | 0.327 | 0.951 | 0.647 | 0.0001 | 42.77 | 243707 |
+| 2 | mlp.up_proj | 0.246 | 0.947 | 0.596 | 0.0001 | 26.92 | 153370 |
+| 2 | self_attn.o_proj | 0.963 | 0.920 | 0.589 | 0.0001 | 10.94 | 62361 |
+| 2 | self_attn.v_proj | 0.531 | 0.863 | 0.490 | 0.0001 | 3.82 | 21757 |
+| 2 | self_attn.k_proj | 0.520 | 0.797 | 0.443 | 0.0001 | 2.69 | 15324 |
+| 2 | self_attn.q_proj | 0.453 | 0.786 | 0.421 | 0.0001 | 4.26 | 24269 |
+| 2 | mlp.down_proj | 0.777 | 0.691 | 0.244 | 0.0001 | 7.77 | 44247 |
 
 The descriptor columns are computed on the sublayer's own block axis, one bin per block, so they sit on a common scale across sublayers. `sublayer_informativeness.png` draws seven of the columns as small multiples, one panel per column, sublayers as rows in level-2 ROC-AUC order and one bar per abstraction level: category alignment ROC-AUC, mean Geary's C, mean entropy, reliable-peak share, mean top-25% depth, mean experts per word and share of all experts.
+
+`sublayer_informativeness_summary.csv` keeps only what a thesis table needs. One row per sublayer, in level-2 ROC-AUC order, gives its `group` (MLP or attention, read from the name), the share of the specific concepts' experts it holds (`concept_share_pct`, beside `concept_experts`) and the share of the category labels' experts (`label_share_pct`, beside `label_experts`), each share taken within its own level so that it sums to 100% over the sublayers, then the level-2 `roc_auc`, `mean_depth_norm` and `mean_entropy_norm`. Two grouped rows close the table, all MLP sublayers and all attention sublayers, with shares and counts summed. `sublayer_auc_vs_share.png` draws the sublayer rows as one scatter, ROC-AUC against the concepts' share, one point per sublayer coloured by projection type, with chance (0.5) dashed, a one-panel alternative to the strip above.
 
 ## Results
 
 ### Layer distribution (section 1.1)
 
-At AP=0.6 in the GPT-2 150-concept reference run (`research_plots_150_revised_executor_again`, whole-model expert sets), layer allocation is genuinely concentrated, not uniform. With 48 layers, a uniform allocation would put 10.4% of experts in any 5 layers. Instead, the top 5 layers hold **44.0%** of all expert mass for broad categories (abstraction level 1) and **35.4%** for specific concepts (level 2). The single busiest layer for both levels is `3.L.0.mlp.c_fc` (an early MLP layer), at 13.5% for categories and 11.3% for concepts. This is visible directly in the mean-distribution bars of the cumulative plot: a handful of sharp early-to-mid-layer peaks stand out clearly against a low, noisy baseline across the rest of the network.
+**Legacy.** At AP=0.6 in the GPT-2 150-concept reference run (`research_plots_150_revised_executor_again`, whole-model expert sets), layer allocation is genuinely concentrated, not uniform. With 48 layers, a uniform allocation would put 10.4% of experts in any 5 layers. Instead, the top 5 layers hold **44.0%** of all expert mass for broad categories (abstraction level 1) and **35.4%** for specific concepts (level 2). The single busiest layer for both levels is `3.L.0.mlp.c_fc` (an early MLP layer), at 13.5% for categories and 11.3% for concepts. This is visible directly in the mean-distribution bars of the cumulative plot: a handful of sharp early-to-mid-layer peaks stand out clearly against a low, noisy baseline across the rest of the network.
 
-#### Across AP thresholds
+#### Across AP thresholds (legacy, 150-concept run)
 
 The concentration effect is not a one-threshold artifact. It holds at every AP from 0.5 to 0.9, and it gets dramatically stronger as the threshold tightens:
 
@@ -475,7 +509,7 @@ Section 1.1 only reports descriptive percentages, it does not run a significance
 
 #### Zero-expert words and low-count words across thresholds
 
-Not only layers but *words* can end up empty (see *From responses to expert sets*). In the 150-concept reference run (the same run as the tables above, 164 metadata words = 147 concepts + 17 category labels):
+Not only layers but *words* can end up empty (see *From responses to expert sets*). **Legacy.** In the 150-concept reference run (the same run as the tables above, 164 metadata words, 147 concepts and 17 category labels):
 
 | AP | Words with ≥1 expert (of 164) | Zero-expert words | Words with <30 experts | Smallest count |
 |---|---|---|---|---|
@@ -485,31 +519,33 @@ Not only layers but *words* can end up empty (see *From responses to expert sets
 | 0.8 | 161 | 3 | 94 | 1 |
 | 0.9 | 119 | 45 | 101 | 1 |
 
-At AP ≤ 0.7 there are **no zero-expert cases**: every word keeps at least one expert. The first casualties appear at AP=0.8 (`clothing`, `hopscotch`, `toy`, noting that `clothing` and `toy` are category *labels*, so a whole category loses its Definition-A representation), and at AP=0.9 the phenomenon is widespread: **45 of 164 words (27%) retain zero experts**, including the labels `animal` and `clothing`. This is exactly what silently shrinks the downstream sample sizes reported by the other modules (section 2.1's pair count falling 147 → 128 → 59 across AP 0.7–0.9, module 3's category count falling 17 → 15 → 9). The Richie-HSJ runs behave the same way, and the two architectures differ sharply in how fast they thin out. Of the 205 metadata words:
+At AP ≤ 0.7 there are **no zero-expert cases**: every word keeps at least one expert. The first casualties appear at AP=0.8 (`clothing`, `hopscotch`, `toy`, noting that `clothing` and `toy` are category *labels*, so a whole category loses its Definition-A representation), and at AP=0.9 the phenomenon is widespread: **45 of 164 words (27%) retain zero experts**, including the labels `animal` and `clothing`. This is exactly what silently shrinks the downstream sample sizes reported by the other modules (section 2.1's pair count falling 147 → 128 → 59 across AP 0.7–0.9, module 3's category count falling 17 → 15 → 9). The Richie-HSJ runs behave the same way, and the two architectures differ sharply in how fast they thin out. Of the 206 words of the final trees, GPT-2 in `research_plots_gpt2_richie_hsj_restructured_final` and Qwen3-1.7B-Base in `research_plots_qwen_base_richie_hsj_FINAL`, which every Qwen3 figure of these Results comes from:
 
 | AP | GPT-2 surviving | GPT-2 zero | GPT-2 <30 experts | Qwen3 surviving | Qwen3 zero | Qwen3 <30 experts |
 |---|---|---|---|---|---|---|
-| 0.5 | 205 | 0 | 0 | 205 | 0 | 0 |
-| 0.6 | 205 | 0 | 1 | 205 | 0 | 0 |
-| 0.7 | 205 | 0 | 51 | 205 | 0 | 0 |
-| 0.8 | 193 | 12 | 122 | 205 | 0 | 11 |
-| 0.9 | 114 | 91 | 96 | 195 | 10 | 102 |
+| 0.5 | 206 | 0 | 0 | 206 | 0 | 0 |
+| 0.6 | 206 | 0 | 2 | 206 | 0 | 0 |
+| 0.7 | 206 | 0 | 51 | 206 | 0 | 0 |
+| 0.8 | 189 | 17 | 115 | 206 | 0 | 8 |
+| 0.9 | 115 | 91 | 98 | 201 | 5 | 92 |
 
-GPT-2 loses its first words at AP=0.8 and by AP=0.9 has lost 91 of 205, while Qwen3 keeps every word through AP=0.8 and loses only 10 at AP=0.9. The larger model simply has more units available to clear a strict bar, so results at AP≥0.8 rest on a much thinner GPT-2 sample than the same threshold implies for Qwen3.
+GPT-2 loses its first words at AP=0.8 and by AP=0.9 has lost 91 of 206, while Qwen3 keeps every word through AP=0.8 and loses only 5 at AP=0.9. The larger model simply has more units available to clear a strict bar, so results at AP≥0.8 rest on a much thinner GPT-2 sample than the same threshold implies for Qwen3.
 
-The middle column matters just as much as the zero column. Well before a word reaches zero, it passes through the low-count regime where the reliability caveat of the allocation profiles bites: at AP=0.8, 94 of the 161 surviving words have fewer than 30 experts, so a single expert is 3–100 percentage points of the layer profile, and per-word percentage profiles (and any shift in them between thresholds) are dominated by sampling noise. Group-level statements remain meaningful at strict thresholds because they pool words, but per-word layer percentages at AP ≥ 0.8 should not be over-interpreted.
+The middle column matters just as much as the zero column. Well before a word reaches zero, it passes through the low-count regime where the reliability caveat of the allocation profiles bites: in the legacy 150-concept run at AP=0.8, 94 of the 161 surviving words have fewer than 30 experts, so a single expert is 3–100 percentage points of the layer profile, and per-word percentage profiles (and any shift in them between thresholds) are dominated by sampling noise. Group-level statements remain meaningful at strict thresholds because they pool words, but per-word layer percentages at AP ≥ 0.8 should not be over-interpreted.
 
-The cumulative plots quantify concentration for the Qwen3 run at AP=0.6. On the flat 196-layer axis, the top 11 layers hold 50% of the level-1 mass (top 20 for level 2), and 48 and 70 layers respectively are needed for 90%. On the block axis, which is the one that reads as depth, 7 of 28 blocks hold 50% of the mass at both levels, and 17 and 16 blocks reach 90%. GPT-2 is more concentrated still: 4 of 12 blocks hold 50% at both levels, 9 and 10 blocks reach 90%, and on its flat 48-layer axis 7 and 9 layers hold 50%.
+The cumulative plots quantify concentration for Qwen3 at AP=0.6. On the flat 196-layer axis, the top 13 layers hold 50% of the level-1 mass (top 23 for level 2), and 53 and 78 layers respectively are needed for 90%. On the block axis, which is the one that reads as depth, 7 and 8 of 28 blocks hold 50% of the mass, and 18 and 17 blocks reach 90%. GPT-2 is more concentrated still: 4 of 12 blocks hold 50% at both levels, 9 and 10 blocks reach 90%, and on its flat 48-layer axis 7 and 9 layers hold 50%.
+
+The per-level summary, `mean_expert_layer_distribution_summary_by_block.csv`, adds where along depth that mass accumulates (final trees). On Qwen3 the specific concepts' mean profile reaches 50% at block 20 at AP 0.5 and block 19 at AP 0.6, and 90% at block 26 at both, and puts 40 to 44% of its mass in the first third of depth (blocks 0 to 9), only 6 to 9% in the middle third (blocks 10 to 18) and 50 to 52% in the last (blocks 19 to 27), so the experts sit in an early and a late band with little between them. GPT-2 reaches 50% earlier, at block 5 at AP 0.5 and block 4 at AP 0.6, and 90% at block 11, with 43 to 49% in the first third (blocks 0 to 3), 15 to 18% in the middle and 35 to 39% in the last. In GPT-2 the category labels reach 50% two blocks later than their members at both thresholds, in Qwen3 two blocks earlier at AP 0.5 and at the same block at AP 0.6.
 
 ### Distribution shape (section 1.2)
 
-*Scope note.* The 150-concept figures below come from the runs that predate the whole-model refactor, so they describe the **analysis sublayer** only. The Richie-HSJ sections are now reported from the corrected `_sensefix` runs at both scopes, and the scope turns out to matter more than any other choice in this module, so the two are kept separate and labelled throughout.
+*Scope note.* The 150-concept figures below are **legacy**: they come from the runs that predate the whole-model refactor, so they describe the **analysis sublayer** only. The Richie-HSJ sections are reported from the final trees at both scopes, Qwen3 being Qwen3-1.7B-Base, and the scope turns out to matter more than any other choice in this module, so the two are kept separate and labelled throughout.
 
-At AP=0.6 in the GPT-2 150-concept reference run, the hypothesis holds, but only modestly in magnitude. Mean entropy for the 164 concepts is **4.49 bits** (SD 0.35) versus **4.18 bits** (SD 0.33) for the 17 category labels, so categories are lower-entropy (more concentrated) than concepts, and a Mann-Whitney U test confirms this is unlikely to be chance (U=698.5, p=3.6×10⁻⁴). But the absolute gap is small relative to the scale: the maximum possible entropy over 48 layers is log₂(48) ≈ 5.58 bits, so both groups sit well below the ceiling and only about 6% apart from each other. `category_concept_shannon_entropies.png` shows this directly: the two violins clearly overlap, with the category distribution shifted down and narrower, not cleanly separated from the concept distribution.
+**Legacy.** At AP=0.6 in the GPT-2 150-concept reference run, the hypothesis holds, but only modestly in magnitude. Mean entropy for the 164 concepts is **4.49 bits** (SD 0.35) versus **4.18 bits** (SD 0.33) for the 17 category labels, so categories are lower-entropy (more concentrated) than concepts, and a Mann-Whitney U test confirms this is unlikely to be chance (U=698.5, p=3.6×10⁻⁴). But the absolute gap is small relative to the scale: the maximum possible entropy over 48 layers is log₂(48) ≈ 5.58 bits, so both groups sit well below the ceiling and only about 6% apart from each other. `category_concept_shannon_entropies.png`, a figure not generated by the current code, showed this directly: the two violins clearly overlap, with the category distribution shifted down and narrower, not cleanly separated from the concept distribution.
 
 A more striking, and easy to miss, pattern sits in the same CSV: averaging a category's *members* together (`shannon_entropy_average`, mean 4.79 bits) produces the **least** concentrated distribution of the three, even less concentrated than individual concepts, let alone the category label itself. In other words, the category-label word is the sharpest of the three representations, but smoothing across its members washes that sharpness out rather than preserving it. This is exactly the gap that module 3 quantifies directly with Jensen-Shannon divergence, and it complicates a simple "category labels are just an average of their members" story.
 
-#### Across AP thresholds
+#### Across AP thresholds (legacy, 150-concept run)
 
 | AP | Concept entropy (mean, SD) | Category-label entropy (mean, SD) | Avg-member entropy (mean) | Mann-Whitney p | Label-vs-avg-member r |
 |---|---|---|---|---|---|
@@ -529,42 +565,44 @@ The *relative* size of the concept-vs-category gap also grows sharply with AP. A
 
 #### The Richie-HSJ runs, and why the analysis scope decides the answer
 
-Reported from the corrected `_sensefix` runs (205 words = 197 concepts including `squash`, plus 8 category labels). The concentration hypothesis is answered differently depending on whether the expert set is read over the whole model or restricted to the analysis sublayer, and that difference is the main finding of this section. Entropy tests are one-sided (categories more concentrated), depth tests two-sided, computed over the 8 labels against the 197 concepts.
+Reported from the final trees (206 words, the 198 members with both `squash` homonyms plus the 8 category labels), the whole model read on the flat layer axis. The concentration hypothesis is answered differently depending on whether the expert set is read over the whole model or restricted to the analysis sublayer, and that difference is the main finding of this section. Entropy tests are one-sided (categories more concentrated), depth tests two-sided, computed over the 8 labels against the 198 members.
 
-**Whole model.** The hypothesis holds, clearly, in both architectures:
+**Whole model, flat layer axis.** The hypothesis holds, clearly, in both architectures:
 
 | Model | AP | Entropy, label vs concept (p) | Avg layer, label vs concept (p) | Trimmed avg (p) |
 |---|---|---|---|---|
-| GPT-2 | 0.5 | 4.62 vs 4.78 (0.003) | 25.6 vs 23.6 (0.027) | 26.4 vs 23.5 (0.12) |
-| GPT-2 | 0.6 | 4.06 vs 4.42 (0.001) | 25.9 vs 21.7 (0.008) | 26.1 vs 20.7 (0.019) |
-| Qwen3 | 0.5 | 5.95 vs 6.20 (<0.001) | 105.6 vs 110.6 (0.12) | 107.8 vs 113.3 (0.13) |
-| Qwen3 | 0.6 | 5.34 vs 5.84 (<0.001) | 108.2 vs 106.3 (0.80) | 108.7 vs 107.7 (0.94) |
+| GPT-2 | 0.5 | 4.62 vs 4.78 (0.003) | 25.6 vs 23.5 (0.023) | 26.2 vs 23.4 (0.13) |
+| GPT-2 | 0.6 | 4.05 vs 4.41 (0.001) | 25.3 vs 21.5 (0.021) | 25.6 vs 20.5 (0.030) |
+| Qwen3 | 0.5 | 6.07 vs 6.34 (<0.001) | 106.6 vs 109.5 (0.29) | 110.0 vs 112.9 (0.36) |
+| Qwen3 | 0.6 | 5.48 vs 6.01 (<0.001) | 107.6 vs 104.2 (0.38) | 109.0 vs 106.0 (0.56) |
 
 **Analysis sublayer only** (`mlp.c_fc`, `mlp.gate_proj`). The same test on the same words returns nothing:
 
 | Model | AP | Entropy, label vs concept (p) | Avg layer, label vs concept (p) |
 |---|---|---|---|
-| GPT-2 | 0.5 | 3.22 vs 3.27 (0.16) | 26.6 vs 24.0 (0.030) |
-| GPT-2 | 0.6 | 2.98 vs 3.05 (0.08) | 26.9 vs 21.9 (0.021) |
-| Qwen3 | 0.5 | 4.39 vs 4.31 (0.88) | 112.4 vs 106.7 (0.12) |
-| Qwen3 | 0.6 | 4.19 vs 4.15 (0.60) | 115.0 vs 103.7 (0.013) |
+| GPT-2 | 0.5 | 3.23 vs 3.27 (0.17) | 26.6 vs 23.9 (0.032) |
+| GPT-2 | 0.6 | 2.94 vs 3.04 (0.05) | 26.8 vs 21.8 (0.017) |
+| Qwen3 | 0.5 | 4.42 vs 4.36 (0.72) | 113.8 vs 106.9 (0.039) |
+| Qwen3 | 0.6 | 4.21 vs 4.22 (0.34) | 114.6 vs 102.0 (0.004) |
 
 Three readings follow.
 
-First, **the concentration contrast is a whole-model property**. Restricted to one projection type the levels are indistinguishable (p 0.08 to 0.88), while pooled over all sublayers the labels are reliably sharper (p ≤ 0.003 everywhere). The mechanism is visible in section 1.1: a category label spreads its experts over fewer sublayer types than a concept does, so restricting to a single sublayer discards exactly the axis along which labels are concentrated. Any claim about level-1 versus level-2 concentration must therefore state its scope, and the earlier sublayer-only null should not be read as a null for the models.
+First, **the concentration contrast is a whole-model property**. Restricted to one projection type the levels are indistinguishable (p 0.05 to 0.72), while pooled over all sublayers the labels are reliably sharper (p ≤ 0.004 everywhere). The mechanism is visible in section 1.1: a category label spreads its experts over fewer sublayer types than a concept does, so restricting to a single sublayer discards exactly the axis along which labels are concentrated. The block axis, which sums the sublayer types within each block, discards that axis too, and there the labels are no sharper than their members either (p 0.25 at both thresholds in GPT-2, 0.85 and 0.49 in Qwen3). Any claim about level-1 versus level-2 concentration must therefore state its scope and its layer axis, and the earlier sublayer-only null should not be read as a null for the models.
 
-Second, **depth separates the levels in GPT-2 but not in Qwen3**. GPT-2 labels sit consistently deeper than their members (p 0.008 to 0.030 whole model, 0.021 to 0.030 in `mlp.c_fc`), while on Qwen3 the whole-model comparison is flat (p 0.12 and 0.80) and only the sublayer-restricted AP 0.6 comparison separates (p 0.013). Depth is the more architecture-dependent of the two contrasts, and the reverse of what the earlier sublayer-only reading suggested.
+Second, **depth separates the levels in GPT-2 but not in Qwen3**. GPT-2 labels sit consistently deeper than their members on the average layer (p 0.021 and 0.023 whole model, 0.017 and 0.032 in `mlp.c_fc`), while on Qwen3 the whole-model comparison is flat (p 0.29 and 0.38) and only the sublayer-restricted comparisons separate, with the labels deeper (p 0.039 and 0.004). Depth is the more architecture-dependent of the two contrasts, and the reverse of what the earlier sublayer-only reading suggested.
 
-Third, **the three-way ordering label < concepts < avg-member holds on Richie-HSJ too**, matching the 150-concept run: at AP 0.6 GPT-2 gives 4.06 < 4.42 < 4.74 and Qwen3 gives 5.34 < 5.84 < 6.15. Averaging a category's members produces the least concentrated of the three representations in every run and at every threshold, which is the gap module 3 measures directly. Label-versus-member shape correlation is 0.85 and 0.71 for GPT-2 at AP 0.5 and 0.6, and 0.84 and 0.77 for Qwen3, weakening as the threshold tightens exactly as in the 150-run.
+Third, **the three-way ordering label < concepts < avg-member holds on Richie-HSJ too**, matching the 150-concept run: at AP 0.6 GPT-2 gives 4.05 < 4.41 < 4.74 and Qwen3 gives 5.48 < 6.01 < 6.29. Averaging a category's members produces the least concentrated of the three representations in every run and at every threshold, which is the gap module 3 measures directly. Label-versus-member shape correlation is 0.85 and 0.73 for GPT-2 at AP 0.5 and 0.6, and 0.85 and 0.77 for Qwen3, weakening as the threshold tightens exactly as in the 150-run.
 
-**Peak reliability and smoothness.** Ambiguous peaks ($\gamma < 1$ pp) are common and far more so in the larger model: at AP 0.6, 23% of GPT-2 concepts and 50% of its labels are ambiguous, against 56% and 62% for Qwen3, so the hatched segments of the peak-layer histogram carry most of the mass in the Qwen3 figures and peak locations there should not be read as point estimates. On the block axis, mean Geary's C is 0.35 (concepts) and 0.43 (labels) for GPT-2 at AP 0.6, and 0.33 and 0.47 for Qwen3, all far below the $C=1$ no-structure line, so expert mass sits in contiguous depth bands in both models. Read on the flat layer axis instead, the same GPT-2 statistic is 1.02, the textbook value for no spatial structure at all, which is the artifact *Analysis scopes and the two layer axes* warns about and the reason the block axis is canonical for every depth-ordered descriptor here.
+**Peak reliability and smoothness.** Ambiguous peaks ($\gamma < 1$ pp) are common and far more so in the larger model: at AP 0.6, 27% of GPT-2 concepts and 50% of its labels are ambiguous, against 57% and 75% for Qwen3, so the hatched segments of the peak-layer histogram carry most of the mass in the Qwen3 figures and peak locations there should not be read as point estimates. On the block axis, mean Geary's C is 0.35 (concepts) and 0.41 (labels) for GPT-2 at AP 0.6, and 0.36 and 0.46 for Qwen3, all far below the $C=1$ no-structure line, so expert mass sits in contiguous depth bands in both models. Read on the flat layer axis instead, the same GPT-2 statistic is 1.02, the textbook value for no spatial structure at all, which is the artifact *Analysis scopes and the two layer axes* warns about and the reason the block axis is canonical for every depth-ordered descriptor here.
 
 #### Entropy against expert count
 
-Shannon-entropy-vs-expert-count behaves very differently in the two architectures, and this matters for how the entropy contrasts of section 1.2 are read. In Qwen3 it is near zero at lenient thresholds (r = 0.109 at AP 0.5, -0.012 at AP 0.6, 0.011 at AP 0.7) and only becomes substantial at strict ones (0.192 at AP 0.8, 0.490 at AP 0.9), exactly the $H \le \log_2 n_c$ ceiling effect the entropy against expert count panel predicts. In GPT-2 it is strong at *every* threshold (0.655, 0.647, 0.561, 0.545). GPT-2 words hold far fewer experts than Qwen3 words at the same AP, so GPT-2 sits in the count-limited regime from the start. The entropy contrasts are therefore count-independent for Qwen3 at AP 0.5 to 0.7, but for GPT-2 an entropy difference between two groups is partly a count difference at any threshold, and the level-1 versus level-2 entropy gap there should be read with the label-versus-concept count gap in view.
+Shannon-entropy-vs-expert-count behaves very differently in the two architectures, and this matters for how the entropy contrasts of section 1.2 are read. In Qwen3 it is weak at lenient thresholds (r = 0.252 at AP 0.5, 0.160 at AP 0.6, 0.132 at AP 0.7) and rises at the strict ones (0.221 at AP 0.8, 0.467 at AP 0.9), the $H \le \log_2 n_c$ ceiling effect the entropy against expert count panel predicts. In GPT-2 it is strong at *every* threshold (0.655, 0.640, 0.569, 0.554). GPT-2 words hold far fewer experts than Qwen3 words at the same AP, so GPT-2 sits in the count-limited regime from the start. The entropy contrasts are therefore largely count-independent for Qwen3 at AP 0.5 to 0.7, but for GPT-2 an entropy difference between two groups is partly a count difference at any threshold, and the level-1 versus level-2 entropy gap there should be read with the label-versus-concept count gap in view.
 
 ### Sublayer informativeness (section 1.3)
 
-The sublayer ranking cleanly separates the projection types, in the same order for both architectures' MLP-vs-attention contrast. For Qwen3 (table in section 1.3): `mlp.gate_proj` and `mlp.up_proj` are nearly tied at the top (AUC 0.948 and 0.943) and jointly hold 70% of all experts, attention projections rank middle (o_proj 0.901 down to q_proj 0.710), and `mlp.down_proj` is by far the least category-aligned (AUC 0.628, r 0.173). Every sublayer's `mantel_p` sits at the $10^{-4}$ permutation floor, so *all* sublayers carry statistically real category signal, and the ranking is about how much, not whether. `mlp.gate_proj` also dominates the level-1 side, holding 2,849 of the 4,163 category-label experts (68%). For GPT-2 on the same dataset, the winner is `mlp.c_fc` (AUC 0.889, against 0.796 for `attn.c_attn`, 0.691 for `attn.c_proj`, 0.571 for `mlp.c_proj`). These rankings are what the configured `sublayer_filter` values (`mlp.gate_proj`, `mlp.c_fc`), the analysis sublayer of module 4, implement. The Geary's C column adds a shape observation: the category-aligned MLP input projections have smooth depth profiles (mean C ≈ 0.24–0.31), while `self_attn.o_proj` (C ≈ 0.96) is essentially depth-unstructured.
+The sublayer ranking cleanly separates the projection types, in the same order for both architectures' MLP-vs-attention contrast. For Qwen3 (table in section 1.3): `mlp.gate_proj` and `mlp.up_proj` are nearly tied at the top (AUC 0.951 and 0.947 at AP 0.6) and jointly hold 70% of all experts, attention projections rank middle (o_proj 0.920 down to q_proj 0.786), and `mlp.down_proj` is by far the least category-aligned (AUC 0.691, r 0.244). Every sublayer's `mantel_p` sits at the $10^{-4}$ permutation floor, so *all* sublayers carry statistically real category signal, and the ranking is about how much, not whether. `mlp.gate_proj` also dominates the level-1 side, holding 3,153 of the 4,785 category-label experts (66%). For GPT-2 on the same dataset, the winner is `mlp.c_fc` (AUC 0.879, against 0.796 for `attn.c_attn`, 0.691 for `attn.c_proj`, 0.571 for `mlp.c_proj`). These rankings are what the configured `sublayer_filter` values (`mlp.gate_proj`, `mlp.c_fc`), the analysis sublayer of module 4, implement. The Geary's C column adds a shape observation: the category-aligned MLP input projections have smooth depth profiles (mean C of 0.25 and 0.33), while `self_attn.o_proj` (C of 0.96) is essentially depth-unstructured.
 
-At the more lenient AP=0.5 the same ordering holds with higher values throughout (Qwen3: gate_proj 0.956, up_proj 0.954, o_proj 0.949, v_proj 0.906, q_proj 0.872, k_proj 0.872, down_proj 0.754, and for GPT-2: c_fc 0.933, attn.c_attn 0.906, attn.c_proj 0.901, mlp.c_proj 0.695), so the ranking is stable across thresholds rather than an artifact of one cut.
+At the more lenient AP=0.5 the same ordering holds with higher values throughout (Qwen3: gate_proj 0.958, up_proj 0.957, o_proj 0.949, v_proj 0.933, q_proj 0.915, k_proj 0.915, down_proj 0.808, and for GPT-2: c_fc 0.931, attn.c_attn 0.903, attn.c_proj 0.901, mlp.c_proj 0.688), so the ranking is stable across thresholds rather than an artifact of one cut.
+
+`sublayer_informativeness_summary.csv` splits each level's experts over the sublayers, every share within its own level (final trees). On Qwen3 the MLP sublayers hold 76.2% of the specific concepts' experts at AP 0.5 and 78.1% at AP 0.6, and a larger 81.3% and 86.7% of the category labels' experts, `mlp.gate_proj` alone holding 43% of the concepts' experts and 66% of the labels' at AP 0.6. On GPT-2 the two levels split alike, 57.7% and 57.9% MLP at AP 0.5, 60.5% and 62.3% at AP 0.6. `sublayer_auc_vs_share.png` shows that in GPT-2 the share of experts and the category alignment fall together down the four sublayers, while in Qwen3 `mlp.down_proj` breaks that order, the least aligned (0.69) although it holds 8% of the concepts' experts, more than any query, key or value projection, and `self_attn.o_proj` stays close to the MLP input projections, aligned at 0.92 from 11%.

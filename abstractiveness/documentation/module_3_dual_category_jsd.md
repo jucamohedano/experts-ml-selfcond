@@ -26,20 +26,20 @@ $$\mathrm{JSD}(P \,\|\, Q) = \tfrac{1}{2} D_{\mathrm{KL}}(P \,\|\, M) + \tfrac{1
 
 `scipy.spatial.distance.jensenshannon` returns the JS *distance* $\sqrt{\mathrm{JSD}}$, so the code squares it to store the divergence itself. Unlike KL, JSD is symmetric and always finite (a layer where only one of $P, Q$ has mass contributes finitely through $M$), and with base 2 it is bounded in $[0,1]$: 0 means the label's layer profile *is* the member average, 1 means they live on disjoint layers. Each category also carries the Shannon entropy of its label distribution, $H(P) = -\sum_\ell P_\ell \log_2 P_\ell$ (Definition A of module 1's dual category definitions), and the mean Human Typicality of its valid members, $\bar{t}_k = \frac{1}{|M_k|}\sum_{m \in M_k} t_m$.
 
-**Generated data structures.** One CSV (shared with subchapter 3.2) and one plot:
+**Generated data structures.** One CSV (shared with subchapter 3.2) and one plot, each written once per axis variant in the whole-model scope, suffixed `_by_block` and `_by_layer` (written `{suffix}` below), and once without a suffix in a sublayer scope:
 
-- `dual_category_jsd.csv`, one row per category, sorted ascending by `jensen_shannon_divergence`. The raw $P$/$Q$ arrays are kept in memory for the micro plot but dropped before saving.
+- `dual_category_jsd{suffix}.csv`, one row per category, sorted ascending by `jensen_shannon_divergence`. The raw $P$/$Q$ arrays are kept in memory for the micro plot but dropped before saving.
 
 | Column | Type | Symbol | Description |
 |--------|------|--------|-------------|
 | category | string | $k$ | Category label. |
-| member_count | int | $|M_k|$ | Number of member concepts used in the average distribution. |
+| member_count | int | $\lvert M_k \rvert$ | Number of member concepts used in the average distribution. |
 | avg_human_typicality | float | $\bar{t}_k$ | Mean human typicality of the category members. |
 | shannon_entropy_label | float | $H(P)$ | Entropy of the category-label distribution. |
 | jensen_shannon_divergence | float | $\mathrm{JSD}(P \| Q)$ | Divergence between the label distribution and the member-average distribution. |
 | avg_member_diversity_jsd | float | $\bar{D}_k$ (see 3.2) | Mean pairwise divergence among the category's own member concepts (internal diversity). |
 
-Example (head of `AP_0.6/6_dual_category_jsd/dual_category_jsd.csv` in `research_plots_150_revised_executor_again`):
+**Legacy** example (head of `AP_0.6/6_dual_category_jsd/dual_category_jsd.csv` in `research_plots_150_revised_executor_again`, the 150-concept run, in the folder layout of that run):
 
 | category | member_count | avg_human_typicality | shannon_entropy_label | jensen_shannon_divergence | avg_member_diversity_jsd |
 |---|---|---|---|---|---|
@@ -49,7 +49,7 @@ Example (head of `AP_0.6/6_dual_category_jsd/dual_category_jsd.csv` in `research
 | hardware | 9 | 0.4602 | 4.2198 | 0.0684 | 0.1709 |
 | container | 11 | 0.5622 | 4.0633 | 0.0801 | 0.1585 |
 
-- `micro_jsd_distributions.png`, two stacked **overlaid area charts** inspecting the extremes $\arg\min_k \mathrm{JSD}$ (top) and $\arg\max_k \mathrm{JSD}$ (bottom): the x-axis is the model layer $\ell$, the y-axis is probability, with one filled curve for the prototype $P_\ell$ (category label) and one for the exemplar average $Q_\ell$ (members). This shows the actual layer-wise allocations behind the smallest and largest divergence values.
+- `micro_jsd_distributions{suffix}.png`, two stacked **overlaid area charts** inspecting the extremes $\arg\min_k \mathrm{JSD}$ (top) and $\arg\max_k \mathrm{JSD}$ (bottom): the x-axis is the model layer $\ell$, the y-axis is probability, with one filled curve for the prototype $P_\ell$ (category label) and one for the exemplar average $Q_\ell$ (members). This shows the actual layer-wise allocations behind the smallest and largest divergence values.
 
 ### 3.2 Internal member diversity
 
@@ -59,9 +59,9 @@ $$\bar{D}_k = \binom{|M_k|}{2}^{-1} \sum_{\substack{m_i, m_j \in M_k \\ i < j}} 
 
 undefined (NaN) when $|M_k| < 2$. High $\bar{D}_k$ means the members themselves disagree about which layers matter, and the hypothesis under test is a positive relationship between $\bar{D}_k$ and $\mathrm{JSD}(P\|Q)$, since internally dispersed categories should be harder for a single label profile to represent. The test statistic is the Pearson correlation across categories, $r = \operatorname{corr}\big(\mathrm{JSD}(P\|Q),\, \bar{D}\big)$, annotated on the plot.
 
-**Generated data structures.** The `avg_member_diversity_jsd` column ($\bar{D}_k$) of `dual_category_jsd.csv` above, and one plot:
+**Generated data structures.** The `avg_member_diversity_jsd` column ($\bar{D}_k$) of `dual_category_jsd{suffix}.csv` above, and one plot:
 
-- `scatter_jsd_vs_member_diversity.png`, a **scatter plot with a linear regression line**, x: `jensen_shannon_divergence` ($\mathrm{JSD}(P\|Q)$, "Label vs. Averaged Members Divergence"), y: `avg_member_diversity_jsd` ($\bar{D}_k$, "Average Pairwise Member Divergence"), one point per category (annotated with the category name), Pearson $r$/$p$ in the title.
+- `scatter_jsd_vs_member_diversity{suffix}.png`, a **scatter plot with a linear regression line**, x: `jensen_shannon_divergence` ($\mathrm{JSD}(P\|Q)$, "Label vs. Averaged Members Divergence"), y: `avg_member_diversity_jsd` ($\bar{D}_k$, "Average Pairwise Member Divergence"), one point per category (annotated with the category name), Pearson $r$/$p$ in the title.
 
 ### 3.3 Label concentration vs. divergence
 
@@ -71,33 +71,33 @@ $$r = \operatorname{corr}\big(\mathrm{JSD}(P \,\|\, Q),\; H(P)\big),$$
 
 with a *negative* $r$ meaning more concentrated labels (lower entropy) diverge more from their member average.
 
-**Generated data structures.** No new CSV columns (both variables already live in `dual_category_jsd.csv`), only one plot:
+**Generated data structures.** No new CSV columns (both variables already live in `dual_category_jsd{suffix}.csv`), only one plot:
 
-- `scatter_jsd_vs_entropy.png`, a **scatter plot with a linear regression line**, x: `jensen_shannon_divergence` ($\mathrm{JSD}(P\|Q)$), y: `shannon_entropy_label` ($H(P)$), one point per category (annotated with the category name), Pearson $r$/$p$ in the title.
+- `scatter_jsd_vs_entropy{suffix}.png`, a **scatter plot with a linear regression line**, x: `jensen_shannon_divergence` ($\mathrm{JSD}(P\|Q)$), y: `shannon_entropy_label` ($H(P)$), one point per category (annotated with the category name), Pearson $r$/$p$ in the title.
 
 ## Results
 
-*Scope note.* The 17-category figures below come from the 150-concept run. The Richie-HSJ tables are whole-model scope on the block axis from the corrected `_sensefix` runs, where there are only **8 categories**, so every correlation in this module rests on n=8 and none of it should be read as more than suggestive.
+*Scope note.* The 17-category figures below are **legacy**, from the 150-concept run. The Richie-HSJ tables are whole-model scope on the block axis from the final trees, GPT-2 in `research_plots_gpt2_richie_hsj_restructured_final` and Qwen3-1.7B-Base, called Qwen3 below, in `research_plots_qwen_base_richie_hsj_FINAL`, where there are only **8 categories**, so every correlation in this module rests on n=8 and none of it should be read as more than suggestive.
 
-In the 150-concept run at AP=0.6, categories vary a lot in how well their label represents their members: JSD ranges 4x across the 17 categories, from **0.064** (animal, well aligned) to **0.248** (furniture, poorly aligned). Of the two relationships this module tests, only one holds up at that threshold: **label entropy predicts divergence** (r=-0.60, p=0.011, n=17), while **internal member diversity does not** (r=0.32, p=0.21, n=17).
+**Legacy.** In the 150-concept run at AP=0.6, categories vary a lot in how well their label represents their members: JSD ranges 4x across the 17 categories, from **0.064** (animal, well aligned) to **0.248** (furniture, poorly aligned). Of the two relationships this module tests, only one holds up at that threshold: **label entropy predicts divergence** (r=-0.60, p=0.011, n=17), while **internal member diversity does not** (r=0.32, p=0.21, n=17).
 
 ### Across AP thresholds, Richie-HSJ
 
 | Model | AP | n cat. | JSD range | JSD mean | Entropy-vs-JSD (r, p) | Diversity-vs-JSD (r, p) |
 |---|---|---|---|---|---|---|
-| GPT-2 | 0.5 | 8 | 0.008–0.036 | 0.019 | -0.66 (0.076) | +0.90 (0.002) |
-| GPT-2 | 0.6 | 8 | 0.025–0.134 | 0.061 | -0.65 (0.084) | +0.41 (0.32) |
-| GPT-2 | 0.7 | 8 | 0.054–0.546 | 0.239 | -0.88 (0.004) | -0.42 (0.31) |
-| GPT-2 | 0.8 | 5 | 0.196–0.702 | 0.376 | -0.66 (0.22) | +0.04 (0.95) |
+| GPT-2 | 0.5 | 8 | 0.006 to 0.043 | 0.020 | -0.69 (0.057) | +0.84 (0.009) |
+| GPT-2 | 0.6 | 8 | 0.027 to 0.132 | 0.061 | -0.83 (0.011) | +0.39 (0.33) |
+| GPT-2 | 0.7 | 8 | 0.058 to 0.424 | 0.234 | -0.81 (0.015) | -0.42 (0.30) |
+| GPT-2 | 0.8 | 3 | 0.281 to 0.449 | 0.361 | -1.00 (0.039) | -0.12 (0.93) |
 | GPT-2 | 0.9 | n/a | no output | | | |
-| Qwen3 | 0.5 | 8 | 0.014–0.055 | 0.028 | -0.70 (0.055) | +0.00 (0.99) |
-| Qwen3 | 0.6 | 8 | 0.031–0.113 | 0.054 | -0.61 (0.11) | +0.33 (0.42) |
-| Qwen3 | 0.7 | 8 | 0.047–0.171 | 0.106 | -0.04 (0.93) | +0.44 (0.28) |
-| Qwen3 | 0.8 | 8 | 0.118–0.810 | 0.373 | -0.91 (0.002) | -0.22 (0.60) |
-| Qwen3 | 0.9 | 3 | 0.500–0.819 | 0.643 | -0.99 (0.084) | -0.88 (0.32) |
+| Qwen3 | 0.5 | 8 | 0.009 to 0.038 | 0.021 | -0.43 (0.29) | -0.25 (0.56) |
+| Qwen3 | 0.6 | 8 | 0.028 to 0.088 | 0.044 | -0.61 (0.11) | +0.10 (0.82) |
+| Qwen3 | 0.7 | 8 | 0.059 to 0.177 | 0.106 | -0.28 (0.50) | +0.06 (0.88) |
+| Qwen3 | 0.8 | 8 | 0.137 to 0.913 | 0.403 | -0.95 (<0.001) | -0.23 (0.58) |
+| Qwen3 | 0.9 | 5 | 0.531 to 0.795 | 0.685 | -0.98 (0.004) | +0.34 (0.58) |
 
-**Label entropy and divergence are consistently negatively related**, in the same direction as the 150-concept run and in both architectures. The coefficient is between -0.61 and -0.91 in seven of the nine usable rows, reaching significance at GPT-2 AP 0.7 (r=-0.88, p=0.004) and Qwen3 AP 0.8 (r=-0.91, p=0.002). With n=8 the test has little power, so the consistency of the sign across models and thresholds is better evidence than any individual p value. A category whose label word spreads its experts widely over depth diverges less from its member average, which is the reading the 150-run supported.
+**Label entropy and divergence are consistently negatively related**, in the same direction as the 150-concept run and in both architectures. The coefficient is negative in all nine usable rows and between -0.61 and -1.00 in seven of them, reaching significance at GPT-2 AP 0.6 to 0.8 (r=-0.83, -0.81 and -1.00, the last over only 3 categories) and Qwen3 AP 0.8 and 0.9 (r=-0.95 and -0.98, the last over 5). With n=8 the test has little power, so the consistency of the sign across models and thresholds is better evidence than any individual p value. A category whose label word spreads its experts widely over depth diverges less from its member average, which is the reading the 150-run supported.
 
-**Internal member diversity again fails to predict divergence.** The sign flips across thresholds in both models (+0.90, +0.41, -0.42, +0.04 for GPT-2, and +0.00, +0.33, +0.44, -0.22, -0.88 for Qwen3), and the only significant cell, GPT-2 at AP 0.5, is the one where the JSD range is narrowest, 0.008 to 0.036, so it rests on differences too small to be meaningful. The hypothesis that more internally scattered categories diverge further from their own label has no support here, matching the 150-run conclusion.
+**Internal member diversity again fails to predict divergence.** The sign flips across thresholds in both models (+0.84, +0.39, -0.42, -0.12 for GPT-2, and -0.25, +0.10, +0.06, -0.23, +0.34 for Qwen3), and the only significant cell, GPT-2 at AP 0.5, is GPT-2's narrowest JSD range, 0.006 to 0.043, so it rests on differences too small to be meaningful. The hypothesis that more internally scattered categories diverge further from their own label has no support here, matching the 150-run conclusion.
 
-JSD grows about 20x in magnitude from AP=0.5 to the strictest usable threshold in both models (GPT-2 0.019 to 0.376, Qwen3 0.028 to 0.643), tracking the same "fewer experts, noisier and more divergent per-concept distributions" pattern seen in modules 1 and 2. Note also how the sample dies: GPT-2 falls to 5 categories at AP 0.8 and produces nothing at AP 0.9, while Qwen3 keeps all 8 at AP 0.8 and 3 at AP 0.9.
+JSD grows 20 to 30 times in magnitude from AP=0.5 to the strictest usable threshold (GPT-2 0.020 to 0.361, Qwen3 0.021 to 0.685), tracking the same "fewer experts, noisier and more divergent per-concept distributions" pattern seen in modules 1 and 2. Note also how the sample dies: GPT-2 falls to 3 categories at AP 0.8 and produces nothing at AP 0.9, while Qwen3 keeps all 8 at AP 0.8 and 5 at AP 0.9.

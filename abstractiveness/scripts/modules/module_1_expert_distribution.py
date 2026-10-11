@@ -8,6 +8,7 @@ and which sublayers carry category information. Explanations live in documentati
 """
 
 import logging
+import re
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
@@ -26,7 +27,8 @@ from core.expert_data_loading import expert_counts_with_metadata
 from core.correlation_reporting import panel_r_columns, regression_row
 from utils.plotting import (_plot_bar_with_leaders, apply_rotated_leader_labels, fig_width_for,
                             plot_comparison_violin, build_category_color_map, set_title, set_suptitle,
-                            stats_line, coverage_line, twin_axis, LEVEL_COLORS, CORRELATION_COLORS)
+                            stats_line, coverage_line, twin_axis, LEVEL_COLORS, CORRELATION_COLORS,
+                            SERIES_COLORS, DETAIL_COLOR)
 
 log = logging.getLogger(__name__)
 
@@ -43,9 +45,10 @@ SECTION_DIRS = {
 # ---------------------------------------------------------------------------
 
 LOCATION_DESCRIPTORS = ["peak_layer", "peak_gap_pct", "avg_layer", "avg_layer_top25pct"]
-SHAPE_DESCRIPTORS = ["shannon_entropy", "gearys_c"]
+SHAPE_DESCRIPTORS = ["shannon_entropy", "shannon_entropy_norm", "gearys_c"]
 AVERAGE_COLUMN_NAMES = {
     "shannon_entropy": "shannon_entropy_average",
+    "shannon_entropy_norm": "shannon_entropy_norm_average",
     "gearys_c": "gearys_c_average",
     "peak_layer": "peak_layer_average",
     "peak_gap_pct": "peak_gap_pct_average",
@@ -55,10 +58,10 @@ AVERAGE_COLUMN_NAMES = {
 
 
 def layer_distribution_descriptors(probs, layer_indices, top_frac: float = 0.25) -> dict:
-    """Entropy, Geary's C, peak layer and gap, full and top-25% average layer of one distribution."""
+    """Entropy (bits and over log2 of the bin count), Geary's C, peak layer and gap, full and top-25% average layer."""
     if probs is None:
         return {key: np.nan for key in
-                ("shannon_entropy", "gearys_c", "peak_layer", "peak_gap_pct",
+                ("shannon_entropy", "shannon_entropy_norm", "gearys_c", "peak_layer", "peak_gap_pct",
                  "avg_layer", "avg_layer_top25pct")}
 
     top_two = np.partition(probs, -2)[-2:] if len(probs) >= 2 else None
@@ -66,9 +69,11 @@ def layer_distribution_descriptors(probs, layer_indices, top_frac: float = 0.25)
     n_top = int(np.ceil(top_frac * len(probs)))
     top_idx = np.argpartition(probs, -n_top)[-n_top:]
     top_mass = probs[top_idx]
+    bits = entropy(probs, base=2)
 
     return {
-        "shannon_entropy": entropy(probs, base=2),
+        "shannon_entropy": bits,
+        "shannon_entropy_norm": bits / np.log2(len(probs)) if len(probs) > 1 else np.nan,
         "gearys_c": gearys_c(probs),
         "peak_layer": layer_indices[np.argmax(probs)],
         "peak_gap_pct": (top_two.max() - top_two.min()) * 100 if top_two is not None else np.nan,
@@ -174,7 +179,7 @@ def compute_layer_distributions(expert_allocation_df: pd.DataFrame) -> tuple[pd.
     concept_count_matrix = pd.crosstab(
         index=[expert_allocation_df['abstraction_level'], expert_allocation_df['concept']],
         columns=expert_allocation_df['layer_name'],
-    )
+    ).reindex(columns=expert_allocation_df['layer_name'].cat.categories, fill_value=0).copy()
     concept_distribution_matrix = concept_count_matrix.div(concept_count_matrix.sum(axis=1), axis=0) * 100
     global_layer_dist = concept_distribution_matrix.groupby(level='abstraction_level').mean().reset_index()
     global_layer_dist = global_layer_dist.melt(
@@ -199,6 +204,47 @@ def plot_global_distribution(global_layer_distribution_df: pd.DataFrame, dist_di
                              name: str = "mean") -> None:
     """Save the per-level mean layer distribution."""
     save_dataframe(global_layer_distribution_df, dist_dir / f"{name}_expert_layer_distribution{suffix}.csv")
+
+
+def layer_distribution_summary(global_layer_dist: pd.DataFrame, concept_count_matrix: pd.DataFrame) -> pd.DataFrame:
+    """Per level, where the mean distribution reaches 50% and 90%, how many top bins hold them, and its share per third of depth."""
+    words = concept_count_matrix.groupby(level="abstraction_level").size()
+    rows = []
+    for level, level_df in global_layer_dist.groupby("abstraction_level"):
+        pct = level_df["mean_expert_allocation_pct"].to_numpy(dtype=float)
+        counts = level_df["total_expert_count"].to_numpy()
+        if not np.isclose(pct.sum(), 100.0):
+            log.warning(f"  Level {level} mean layer distribution sums to {pct.sum():.6f}%, not 100%")
+        cumulative, by_mass = np.cumsum(pct), np.cumsum(np.sort(pct)[::-1])
+        row = {"abstraction_level": level, "n_words": int(words.get(level, 0)), "n_experts": int(counts.sum()),
+               "n_bins": len(pct)}
+        for threshold in (50, 90):
+            position = int(np.argmax(cumulative >= threshold))
+            row[f"cumulative_{threshold}pct_position"] = position
+            row[f"cumulative_{threshold}pct_layer_name"] = str(level_df["layer_name"].iloc[position])
+            row[f"top_bins_{threshold}pct"] = int(np.argmax(by_mass >= threshold)) + 1
+        for third, positions in zip(("first", "middle", "last"), np.array_split(np.arange(len(pct)), 3)):
+            row[f"{third}_third_pct"] = pct[positions].sum()
+            row[f"{third}_third_experts"] = int(counts[positions].sum())
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
+BLOCK_NAME = re.compile(r"\d+\.B\.(\d+)")
+DEPTH_AXIS_TITLES = {"block": "Transformer block", "layer": "Model layer"}
+
+
+def _label_depth_axis(ax, layer_names) -> tuple[list, str]:
+    """Block numbers as plain ticks on the block axis, rotated layer names otherwise, returns the labels and the unit."""
+    blocks = [BLOCK_NAME.fullmatch(str(name)) for name in layer_names]
+    if all(blocks):
+        labels = [match.group(1) for match in blocks]
+        ax.set_xticks(range(len(labels)))
+        ax.set_xticklabels(labels, fontsize=10)
+        return labels, "block"
+    labels = [str(name) for name in layer_names]
+    apply_rotated_leader_labels(ax, labels, fontsize=9)
+    return labels, "layer"
 
 
 def _stacked_bars(ax, layer_order: list, stack: pd.DataFrame, colors: dict) -> None:
@@ -228,8 +274,8 @@ def plot_cumulative_layer_distribution(global_layer_dist: pd.DataFrame, dist_dir
         _stacked_bars(ax1, layer_order, stack, stack_colors)
         ax1.set_xlim(-0.5, n - 0.5)
         legend_title = "Sublayer"
-    apply_rotated_leader_labels(ax1, layer_order, fontsize=9)
-    ax1.set_xlabel("Model layer", fontsize=14)
+    tick_labels, unit = _label_depth_axis(ax1, layer_order)
+    ax1.set_xlabel(DEPTH_AXIS_TITLES[unit], fontsize=14)
     ax1.set_ylabel(f"{bar_label} (bars)", fontsize=14)
 
     ax2 = twin_axis(ax1)
@@ -238,8 +284,8 @@ def plot_cumulative_layer_distribution(global_layer_dist: pd.DataFrame, dist_dir
         curve = level_df.set_index('layer_name')['cumulative_pct'].reindex(layer_order)
         idx50 = int(np.argmax(curve.values >= 50))
         idx90 = int(np.argmax(curve.values >= 90))
-        label = (f"Cumulative, level {level}: 50% reached by {layer_order[idx50]}, "
-                 f"90% by {layer_order[idx90]}")
+        label = (f"Cumulative, level {level}: 50% reached by {unit} {tick_labels[idx50]}, "
+                 f"90% by {unit} {tick_labels[idx90]}")
         ax2.plot(range(n), curve.values, color=ABSTRACTION_COLORS[level], linewidth=2,
                  marker='o', markersize=3, alpha=0.9, label=label)
         for idx in (idx50, idx90):
@@ -293,10 +339,10 @@ def plot_cumulative_layer_distribution_sorted(global_layer_dist: pd.DataFrame, d
         else:
             _stacked_bars(ax, level_df['layer_name'].astype(str).tolist(), stack, stack_colors)
             ax.legend(title="Sublayer", loc='upper right')
-        apply_rotated_leader_labels(ax, level_df['layer_name'].astype(str).tolist(), fontsize=9)
+        _, unit = _label_depth_axis(ax, level_df['layer_name'])
         ax.set_ylabel(f"{bar_label} (bars)", fontsize=13)
-        set_title(ax, f"Abstraction level {level}, layers sorted by expert mass",
-                  f"top {k50 + 1} layers hold 50% of the mass, top {k90 + 1} of {len(level_df)} hold 90%")
+        set_title(ax, f"Abstraction level {level}, {unit}s sorted by expert mass",
+                  f"top {k50 + 1} {unit}s hold 50% of the mass, top {k90 + 1} of {len(level_df)} hold 90%")
 
         ax2 = twin_axis(ax)
         ax2.set_xlim(ax.get_xlim())
@@ -315,7 +361,7 @@ def plot_cumulative_layer_distribution_sorted(global_layer_dist: pd.DataFrame, d
         ax2.set_ylabel("Cumulative % of experts (line)", fontsize=13)
         ax2.grid(False)
 
-    axes[-1].set_xlabel("Model layer, descending expert mass", fontsize=14)
+    axes[-1].set_xlabel(f"{DEPTH_AXIS_TITLES[unit]}, descending expert mass", fontsize=14)
     heading = f"{title_name}, cumulative expert mass concentration" if title_name else \
         "Cumulative expert mass concentration"
     set_suptitle(fig, f"{heading}, {title_detail}" if title_detail else heading, y=1.0)
@@ -507,8 +553,10 @@ def run_layer_distribution(scope, concept_metadata: pd.DataFrame, merged_meta: p
 
     for suffix, axis_df, axis_label, concept_df, category_df in descriptors:
         log.info(f"  [{scope.label} / {axis_label}] Computing layer distribution matrices...")
-        _, _, global_dist, _ = compute_layer_distributions(axis_df)
+        _, concept_counts, global_dist, _ = compute_layer_distributions(axis_df)
         plot_global_distribution(global_dist, out_dir, suffix)
+        save_dataframe(layer_distribution_summary(global_dist, concept_counts),
+                       out_dir / f"mean_expert_layer_distribution_summary{suffix}.csv")
         title_detail = f"{scope.label}, {axis_label}"
         plot_cumulative_layer_distribution(global_dist, out_dir, suffix, title_detail)
         plot_cumulative_layer_distribution_sorted(global_dist, out_dir, suffix, title_detail)
@@ -701,19 +749,138 @@ def _summarize_shape(concept_entropy_df: pd.DataFrame, category_entropy_df: pd.D
     }
 
 
+CATEGORY_SHAPE_DRAWS = 200
+
+
+def _shape_of(profiles: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Shannon entropy in bits and Geary's C of every row of a probability matrix."""
+    with np.errstate(divide="ignore", invalid="ignore"):
+        bits = -np.where(profiles > 0, profiles * np.log2(profiles), 0.0).sum(axis=1)
+        spread = 2 * ((profiles - profiles.mean(axis=1, keepdims=True)) ** 2).sum(axis=1)
+        geary = np.where(spread > 0, (np.diff(profiles, axis=1) ** 2).sum(axis=1) / spread, np.nan)
+    return bits, geary
+
+
+def label_percentile(label_value: float, member_values) -> float:
+    """Share of the members below the label, ties counted half, NaN without finite values."""
+    member_values = np.asarray(member_values, dtype=float)
+    member_values = member_values[np.isfinite(member_values)]
+    if not len(member_values) or not np.isfinite(label_value):
+        return np.nan
+    below = (member_values < label_value).sum() + 0.5 * (member_values == label_value).sum()
+    return float(below / len(member_values))
+
+
+def category_shape_summary(axis_df: pd.DataFrame, concept_metadata: pd.DataFrame,
+                           n_draws: int = CATEGORY_SHAPE_DRAWS, seed: int = 0) -> tuple[pd.DataFrame, dict]:
+    """Per category, members' normalised entropy and Geary's C against the label's, raw and at the label's expert count."""
+    counts, probabilities = build_layer_probability_matrix(axis_df)
+    log_bins = np.log2(counts.shape[1])
+    rng = np.random.default_rng(seed)
+    category_of = concept_metadata.set_index("concept")["category"]
+    present = counts.index[counts.sum(axis=1) > 0]
+    rows, members_by_category = [], {}
+    for category in sorted(concept_metadata["category"].dropna().unique()):
+        members = [c for c in present if category_of.get(c) == category]
+        if category not in present or len(members) < 2:
+            continue
+        label_n = int(counts.loc[category].sum())
+        member_bits, member_geary = _shape_of(probabilities.loc[members].to_numpy(dtype=float))
+        label_bits, label_geary = _shape_of(probabilities.loc[[category]].to_numpy(dtype=float))
+        matched_bits, matched_geary = [], []
+        for member in members:
+            member_counts = counts.loc[member].to_numpy(dtype=np.int64)
+            if member_counts.sum() < label_n:
+                continue
+            bits, geary = _shape_of(rng.multivariate_hypergeometric(member_counts, label_n, size=n_draws) / label_n)
+            matched_bits.append(bits.mean())
+            matched_geary.append(np.nanmean(geary))
+        members_by_category[category] = (member_bits / log_bins, member_geary)
+        row = {"category": category, "n_members": len(members), "label_expert_count": label_n,
+               "n_members_matched": len(matched_bits)}
+        for name, values, label_value, matched in (
+                ("entropy_norm", member_bits / log_bins, label_bits[0] / log_bins, np.array(matched_bits) / log_bins),
+                ("gearys_c", member_geary, label_geary[0], np.array(matched_geary))):
+            row.update({
+                f"{name}_members_median": float(np.nanmedian(values)),
+                f"{name}_members_q1": float(np.nanpercentile(values, 25)),
+                f"{name}_members_q3": float(np.nanpercentile(values, 75)),
+                f"{name}_label": float(label_value),
+                f"{name}_label_percentile": label_percentile(label_value, values),
+                f"{name}_members_matched_median": float(np.nanmedian(matched)) if len(matched) else np.nan,
+                f"{name}_label_percentile_matched": label_percentile(label_value, matched),
+            })
+        rows.append(row)
+    return pd.DataFrame(rows), members_by_category
+
+
+def plot_category_entropy_gearys(axis_df: pd.DataFrame, concept_metadata: pd.DataFrame, out_dir,
+                                 suffix: str = "", axis_label: str = "") -> pd.DataFrame:
+    """Per-category normalised entropy and Geary's C, members as boxes and points, the label as a diamond."""
+    summary, members_by_category = category_shape_summary(axis_df, concept_metadata)
+    if summary.empty:
+        return summary
+    save_dataframe(summary, out_dir / f"category_entropy_gearys{suffix}.csv")
+    categories = list(summary["category"])
+    positions = np.arange(len(categories))[::-1].astype(float)
+    fig, axes = plt.subplots(1, 2, figsize=(13, 0.75 * len(categories) + 2.4), sharey=True)
+    panels = (("entropy_norm", 0, "Spread over depth", "Shannon entropy / log2 of the number of bins (1 = even)"),
+              ("gearys_c", 1, "Smoothness over depth", "Geary's C (1 = no depth structure)"))
+    member_color, label_color = LEVEL_COLORS["Specific Concepts"], LEVEL_COLORS["Broad Categories"]
+    jitter = np.random.default_rng(0)
+    for axis, (name, index, title, x_label) in zip(axes, panels):
+        member_values = [members_by_category[c][index] for c in categories]
+        axis.boxplot([v[np.isfinite(v)] for v in member_values], positions=positions, vert=False, widths=0.5,
+                     showfliers=False, patch_artist=True,
+                     boxprops={"facecolor": member_color, "alpha": 0.3, "edgecolor": DETAIL_COLOR},
+                     medianprops={"color": DETAIL_COLOR, "linewidth": 1.4},
+                     whiskerprops={"color": DETAIL_COLOR}, capprops={"color": DETAIL_COLOR})
+        for y, values in zip(positions, member_values):
+            axis.scatter(values, y + jitter.uniform(-0.15, 0.15, len(values)), s=9, color=member_color,
+                         edgecolors="none", alpha=0.8, zorder=3)
+        axis.scatter(summary[f"{name}_members_matched_median"], positions, marker="|", s=300, linewidths=2.2,
+                     color=SERIES_COLORS["muted"], zorder=4)
+        axis.scatter(summary[f"{name}_label"], positions, marker="D", s=70, color=label_color,
+                     edgecolors="white", linewidths=0.6, zorder=5)
+        for y, (_, row) in zip(positions, summary.iterrows()):
+            raw, matched = row[f"{name}_label_percentile"], row[f"{name}_label_percentile_matched"]
+            axis.annotate(f"{raw:.2f} | {matched:.2f}" if np.isfinite(matched) else f"{raw:.2f} | n/a",
+                          xy=(0.99, y + 0.37), xycoords=("axes fraction", "data"), ha="right", va="center",
+                          fontsize=7.5, color=DETAIL_COLOR, zorder=6,
+                          bbox={"facecolor": "white", "edgecolor": "none", "pad": 0.6})
+        if name == "gearys_c":
+            axis.axvline(1.0, color=SERIES_COLORS["muted"], linestyle="--", linewidth=1)
+        set_title(axis, title, "label percentile among members | at the label's expert count")
+        axis.set_xlabel(x_label)
+        axis.grid(axis="y", visible=False)
+    axes[0].set_yticks(positions)
+    axes[0].set_yticklabels([c.capitalize() for c in categories])
+    axes[0].set_ylim(positions.min() - 0.6, positions.max() + 0.7)
+    handles = [Patch(facecolor=member_color, alpha=0.3, edgecolor=DETAIL_COLOR, label="Members, quartiles and points"),
+               Line2D([], [], marker="D", linestyle="none", color=label_color, markersize=7, label="Category label"),
+               Line2D([], [], marker="|", linestyle="none", color=SERIES_COLORS["muted"], markersize=14,
+                      markeredgewidth=2.2, label="Member median at the label's expert count")]
+    fig.legend(handles=handles, loc="lower center", ncol=3, frameon=False, bbox_to_anchor=(0.5, 0.0))
+    set_suptitle(fig, f"Expert allocation per category, members against their category label, {axis_label}")
+    fig.tight_layout(rect=(0, 0.06, 1, 1))
+    fig.savefig(out_dir / f"category_entropy_gearys{suffix}.png", dpi=300, bbox_inches="tight")
+    plt.close(fig)
+    return summary
+
+
 def run_distribution_shape(scope, concept_metadata: pd.DataFrame, descriptors: list, out_dir) -> dict:
     """How spread each word's experts are over depth, per axis variant, and entropy against expert count."""
-    for suffix, _, axis_label, concept_df, category_df in descriptors:
+    for suffix, axis_df, axis_label, concept_df, category_df in descriptors:
         log.info(f"  [{scope.label} / {axis_label}] Computing and plotting Shannon entropy analysis...")
         save_descriptor_tables(concept_df, category_df, out_dir, "shannon_entropy", SHAPE_DESCRIPTORS, suffix)
         _log_entropy_test(concept_df, category_df)
-        log.info("  Generating Shannon entropy violin plot...")
-        plot_shannon_entropies(concept_df, category_df, out_dir, suffix)
-        log.info("  Generating Geary's C vs entropy shape map...")
-        plot_gearys_entropy_scatter(concept_df, category_df, out_dir, suffix)
+        # Replaced by the per-category figure below, which shows each label against its own members.
+        # plot_shannon_entropies(concept_df, category_df, out_dir, suffix)
+        # plot_gearys_entropy_scatter(concept_df, category_df, out_dir, suffix)
         _log_level_comparison("Geary's C", category_df['gearys_c'], concept_df['gearys_c'])
-        log.info("  Generating individual category entropy bar chart...")
-        plot_category_entropies_bar(category_df, out_dir, suffix)
+        # plot_category_entropies_bar(category_df, out_dir, suffix)
+        log.info("  Generating per-category entropy and Geary's C figure...")
+        plot_category_entropy_gearys(axis_df, concept_metadata, out_dir, suffix, axis_label)
 
     concept_df, category_df = descriptors[0][3], descriptors[0][4]
     log.info(f"  [{scope.label}] Generating correlation plots...")
@@ -730,6 +897,8 @@ def compute_sublayer_informativeness(expert_allocation_df: pd.DataFrame, concept
     """Per (level, sublayer): category alignment, Geary's C, expert share, and block-axis distribution descriptors."""
     df = expert_allocation_df.copy()
     df["sublayer"] = df["layer_name"].astype(str).str.extract(r"^\d+\.L\.\d+\.(.+)$")[0]
+    parsed = pd.Series(df["layer_name"].cat.categories.astype(str)).str.extract(r"^(\d+)\.L\.\d+\.(.+)$")
+    layers_of = {sublayer: sorted(group[0].astype(int)) for sublayer, group in parsed.groupby(1)}
 
     categories = concept_metadata.set_index("concept")["category"]
     level_of = concept_metadata.set_index("concept")["abstraction_level"].to_dict()
@@ -744,7 +913,8 @@ def compute_sublayer_informativeness(expert_allocation_df: pd.DataFrame, concept
         alignment = category_alignment_metrics(pair_similarity, concept_categories, n_permutations, rng)
 
         word_counts = sub_df.pivot_table(index="concept", columns="layer_idx", values="unit",
-                                         aggfunc="count", fill_value=0)
+                                         aggfunc="count", fill_value=0).reindex(columns=layers_of[sublayer],
+                                                                                fill_value=0)
         word_gearys = word_counts.apply(lambda row: gearys_c(row.values), axis=1)
         word_levels = word_counts.index.map(level_of)
 
@@ -752,6 +922,7 @@ def compute_sublayer_informativeness(expert_allocation_df: pd.DataFrame, concept
         blocks = probabilities.columns.values
         descriptors = pd.DataFrame([layer_distribution_descriptors(probabilities.loc[word].values, blocks)
                                     for word in probabilities.index], index=probabilities.index)
+        descriptors["depth_norm"] = (descriptors["avg_layer"] - 1) / (len(blocks) - 1)
         descriptors["expert_count"] = counts.sum(axis=1)
         descriptor_levels = descriptors.index.map(level_of)
 
@@ -768,8 +939,10 @@ def compute_sublayer_informativeness(expert_allocation_df: pd.DataFrame, concept
                 "n_experts": n_level_experts,
                 "n_words": len(words),
                 "mean_entropy_bits": words["shannon_entropy"].mean(),
+                "mean_entropy_norm": words["shannon_entropy_norm"].mean(),
                 "reliable_peak_pct": 100 * (words["peak_gap_pct"] >= PEAK_GAP_RELIABLE_PP).mean() if len(words) else np.nan,
                 "mean_depth_top25_block": words["avg_layer_top25pct"].mean(),
+                "mean_depth_norm": words["depth_norm"].mean(),
                 "mean_expert_count": words["expert_count"].mean(),
             })
 
@@ -820,10 +993,59 @@ def plot_sublayer_informativeness(result: pd.DataFrame, dist_dir) -> None:
     plt.close(fig)
 
 
+SUMMARY_COLUMNS = ["sublayer", "group", "concept_share_pct", "concept_experts", "label_share_pct", "label_experts",
+                   "roc_auc", "mean_depth_norm", "mean_entropy_norm"]
+GROUP_COLORS = {"MLP": SERIES_COLORS["secondary"], "attention": SERIES_COLORS["primary"]}
+
+
+def write_sublayer_summary(result: pd.DataFrame, dist_dir) -> pd.DataFrame:
+    """Per sublayer, then summed over MLP and attention, each level's share of its own experts, with the level-2
+    ROC-AUC, normalised depth and normalised entropy."""
+    counts = result.pivot(index="sublayer", columns="abstraction_level", values="n_experts")
+    members = result[result["abstraction_level"] == 2].set_index("sublayer")
+    table = (members[["roc_auc", "mean_depth_norm", "mean_entropy_norm"]]
+             .assign(group=np.where(members.index.str.startswith("mlp"), "MLP", "attention"),
+                     concept_experts=counts[2], label_experts=counts[1])
+             .rename_axis("sublayer").reset_index())
+    grouped = table.groupby("group", sort=False)[["concept_experts", "label_experts"]].sum().reset_index()
+    grouped["sublayer"] = "all " + grouped["group"] + " sublayers"
+    summary = pd.concat([table, grouped], ignore_index=True)
+    for level in ("concept", "label"):
+        total = table[f"{level}_experts"].sum()
+        summary[f"{level}_share_pct"] = 100 * summary[f"{level}_experts"] / total if total else np.nan
+    summary = summary.reindex(columns=SUMMARY_COLUMNS)
+    save_dataframe(summary, dist_dir / "sublayer_informativeness_summary.csv")
+    return summary
+
+
+def plot_sublayer_auc_vs_share(summary: pd.DataFrame, dist_dir) -> None:
+    """Category-alignment ROC-AUC against share of the concepts' experts, one point per sublayer, coloured by projection type."""
+    points = summary[summary["roc_auc"].notna()]
+    fig, ax = plt.subplots(figsize=(7.5, 5.5))
+    for group, color in GROUP_COLORS.items():
+        group_points = points[points["group"] == group]
+        ax.scatter(group_points["concept_share_pct"], group_points["roc_auc"], s=60, color=color,
+                   edgecolors="white", linewidths=0.6, label=group, zorder=3)
+    for _, row in points.iterrows():
+        ax.annotate(row["sublayer"], (row["concept_share_pct"], row["roc_auc"]), xytext=(6, 3),
+                    textcoords="offset points", fontsize=8.5, color=DETAIL_COLOR)
+    ax.axhline(0.5, color=SERIES_COLORS["muted"], linestyle="--", linewidth=1)
+    ax.set_xlabel("Share of the specific concepts' experts (%)")
+    ax.set_ylabel("Category alignment ROC-AUC")
+    set_title(ax, "Category alignment against expert share, per sublayer",
+              "specific concepts (level 2), dashed line at chance")
+    ax.legend(title="Projection", loc="lower right")
+    fig.tight_layout()
+    fig.savefig(dist_dir / "sublayer_auc_vs_share.png", dpi=300, bbox_inches="tight")
+    plt.close(fig)
+
+
 def run_sublayer_informativeness(scope, concept_metadata: pd.DataFrame, out_dir) -> None:
     """Sublayers ranked by category alignment and descriptor means, whole-model scope only."""
     log.info("  Computing sublayer informativeness (AUC + Mantel permutation)...")
     informativeness = compute_sublayer_informativeness(scope.expert_df, concept_metadata, out_dir)
+    summary = write_sublayer_summary(informativeness, out_dir)
+    plot_sublayer_auc_vs_share(summary, out_dir)
     ranked = informativeness[(informativeness["abstraction_level"] == 2) & informativeness["roc_auc"].notna()]
     if not ranked.empty:
         top = ranked.iloc[0]

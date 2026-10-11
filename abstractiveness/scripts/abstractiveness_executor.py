@@ -69,6 +69,9 @@ root_logger.addHandler(console_handler)
 #   frequency_corpus   : training-exposure frequency module 2 reads, a key of
 #                        module_2_similarities.FREQUENCY_CORPORA, "openwebtext" for
 #                        GPT-2 (WebText proxy) and "fineweb" for Qwen3 (web-dominated corpus)
+#   probing_sentences_dir : generated sentence dataset under assets/ (one <concept>.json per
+#                        concept in its custom/ folder), read by module 2's text baseline.
+#                        None skips the baseline.
 #   embedding_cache_file : concept embedding cache under assets/, consumed by module 4.
 #                        Built from the response pkls on the first run with module 4
 #                        enabled, then reused, see core/embedding_cache.py.
@@ -84,6 +87,7 @@ MODEL_CONFIGS = {
         "output_subdir": "research_plots_150_final",
         "sublayer_filter": "mlp.c_fc",
         "frequency_corpus": "openwebtext",
+        "probing_sentences_dir": None,
         "embedding_cache_file": "concept_embeddings_gpt2_150.npz",
     },
     "qwen3_richie_hsj": {
@@ -96,7 +100,23 @@ MODEL_CONFIGS = {
         "output_subdir": "research_plots_qwen_richie_hsj_restructured_final",
         "sublayer_filter": "mlp.gate_proj",
         "frequency_corpus": "fineweb",
+        "probing_sentences_dir": "Qwen3-30B-A3B-Instruct-2507_abstractiveness_Richie_HSJ_cot",
         "embedding_cache_file": "concept_embeddings_qwen3_richie_hsj.npz",
+    },
+    # Qwen3-1.7B-Base, the pre-trained checkpoint of qwen3_richie_hsj, probed with the same sentences.
+    # Same 196 layer names, so it shares the Qwen3 layer mapping.
+    "qwen3_base_richie_hsj": {
+        "responses_subdir": "Qwen3_1.7B_Base_abstractiveness_Richie_HSJ_responses",
+        "model_subdir": "Qwen",
+        "architecture": "qwen3",
+        "metadata_file": "metadata_Richie_HSJ.json",
+        "layer_mapping_file": "layer_mapping_Qwen3_1-7B.csv",
+        "typicality_column": "typicality_HSJ_pairwise",
+        "output_subdir": "research_plots_qwen_base_richie_hsj_FINAL",
+        "sublayer_filter": "mlp.gate_proj",
+        "frequency_corpus": "fineweb",
+        "probing_sentences_dir": "Qwen3-30B-A3B-Instruct-2507_abstractiveness_Richie_HSJ_cot",
+        "embedding_cache_file": "concept_embeddings_qwen3_base_richie_hsj.npz",
     },
     # GPT-2 on the same Richie-HSJ dataset -- the architecture comparison against
     # qwen3_richie_hsj (same metadata + typicality column, GPT-2's 48-layer mapping).
@@ -110,6 +130,7 @@ MODEL_CONFIGS = {
         "output_subdir": "research_plots_gpt2_richie_hsj_restructured_final",
         "sublayer_filter": "mlp.c_fc",
         "frequency_corpus": "openwebtext",
+        "probing_sentences_dir": "Qwen3-30B-A3B-Instruct-2507_abstractiveness_Richie_HSJ_cot",
         "embedding_cache_file": "concept_embeddings_gpt2_richie_hsj.npz",
     },
 }
@@ -139,6 +160,8 @@ if __name__ == "__main__":
     METADATA_PATH = REPO_ROOT / "assets" / cfg["metadata_file"]
     LAYER_MAPPING_PATH = REPO_ROOT / "assets" / cfg["layer_mapping_file"]
     TYPICALITY_COLUMN = cfg["typicality_column"]
+    PROBING_SENTENCES_DIR = (REPO_ROOT / "assets" / cfg["probing_sentences_dir"]
+                             if cfg.get("probing_sentences_dir") else None)
 
     log.info(f"Running analysis with config '{ACTIVE_CONFIG}' (architecture: {ARCHITECTURE})")
     # Rows without a concept name (e.g. entries deactivated by renaming their key, which
@@ -213,7 +236,8 @@ if __name__ == "__main__":
                         module_2_similarities, module_dirs[2],
                         module_2_similarities.execute_module_2_similarities(
                             scope, concept_metadata, module_dirs[2], write,
-                            frequency_corpus=cfg["frequency_corpus"]))
+                            frequency_corpus=cfg["frequency_corpus"],
+                            probing_sentences_dir=PROBING_SENTENCES_DIR))
                 if 3 in ENABLED_MODULES:
                     _, _, row = module_3_dual_category_jsd.execute_module_3_dual_category_jsd(
                         scope, concept_metadata, module_dirs[3], write)

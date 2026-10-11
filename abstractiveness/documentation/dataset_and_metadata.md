@@ -6,7 +6,7 @@ Every number the pipeline produces is model-derived except four, and those four 
 
 It is the counterpart of module 1's *From responses to expert sets*, which documents the other half of the provenance chain, namely how sentences become responses and responses become expert sets. That part starts from a word list and takes it forward. This page ends where that one begins.
 
-Two stimulus sets exist in the repository. The **Richie-HSJ** set (206 concepts over 205 distinct words) is the one both models are currently run on and is the subject of most of this page. The older **150-concept** set (164 words) is documented in the last section for completeness, since the older results tables cited across the module pages come from it.
+Two stimulus sets exist in the repository. The **Richie-HSJ** set (206 concepts over 205 distinct words) is the one both models are currently run on and is the subject of most of this page. The older **150-concept** set (164 words) is **legacy**: it is documented in the last section for completeness, since the legacy results tables cited across the module pages come from it.
 
 ## 1. Source materials at a glance
 
@@ -23,6 +23,7 @@ Two stimulus sets exist in the repository. The **Richie-HSJ** set (206 concepts 
 | `assets/fineweb-sample-10BT-word-counts.txt` | FineWeb sample-10BT (`HuggingFaceFW/fineweb`) word count list in the Wikipedia format, built by `corpus_word_counts`, with a `.json` provenance sidecar | `frequency_zipf_fineweb_lemma`, the Qwen3 exposure proxy |
 | `assets/metadata_Richie_HSJ.json` | **Output.** One row per word with all covariates merged | every module, through `load_experts_data` |
 | `dataset_config_Qwen3-30B-A3B-Instruct-2507-abstractiveness_Richie_HSJ.json` | **Output.** The same 206 concepts plus the sentence generation parameters | the sentence generation stage |
+| `assets/Qwen3-30B-A3B-Instruct-2507_abstractiveness_Richie_HSJ_cot/` | **Output.** The generated probing sentences, one `custom/<concept>.json` per concept with 400 positive and 1,000 negative sentences, plus `concept_list.csv` | the response stage of the three Richie-HSJ configurations, GPT-2, Qwen3-1.7B and Qwen3-1.7B-Base, which all read the same sentences, and module 2's probing-text baseline (section 2.3) through the config's `probing_sentences_dir` |
 
 `assets/` is excluded by `.gitignore`, so none of these files travel with the repository and they have to be placed by hand on a fresh checkout. The Richie and Bhatia directory, the Wikipedia count file and the two SUBTLEX files are all present in the working tree today, and section 6.2 records where the Wikipedia file came from. The THINGS directory is **not** present, which no longer blocks anything here, since the Richie-HSJ metadata dropped the THINGS `typicality` column and nothing in this dataset reads it. Only the older 150-concept set in section 10 still needs that file.
 
@@ -277,7 +278,7 @@ The net effect is 163 concepts summed over two forms and 42 scored on one. The s
 
 Frequency enters as a predictor in its own right, asking whether a more frequent word recruits more experts, and as a control in section 2.4's frequency-partialled correlation, asking whether a typicality effect survives once frequency is held fixed. It never touches expert extraction, so changing a frequency column cannot alter an Average Precision or an expert set, only the analyses that read it.
 
-Module 2 reads one frequency column per run, the one matched to the model through the config's `frequency_corpus` field, `frequency_zipf_openwebtext_lemma` for GPT-2 and `frequency_zipf_fineweb_lemma` for Qwen3. It is the x variable of the section 2.5 figure, the frequency panel of section 2.4, the control of the section 2.4 partial correlation, and the variable of the section 2.5 partial correlation, which holds human typicality fixed instead. The SUBTLEX-US, Wikipedia and SUBTLEX-UK columns stay in the metadata for reference and for the source comparison of section 6.8, and no analysis reads them.
+Module 2 reads one frequency column per run, the one matched to the model through the config's `frequency_corpus` field, `frequency_zipf_openwebtext_lemma` for GPT-2 and `frequency_zipf_fineweb_lemma` for Qwen3. It is the x variable of the section 2.5 figure, the frequency panel of section 2.4, the control of the section 2.4 partial correlation, and the variable of the section 2.5 partial correlation, which holds human typicality fixed instead, each partial also computed with category as a second control. The SUBTLEX-US, Wikipedia and SUBTLEX-UK columns stay in the metadata for reference and for the source comparison of section 6.8, and no analysis reads them.
 
 The raw `frequency` column is retained unchanged so that earlier results stay reproducible. `expert_counts_with_metadata` in `core/expert_data_loading.py` still maps it to $\log_{10} f_c$ and drops rows with a missing or non-positive count.
 
@@ -375,9 +376,9 @@ Two kinds of null have to be told apart when reading any downstream table, and m
 - **One word carries two concepts.** `squash` appears under both vegetables and sports and is admitted as two concepts sharing one surface form, so it contributes two expert sets, two typicality scores and one frequency value. Nothing else in the stimulus set is ambiguous this way.
 - **The two elicitations do not cover the same words.** SpAM is missing `truck` and `van`, so a comparison of the two typicality columns is over 195 concepts, not 197.
 
-## 10. The older 150-concept dataset
+## 10. The older 150-concept dataset (legacy)
 
-The GPT-2 runs cited as `research_plots_150_*` across the module pages use a different stimulus set, kept for continuity with the earlier results rather than for new work.
+The GPT-2 runs cited as `research_plots_150_*` across the module pages use a different stimulus set, kept for continuity with the earlier results rather than for new work, and every page marks them **Legacy**: the runs were written by an earlier version of the code and are no longer kept, and the `gpt2_150` responses are no longer under `responses/`, so nothing from this set can be regenerated as the repository stands.
 
 `assets/metadata_150.json` holds 164 entries, 17 level 1 categories (`animal`, `clothing`, `container`, `drink`, `fastener`, `food`, `furniture`, `game`, `hardware`, `headwear`, `jewelry`, `lighting`, `plant`, `tool`, `toy`, `vehicle`, `weapon`) and 147 level 2 concepts. The schema is the five original fields only, with no HSJ columns, since no pairwise similarity data exists for these words.
 
