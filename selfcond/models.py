@@ -217,7 +217,10 @@ class TorchModel:
         self._forward_hooks.clear()
 
     def run_inference(
-        self, inputs: t.Mapping[str, torch.Tensor], outputs: t.AbstractSet[str]
+        self,
+        inputs: t.Mapping[str, torch.Tensor],
+        outputs: t.AbstractSet[str],
+        process_fns: t.Sequence[t.Callable] = (),
     ) -> t.Dict[str, np.ndarray]:
         """
          Run inference on a single batch of input data and return the responses the layers specified in ``outputs``.
@@ -228,6 +231,8 @@ class TorchModel:
          Args:
              inputs: A map of layer name to ``torch.Tensor``.
              outputs: Selects responses to be collected from the model after feeding the input batch through.
+             process_fns: Functions applied on the device to each collected response, together with the
+                 batch ``attention_mask``, before it is copied to the CPU (e.g. pooling over tokens).
 
         Returns:
              A map of response names to ``np.ndarray`` containing the requested model responses
@@ -237,6 +242,7 @@ class TorchModel:
         torch_inputs: t.MutableMapping[str, torch.Tensor] = {}
         if isinstance(inputs[a_key][0], torch.Tensor):
             torch_inputs = {k: v.to(device=self._device) for k, v in inputs.items()}
+        attention_mask = torch_inputs.get("attention_mask")
 
         response_dict: t.Dict[str, t.Any] = {}
 
@@ -248,10 +254,10 @@ class TorchModel:
             for output_idx, o in enumerate(module_output):
                 response_name = "{}:{}".format(module_name, output_idx)
                 if response_name in outputs:
-                    tensor = (
-                        o.detach().numpy() if self._device == "cpu" else o.detach().cpu().numpy()
-                    )
-                    response_dict[response_name] = tensor
+                    response = o.detach()
+                    for process_fn in process_fns:
+                        response = process_fn(response, attention_mask=attention_mask)
+                    response_dict[response_name] = response.cpu().numpy()
 
         # register forward hook for all modules in the network with the exception of the root
         # module and container modules.
@@ -501,22 +507,28 @@ def concatenate_responses(
     return responses
 
 
+def _nanmax(tensor: torch.Tensor, dim: int) -> torch.Tensor:
+    """Max over ``dim`` that skips NaN entries."""
+    return tensor.nan_to_num(nan=-torch.inf).amax(dim=dim)
+
+
+POOLING_FUNCTIONS = {"mean": torch.nanmean, "sum": torch.nansum, "max": _nanmax}
+
+
 def pool_responses(
-    responses: t.Dict[str, np.ndarray],
-    response_fields: t.Optional[t.Set[str]],
-    axis: t.Tuple[int],
+    response: torch.Tensor,
+    axis: int,
     pooling_type: str = "max",
-) -> t.Dict[str, np.ndarray]:
-    assert pooling_type in ["mean", "sum", "max"]
-    pooler_fn = getattr(np, pooling_type)
-    fields = response_fields or responses.keys()
-    for field in fields:
-        responses[field] = pooler_fn(responses[field], axis=axis)
-    return responses
+    attention_mask: t.Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """Pools a (batch, tokens, units) response over ``axis``, skipping pad positions (attention_mask == 0)."""
+    if attention_mask is not None:
+        response = response.masked_fill(~attention_mask.bool()[:, :, None], torch.nan)
+    return POOLING_FUNCTIONS[pooling_type](response, dim=axis)
 
 
 def processors_per_model(model: TorchModel) -> t.List[t.Callable]:
-    pool_args: t.List[t.Dict] = [dict(response_fields=None, axis=1, pooling_type="max")]
+    pool_args: t.List[t.Dict] = [dict(axis=1, pooling_type="max")]
     process_fns: t.List[t.Callable] = []
     process_fns += [partial(pool_responses, **args) for args in pool_args]
     return process_fns

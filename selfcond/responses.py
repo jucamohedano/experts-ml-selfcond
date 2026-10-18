@@ -64,10 +64,10 @@ def cache_responses(
     for i, batch in tqdm(enumerate(data_loader), desc="Caching inference"):
         input_batch = {k: v for k, v in batch.items() if k in MODEL_INPUT_FIELDS}
         response_batch = model.run_inference(
-            inputs=input_batch, outputs={ri.name for ri in response_infos}
+            inputs=input_batch,
+            outputs={ri.name for ri in response_infos},
+            process_fns=process_fn_list,
         )
-        for process_fn in process_fn_list:
-            response_batch = process_fn(response_batch)
         response_batch[LABELS_FIELD] = batch[LABELS_FIELD].detach().cpu().numpy()
         save_batch(batch=response_batch, batch_index=i, save_path=save_path)
 

@@ -179,7 +179,7 @@ if __name__ == "__main__":
             "This script reads responses from a pytorch model, given a dataset. "
             "The models are fetched the HuggingFace Transformers repository. "
             "The data is tokenized with the appropriate tokenization technique, "
-            "and the responses are maxpooled in the temporal dimension, being "
+            "and the responses are maxpooled in the temporal dimension (ignoring pad tokens), being "
             "agnostic to the sentence length. The obtained responses are saved, "
             "at batch level, as a dict `{layer_name: response_tensor}`."
         ),
@@ -241,7 +241,7 @@ if __name__ == "__main__":
         "--seq-len",
         type=int,
         help="Max sequence length allowed in tokens.",
-        default=1024,
+        default=128,
     )
     parser.add_argument(
         "--num-per-concept",

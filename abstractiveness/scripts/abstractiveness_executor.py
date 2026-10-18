@@ -106,7 +106,7 @@ MODEL_CONFIGS = {
     # Qwen3-1.7B-Base, the pre-trained checkpoint of qwen3_richie_hsj, probed with the same sentences.
     # Same 196 layer names, so it shares the Qwen3 layer mapping.
     "qwen3_base_richie_hsj": {
-        "responses_subdir": "Qwen3_1.7B_Base_abstractiveness_Richie_HSJ_responses",
+        "responses_subdir": "Qwen3_1.7Base_abstractiveness_Richie_HSJ_responses",
         "model_subdir": "Qwen",
         "architecture": "qwen3",
         "metadata_file": "metadata_Richie_HSJ.json",
@@ -127,16 +127,44 @@ MODEL_CONFIGS = {
         "metadata_file": "metadata_Richie_HSJ.json",
         "layer_mapping_file": "layer_mapping_GPT2.csv",
         "typicality_column": "typicality_HSJ_pairwise",
-        "output_subdir": "research_plots_gpt2_richie_hsj_restructured_final",
+        "output_subdir": "research_plots_gpt2_richie_hsj_FINAL",
         "sublayer_filter": "mlp.c_fc",
         "frequency_corpus": "openwebtext",
         "probing_sentences_dir": "Qwen3-30B-A3B-Instruct-2507_abstractiveness_Richie_HSJ_cot",
         "embedding_cache_file": "concept_embeddings_gpt2_richie_hsj.npz",
     },
+    # The two runs above on responses max-pooled over the real tokens only (pad positions masked,
+    # 14 October 2026), with their own output trees and embedding caches.
+    "qwen3_base_richie_hsj_nopad": {
+        "responses_subdir": "Qwen3_1.7Base_abstractiveness_Richie_HSJ_responses_nopad",
+        "model_subdir": "Qwen",
+        "architecture": "qwen3",
+        "metadata_file": "metadata_Richie_HSJ.json",
+        "layer_mapping_file": "layer_mapping_Qwen3_1-7B.csv",
+        "typicality_column": "typicality_HSJ_pairwise",
+        "output_subdir": "research_plots_qwen_base_richie_hsj_nopad",
+        "sublayer_filter": "mlp.gate_proj",
+        "frequency_corpus": "fineweb",
+        "probing_sentences_dir": "Qwen3-30B-A3B-Instruct-2507_abstractiveness_Richie_HSJ_cot",
+        "embedding_cache_file": "concept_embeddings_qwen3_base_richie_hsj_nopad.npz",
+    },
+    "gpt2_richie_hsj_nopad": {
+        "responses_subdir": "GPT2_abstractiveness_Richie_HSJ_responses_nopad",
+        "model_subdir": "gpt2",
+        "architecture": "gpt2",
+        "metadata_file": "metadata_Richie_HSJ.json",
+        "layer_mapping_file": "layer_mapping_GPT2.csv",
+        "typicality_column": "typicality_HSJ_pairwise",
+        "output_subdir": "research_plots_gpt2_richie_hsj_nopad",
+        "sublayer_filter": "mlp.c_fc",
+        "frequency_corpus": "openwebtext",
+        "probing_sentences_dir": "Qwen3-30B-A3B-Instruct-2507_abstractiveness_Richie_HSJ_cot",
+        "embedding_cache_file": "concept_embeddings_gpt2_richie_hsj_nopad.npz",
+    },
 }
 
 # Configuration run when --config is not given on the command line.
-ACTIVE_CONFIG = "gpt2_richie_hsj"
+ACTIVE_CONFIG = "qwen3_base_richie_hsj"
 
 
 def section_entries(module, module_dir: pathlib.Path, rows: dict) -> list:
