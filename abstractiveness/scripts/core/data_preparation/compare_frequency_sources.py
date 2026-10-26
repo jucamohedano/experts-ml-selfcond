@@ -34,7 +34,7 @@ def unique_words(metadata: list) -> pd.DataFrame:
 
 
 def source_correlations(frame: pd.DataFrame) -> pd.DataFrame:
-    """Pearson r, Spearman rho and mean Zipf offset for every pair of sources, over the words both cover."""
+    """Spearman rho and mean Zipf offset for every pair of sources, over the words both cover."""
     rows = []
     for a, b in itertools.combinations(SOURCES, 2):
         pair = frame[[SOURCES[a], SOURCES[b]]].dropna().astype(float)
@@ -43,8 +43,7 @@ def source_correlations(frame: pd.DataFrame) -> pd.DataFrame:
             "source_a": a,
             "source_b": b,
             "n": len(pair),
-            "pearson_r": stats.pearsonr(x, y)[0],
-            "spearman_rho": stats.spearmanr(x, y)[0],
+            "spearman_rho": stats.spearmanr(x, y).statistic,
             "mean_zipf_difference": float((x - y).mean()),
         })
     return pd.DataFrame(rows)

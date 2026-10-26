@@ -17,10 +17,10 @@ import numpy as np
 import pandas as pd
 import seaborn as sns
 from scipy import stats
-from scipy.stats import pearsonr, spearmanr
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 from utils.logging_and_io import save_dataframe
+from utils.statistics import PERMUTATIONS, correlation, spearman_test
 from modules.shared_expert_set_measures import (expert_presence_matrix, expert_set_overlap_matrices,
                                                 category_alignment_metrics, pair_similarity_vector)
 from modules.shared_layer_profile_measures import (pair_layer_profile_vectors,
@@ -30,15 +30,14 @@ from modules.shared_layer_profile_measures import (pair_layer_profile_vectors,
                                                    profile_metric_value_label)
 from core.analysis_scopes import to_block_axis, axis_variants, scope_section_dir, scope_summary_row
 from core.expert_data_loading import expert_counts_with_metadata
-from core.correlation_reporting import (panel_r_columns, run_regression_panel, run_regression_grid,
-                                        regression_row, regression_grid_rows, note_coverage_skip,
-                                        MIN_ABSOLUTE_N, MIN_COVERAGE_FRACTION)
+from core.correlation_reporting import (Panel, panel_rho_columns, run_regression_panel, run_regression_grid,
+                                        regression_row, regression_grid_rows, MIN_ABSOLUTE_N)
 from core.human_similarity_ratings import load_human_similarity, human_noise_ceiling
 from core.probing_sentences import load_positive_documents
 from utils.plotting import (_plot_bar_with_leaders, _plot_heatmap_with_leaders,
                             apply_rotated_leader_labels, build_category_color_map, fig_width_for,
                             plot_hexbin_with_trends, plot_sublayer_comparison_bars, set_title, set_suptitle,
-                            stats_line, draw_regression, twin_axis, CORRELATION_COLORS, LEVEL_COLORS, SERIES_COLORS,
+                            stats_line, draw_regression, twin_axis, LEVEL_COLORS, SERIES_COLORS,
                             DETAIL_COLOR, SEQUENTIAL_CMAP, DIVERGING_CMAP)
 
 log = logging.getLogger(__name__)
@@ -61,13 +60,35 @@ SECTION_DIRS = {
 # Shared by the correlation panels of every section
 # ---------------------------------------------------------------------------
 
+# Variables defined relative to the concept's category: a correlation involving one is computed within categories.
+CATEGORY_RELATIVE = {"human_typicality", "jaccard_pct", "overlap_pct", "layer_profile_similarity_pct",
+                     "global_cosine_typicality"}
+
+
+# Row of the per-category tables holding the size-weighted mean over categories.
+WEIGHTED_MEAN = "WEIGHTED_MEAN"
+
+
+def within_category(*columns: str) -> bool:
+    """Whether a correlation of these columns is computed within categories, true when any is category-relative."""
+    return any(column in CATEGORY_RELATIVE for column in columns)
+
+
+def _weighted_mean(values: pd.Series, weights: pd.Series) -> float:
+    """Mean of the finite values weighted by their weights, NaN when none is finite."""
+    finite = values.notna()
+    return float((values[finite] * weights[finite]).sum() / weights[finite].sum()) if finite.any() else np.nan
+
+
 def _regression(corr_dir, plot_name: str, data: pd.DataFrame, x_col: str, y_col: str, x_label: str,
                 y_label: str, title: str, n_total_relevant: int) -> dict:
-    """One regression panel with its CSV, or only its correlation_summary row without a folder."""
+    """One panel with its CSV, or only its correlation_summary row without a folder, within categories when either
+    variable is category-relative."""
+    within = within_category(x_col, y_col)
     if corr_dir is None:
-        return regression_row(data, x_col, y_col, plot_name, n_total_relevant)[1]
-    return run_regression_panel(data, x_col, y_col, x_label, y_label, title,
-                                corr_dir / f"{plot_name}.csv", corr_dir / f"{plot_name}.png", n_total_relevant)
+        return regression_row(data, x_col, y_col, plot_name, n_total_relevant, within)[1]
+    return run_regression_panel(data, x_col, y_col, x_label, y_label, title, corr_dir / f"{plot_name}.csv",
+                                corr_dir / f"{plot_name}.png", n_total_relevant, within)
 
 
 def _write_correlation_summary(rows: list, out_dir) -> pd.DataFrame:
@@ -96,7 +117,7 @@ CONCEPT_CATEGORY_SUMMARY_LABELS = {
     "overlap_median_pct": "Median overlap %",
     "layer_profile_mean_pct": f"Mean layer-profile similarity ({DEFAULT_PROFILE_METRIC})",
     "layer_profile_z_mean": f"Mean layer-profile z vs null ({DEFAULT_PROFILE_METRIC})",
-    "r_jaccard_vs_layer_profile": "r, Jaccard vs layer profile (concept to label)",
+    "rho_jaccard_vs_layer_profile": "Within-category ρ, Jaccard vs layer profile (concept to label)",
 }
 
 
@@ -284,8 +305,11 @@ def _display_word(concept: str) -> str:
 
 
 def category_similarity_summary(similarity_metrics_df: pd.DataFrame, concept_metadata: pd.DataFrame) -> pd.DataFrame:
-    """Per category, quartiles and mean of the members' Jaccard and overlap with the label, and Jaccard against human typicality."""
-    typicality = concept_metadata.set_index("concept")["human_typicality"]
+    """Per category, quartiles and mean of the members' Jaccard and overlap with the label, and the Spearman rho of
+    Jaccard against human typicality with its permutation p, the components of section 2.4's within-category rho."""
+    typicality = similarity_metrics_df["concept"].map(concept_metadata.set_index("concept")["human_typicality"])
+    test = spearman_test(similarity_metrics_df["jaccard_pct"], typicality, groups=similarity_metrics_df["category"])
+    agreement = dict(zip(test["groups"], zip(test["rho_k"], test["p_k"], test["n_k"])))
     rows = []
     for category, group in similarity_metrics_df.groupby("category"):
         row = {"category": category, "n_members": len(group),
@@ -294,12 +318,8 @@ def category_similarity_summary(similarity_metrics_df: pd.DataFrame, concept_met
             stem, values = column.removesuffix("_pct"), group[column]
             row.update({f"{stem}_median_pct": values.median(), f"{stem}_q1_pct": values.quantile(0.25),
                         f"{stem}_q3_pct": values.quantile(0.75), f"{stem}_mean_pct": values.mean()})
-        paired = pd.DataFrame({"jaccard": group["jaccard_pct"].to_numpy(),
-                               "typicality": group["concept"].map(typicality).to_numpy(dtype=float)}).dropna()
-        usable = len(paired) >= 3 and paired["jaccard"].std() > 0 and paired["typicality"].std() > 0
-        r, p = stats.pearsonr(paired["jaccard"], paired["typicality"]) if usable else (np.nan, np.nan)
-        row.update({"r_jaccard_human_typicality": r, "p_jaccard_human_typicality": p,
-                    "n_with_typicality": len(paired)})
+        rho, p, n = agreement.get(category, (np.nan, np.nan, 0))
+        row.update({"rho_jaccard_human_typicality": rho, "p_jaccard_human_typicality": p, "n_with_typicality": int(n)})
         rows.append(row)
     return pd.DataFrame(rows)
 
@@ -357,9 +377,9 @@ def plot_category_hierarchies(similarity_metrics_df: pd.DataFrame, summary: pd.D
                   color=SERIES_COLORS["primary"])
         twin.set_ylim(-0.05, 1.05)
         twin.set_ylabel("Human typicality (0 to 1 within the category)")
-        r = row["r_jaccard_human_typicality"]
-        detail = (stats_line("Pearson r", r, row["p_jaccard_human_typicality"], int(row["n_with_typicality"]))
-                  if np.isfinite(r) else f"n = {n}")
+        rho = row["rho_jaccard_human_typicality"]
+        detail = (stats_line("Spearman ρ", rho, row["p_jaccard_human_typicality"], int(row["n_with_typicality"]))
+                  if np.isfinite(rho) else f"n = {n}")
         set_title(ax, f"{category.capitalize()}, each member's Jaccard with the word '{category}'",
                   f"members by descending human typicality (diamonds), {detail}")
         fig.tight_layout()
@@ -472,7 +492,7 @@ def run_category_concept_similarities(scope, concept_metadata: pd.DataFrame, mer
             overlap_median_pct=similarity_metrics_df["overlap_pct"].median(),
             layer_profile_mean_pct=similarity_metrics_df["layer_profile_similarity_pct"].mean(),
             layer_profile_z_mean=similarity_metrics_df["layer_profile_z"].mean(),
-            **panel_r_columns(summary_df),
+            **panel_rho_columns(summary_df),
         )
     return similarity_metrics_df, summary
 
@@ -488,8 +508,8 @@ PAIRWISE_SIMILARITY_SUMMARY_LABELS = {
     "across_category_jaccard_pct": "Across-category Jaccard %",
     "layer_profile_roc_auc": f"Category alignment ROC-AUC, layer profile ({DEFAULT_PROFILE_METRIC})",
     "layer_profile_z_roc_auc": f"Category alignment ROC-AUC, layer-profile z ({DEFAULT_PROFILE_METRIC})",
-    "r_jaccard_vs_layer_profile_allpairs": "r, Jaccard vs layer profile (all pairs)",
-    "r_jaccard_vs_layer_profile_z_allpairs": "r, Jaccard vs layer-profile z (all pairs)",
+    "rho_jaccard_vs_layer_profile_allpairs": "ρ, Jaccard vs layer profile (all pairs)",
+    "rho_jaccard_vs_layer_profile_z_allpairs": "ρ, Jaccard vs layer-profile z (all pairs)",
 }
 
 
@@ -570,79 +590,64 @@ def plot_all_heatmaps(expert_allocation_df: pd.DataFrame, concept_metadata: pd.D
     return concepts, jaccard_matrix, profile_matrices
 
 
-def summarize_category_contrast(concepts, similarity_matrix: np.ndarray, concept_metadata: pd.DataFrame) -> dict:
-    """Within against across category similarity and its ROC-AUC."""
+def summarize_category_contrast(concepts, similarity_matrix: np.ndarray, concept_metadata: pd.DataFrame,
+                                n_draws: int = PERMUTATIONS) -> dict:
+    """Within against across category similarity of the member pairs, its ROC-AUC with a two-sided Mantel p and the
+    number of pairs, the members missing the most pairs dropped until the others form complete pairs."""
     concept_to_cat = concept_metadata.set_index("concept")["category"].to_dict()
     categorized = [i for i, c in enumerate(concepts) if pd.notna(concept_to_cat.get(c))]
-    empty = {"within_pct": np.nan, "across_pct": np.nan,
-             "contrast_pct": np.nan, "roc_auc": np.nan}
-    if len(categorized) < 2:
-        return empty
+    categories = np.array([concept_to_cat[concepts[i]] for i in categorized])
+    pair_similarity = similarity_matrix[np.ix_(categorized, categorized)][np.triu_indices(len(categorized), k=1)]
+    alignment = category_alignment_metrics(pair_similarity, categories, n_draws)
+    return {"within_pct": alignment["within_mean"], "across_pct": alignment["across_mean"],
+            "contrast_pct": alignment["within_mean"] - alignment["across_mean"], "roc_auc": alignment["roc_auc"],
+            "mantel_p": alignment["mantel_p"], "n_pairs": alignment["n_pairs"]}
 
-    keep = list(categorized)
-    while len(keep) >= 2:
-        block = similarity_matrix[np.ix_(keep, keep)].copy()
-        np.fill_diagonal(block, 0.0)
-        bad = (~np.isfinite(block)).sum(axis=1)
-        if bad.max() == 0:
-            break
-        keep.pop(int(bad.argmax()))
-    if len(keep) < 2:
-        return empty
 
-    categories = np.array([concept_to_cat[concepts[i]] for i in keep])
-    sub_matrix = similarity_matrix[np.ix_(keep, keep)]
-    iu = np.triu_indices(len(keep), k=1)
-    pair_similarity = sub_matrix[iu]
-    same = (categories[:, None] == categories[None, :])[iu]
-    if not same.any() or same.all():
-        return empty
+def allpairs_row(plot_name: str, jaccard: np.ndarray, y: np.ndarray, y_variable: str, n_items: int,
+                 n_draws: int = PERMUTATIONS) -> tuple[dict, np.ndarray]:
+    """correlation_summary row of Jaccard against a pair measure over every word pair, Spearman's rho with its
+    two-sided Mantel p, and the pairs it used, once the words missing the most pairs are dropped."""
+    upper = np.triu_indices(n_items, k=1)
+    test = spearman_test(jaccard, y, pairs=upper, n_draws=n_draws)
+    covered = test["n"] >= MIN_ABSOLUTE_N and np.isfinite(test["rho"])
+    return {"plot_name": plot_name, "x_variable": "jaccard_pct", "y_variable": y_variable, "controlling_for": "",
+            "ranks": "pooled", "spearman_rho": test["rho"] if covered else None,
+            "spearman_p": test["p"] if covered and n_draws else None, "n_points": test["n"],
+            "n_total_relevant": len(upper[0]),
+            "coverage_pct": round(100 * test["n"] / len(upper[0]), 1) if len(upper[0]) else 0.0}, test["used"]
 
-    alignment = category_alignment_metrics(pair_similarity, categories)
-    within, across = pair_similarity[same].mean(), pair_similarity[~same].mean()
-    return {"within_pct": within, "across_pct": across,
-            "contrast_pct": within - across, "roc_auc": alignment["roc_auc"]}
+
+# All-pairs panels: (plot name, y label, y variable).
+ALLPAIRS_PANELS = [("jaccard_vs_layer_profile_allpairs", "Layer-profile similarity %", "layer_profile_similarity_pct"),
+                   ("jaccard_vs_layer_profile_z_allpairs", "Layer-profile agreement vs null (z)", "layer_profile_z")]
 
 
 def plot_all_pairs_jaccard_vs_layer_profile(scope, concept_metadata: pd.DataFrame, corr_dir) -> list:
-    """Jaccard against layer-profile agreement, raw and z, over every word pair."""
+    """Jaccard against layer-profile agreement, raw and z, over every word pair, the Mantel p computed only when the
+    section writes outputs."""
     items = list(concept_metadata["concept"].unique())
     jaccard = pair_similarity_vector(scope.expert_df, items) * 100.0
-    profile, profile_z = pair_layer_profile_vectors(to_block_axis(scope.expert_df), items)
-
-    iu = np.triu_indices(len(items), k=1)
+    profiles = pair_layer_profile_vectors(to_block_axis(scope.expert_df), items)
     category_of = concept_metadata.set_index("concept")["category"].to_dict()
     cats = np.array([category_of.get(c) for c in items], dtype=object)
-    same = (cats[:, None] == cats[None, :])[iu]
+    same = (cats[:, None] == cats[None, :])[np.triu_indices(len(items), k=1)]
 
     rows = []
-    panels = [
-        ("jaccard_vs_layer_profile_allpairs", profile,
-         "Layer-profile similarity %", "layer_profile_similarity_pct"),
-        ("jaccard_vs_layer_profile_z_allpairs", profile_z,
-         "Layer-profile agreement vs null (z)", "layer_profile_z"),
-    ]
-    for plot_name, y, y_label, y_variable in panels:
-        valid = np.isfinite(jaccard) & np.isfinite(y)
-        pair_frame = pd.DataFrame({"jaccard_pct": jaccard[valid], y_variable: y[valid],
-                                   "same_category": same[valid]})
+    for (plot_name, y_label, y_variable), y in zip(ALLPAIRS_PANELS, profiles):
+        row, used = allpairs_row(plot_name, jaccard, y, y_variable, len(items),
+                                 PERMUTATIONS if corr_dir is not None else 0)
         if corr_dir is not None:
-            save_dataframe(pair_frame, corr_dir / f"{plot_name}.csv")
-
-        row = {"plot_name": plot_name, "x_variable": "jaccard_pct", "y_variable": y_variable,
-               "pearson_r": None, "pearson_p": None, "spearman_rho": None, "spearman_p": None,
-               "n_points": int(valid.sum()), "n_total_relevant": len(iu[0]),
-               "coverage_pct": round(100 * valid.sum() / len(iu[0]), 1) if len(iu[0]) else 0.0}
-
-        if valid.sum() >= MIN_ABSOLUTE_N and np.ptp(jaccard[valid]) > 0 and np.ptp(y[valid]) > 0:
-            row["pearson_r"], row["pearson_p"] = stats.pearsonr(jaccard[valid], y[valid])
-            row["spearman_rho"], row["spearman_p"] = stats.spearmanr(jaccard[valid], y[valid])
-            if corr_dir is not None:
-                plot_hexbin_with_trends(
-                    jaccard[valid], y[valid], same[valid], corr_dir / f"{plot_name}.png",
-                    "Expert Jaccard %", y_label, colorbar_label="Word pairs (log)")
-        else:
-            log.warning(f"  Skipping {plot_name}: only {int(valid.sum())} usable pairs.")
+            save_dataframe(pd.DataFrame({"jaccard_pct": jaccard[used], y_variable: y[used],
+                                         "same_category": same[used]}), corr_dir / f"{plot_name}.csv")
+        if row["spearman_rho"] is None:
+            log.warning(f"  Skipping {plot_name}: only {row['n_points']} usable pairs.")
+        elif corr_dir is not None:
+            plot_hexbin_with_trends(
+                jaccard[used], y[used], same[used], corr_dir / f"{plot_name}.png", "Expert Jaccard %", y_label,
+                colorbar_label="Word pairs (log)",
+                detail=stats_line("Spearman ρ", row["spearman_rho"], row["spearman_p"], row["n_points"],
+                                  p_label="Mantel p"))
         rows.append(row)
     return rows
 
@@ -728,27 +733,28 @@ def run_pairwise_similarities(scope, concept_metadata: pd.DataFrame, out_dir, pr
         plot_category_mean_matrix(category_means, out_dir)
         plot_category_heatmaps(concepts, jaccard_matrix, concept_metadata, with_experts, out_dir)
 
-    jaccard = summarize_category_contrast(concepts, jaccard_matrix, concept_metadata)
-    profile_contrasts = {key: summarize_category_contrast(concepts, matrix, concept_metadata)
-                         for key, matrix in profile_matrices.items()}
+    contrasts = {key: summarize_category_contrast(concepts, matrix, concept_metadata,
+                                                  PERMUTATIONS if out_dir is not None else 0)
+                 for key, matrix in {"jaccard": jaccard_matrix, **profile_matrices}.items()}
+    if out_dir is not None:
+        save_dataframe(pd.DataFrame([{"matrix": key, **values} for key, values in contrasts.items()]),
+                       out_dir / "category_alignment.csv")
 
     log.info(f"  [{scope.label}] Comparing Jaccard against layer-profile agreement over all word pairs...")
     summary_df = _write_correlation_summary(
         plot_all_pairs_jaccard_vs_layer_profile(scope, concept_metadata, out_dir), out_dir)
 
-    default_profile = profile_contrasts[profile_matrix_key(DEFAULT_PROFILE_METRIC)]
-    default_profile_z = profile_contrasts[profile_z_matrix_key(DEFAULT_PROFILE_METRIC)]
-    matrices = {"concepts": concepts, "jaccard": jaccard_matrix, "profiles": profile_matrices,
-                "contrasts": profile_contrasts}
+    jaccard = contrasts["jaccard"]
+    matrices = {"concepts": concepts, "jaccard": jaccard_matrix, "profiles": profile_matrices, "contrasts": contrasts}
     return matrices, scope_summary_row(
         scope,
         within_category_jaccard_pct=jaccard["within_pct"],
         across_category_jaccard_pct=jaccard["across_pct"],
         category_contrast_pct=jaccard["contrast_pct"],
         category_roc_auc=jaccard["roc_auc"],
-        layer_profile_roc_auc=default_profile["roc_auc"],
-        layer_profile_z_roc_auc=default_profile_z["roc_auc"],
-        **panel_r_columns(summary_df),
+        layer_profile_roc_auc=contrasts[profile_matrix_key(DEFAULT_PROFILE_METRIC)]["roc_auc"],
+        layer_profile_z_roc_auc=contrasts[profile_z_matrix_key(DEFAULT_PROFILE_METRIC)]["roc_auc"],
+        **panel_rho_columns(summary_df),
     )
 
 
@@ -770,13 +776,7 @@ TEXT_LABEL = "probing-text TF-IDF cosine"
 TEXT_SUBJECT = "Probing-text TF-IDF cosine"
 
 
-HUMAN_MANTEL_PERMUTATIONS = 999
-
-
 HUMAN_SIGNIFICANCE_ALPHA = 0.05
-
-
-HUMAN_COEFFICIENT = "Spearman"
 
 
 def human_validated_metrics() -> list:
@@ -793,159 +793,68 @@ def human_validated_metrics() -> list:
 HUMAN_VALIDATED_METRICS = human_validated_metrics()
 
 
-def _within_category_vectors(concepts: list, matrix: np.ndarray, pairs: pd.DataFrame,
-                             category: str, with_experts: set | None = None) -> tuple:
-    """Model and human values of one category's rated pairs, matched on concept keys, NaN and empty sets dropped."""
+def _rated_pairs(concepts, with_experts: set | None = None) -> tuple:
+    """The rated pairs whose two concepts are known and hold experts, with the positions of both concepts."""
     index = {concept: position for position, concept in enumerate(concepts)}
-    subset = pairs[pairs.category == category]
-    model, human, positions = [], [], []
-    for word_a, word_b, rating in zip(subset.concept_a, subset.concept_b, subset.mean_rating):
-        if word_a not in index or word_b not in index:
-            continue
-        if with_experts is not None and (word_a not in with_experts or word_b not in with_experts):
-            continue
-        value = matrix[index[word_a], index[word_b]]
-        if np.isfinite(value):
-            model.append(value)
-            human.append(rating)
-            positions.append((index[word_a], index[word_b]))
-    return np.asarray(model, dtype=float), np.asarray(human, dtype=float), positions
-
-
-def _spearman_rho(model, human) -> float:
-    """Spearman rho, NaN without scipy's ConstantInputWarning when either side is constant."""
-    if np.ptp(model) == 0 or np.ptp(human) == 0:
-        return float("nan")
-    return float(spearmanr(model, human).statistic)
-
-
-def _mantel_within_category(model: np.ndarray, human: np.ndarray, positions: list,
-                            matrix: np.ndarray, rng) -> float:
-    """Mantel p permuting concept labels within the category, NaN when rho is undefined."""
-    if len(model) < 3:
-        return float("nan")
-    observed = abs(_spearman_rho(model, human))
-    if not np.isfinite(observed):
-        return float("nan")
-    members = np.array(sorted({position for pair in positions for position in pair}))
-    slot = {member: index for index, member in enumerate(members)}
-    rows = np.array([slot[a] for a, _ in positions])
-    columns = np.array([slot[b] for _, b in positions])
-
-    hits, drawn = 0, 0
-    for _ in range(HUMAN_MANTEL_PERMUTATIONS):
-        shuffled = rng.permutation(members)
-        permuted = matrix[shuffled[rows], shuffled[columns]]
-        usable = np.isfinite(permuted)
-        if usable.sum() < 3:
-            continue
-        drawn += 1
-        if abs(_spearman_rho(permuted[usable], human[usable])) >= observed:
-            hits += 1
-    if drawn == 0:
-        return float("nan")
-    return (hits + 1) / (drawn + 1)
-
-
-def _format_mantel_p(value: float) -> str:
-    """Mantel p at the resolution the permutation count supports."""
-    floor = 1.0 / (HUMAN_MANTEL_PERMUTATIONS + 1)
-    if not np.isfinite(value):
-        return "p = n/a"
-    if value <= floor:
-        return f"p < {floor:.3f}"
-    return f"p = {value:.3f}"
-
-
-def plot_human_vs_expert(concepts: list, matrix: np.ndarray, metric_label: str,
-                         out_path, with_experts: set | None = None,
-                         mantel_p: dict | None = None, subject: str | None = None) -> None:
-    """Per-category scatter of expert similarity against human rating with an isotonic fit."""
     pairs = load_human_similarity()
-    categories = sorted(pairs.category.unique())
-    mantel_p = mantel_p or {}
+    known = pairs.concept_a.isin(index) & pairs.concept_b.isin(index)
+    if with_experts is not None:
+        known &= pairs.concept_a.isin(with_experts) & pairs.concept_b.isin(with_experts)
+    rated = pairs[known].reset_index(drop=True)
+    return rated, rated.concept_a.map(index).to_numpy(), rated.concept_b.map(index).to_numpy()
+
+
+def human_agreement(concepts, matrix: np.ndarray, with_experts: set | None = None,
+                    n_draws: int = PERMUTATIONS) -> tuple[pd.DataFrame, dict]:
+    """Spearman test of a pair matrix against the human ratings within each category, the member labels of each
+    category relabelled (stratified Mantel), and the rated pairs it used with their within-category rank scores."""
+    rated, first, second = _rated_pairs(concepts, with_experts)
+    model = matrix[first, second]
+    test = spearman_test(model, rated.mean_rating, groups=rated.category, pairs=(first, second), n_draws=n_draws)
+    frame = rated[["category", "concept_a", "concept_b"]].assign(
+        expert_similarity=model, human_rating=rated.mean_rating, expert_rank_z=test["x_scores"],
+        human_rank_z=test["y_scores"])
+    return frame[test["used"]], test
+
+
+def _per_group(test: dict) -> dict:
+    """{group: (rho, p, n)} of a spearman_test result."""
+    return dict(zip(test["groups"], zip(test["rho_k"], test["p_k"], test["n_k"])))
+
+
+def plot_human_vs_expert(frame: pd.DataFrame, test: dict, metric_label: str, out_path,
+                         subject: str | None = None) -> None:
+    """Per-category scatter of model similarity against human rating with the least-squares line, the category's
+    Spearman rho with its Mantel p, and the CSV of the pairs."""
     subject = subject or f"Expert {metric_label}"
+    statistics = _per_group(test)
     fig, axes = plt.subplots(2, 4, figsize=(18, 8.5), sharey=True)
-
-    for axis, category in zip(axes.ravel(), categories):
-        model, human, _ = _within_category_vectors(concepts, matrix, pairs, category,
-                                                   with_experts)
-        if len(model) < 3:
+    legend = True
+    for axis, category in zip(axes.ravel(), sorted(load_human_similarity().category.unique())):
+        rho, p, n = statistics.get(category, (np.nan, np.nan, 0))
+        if not np.isfinite(rho):
             axis.set_visible(False)
             continue
-        axis.scatter(model, human, s=12, alpha=0.5, color=CORRELATION_COLORS["points"], edgecolors="none")
-        rho = _spearman_rho(model, human)
-        if len(np.unique(model)) > 1:
-            try:
-                from sklearn.isotonic import IsotonicRegression
-                order = np.argsort(model, kind="stable")
-                fitted = IsotonicRegression(increasing=bool(rho >= 0),
-                                            out_of_bounds="clip").fit_transform(
-                                                model[order], human[order])
-                axis.plot(model[order], fitted, color=CORRELATION_COLORS["line"], linewidth=1.8)
-            except Exception as error:
-                log.warning(f"    Trend fit skipped for {category}: {error}")
+        pairs = frame[frame.category == category]
+        handles = draw_regression(axis, pairs.expert_similarity, pairs.human_rating, size=12)
+        if legend and handles:
+            axis.legend(handles=handles, loc="upper left")
+            legend = False
         set_title(axis, category.capitalize(),
-                  f"{HUMAN_COEFFICIENT} rho = {rho:.2f}, Mantel "
-                  f"{_format_mantel_p(mantel_p.get(category, float('nan')))}, n = {len(model)}")
+                  stats_line("Spearman ρ", rho, p if np.isfinite(p) else None, int(n), p_label="Mantel p"))
         axis.set_xlabel(subject)
-    axes[0, 0].set_ylabel("Human similarity rating (1 to 7)")
-    axes[1, 0].set_ylabel("Human similarity rating (1 to 7)")
-    set_suptitle(fig, f"{subject} against human similarity, within-category pairs\n"
-                      f"{HUMAN_COEFFICIENT} rank correlation, Mantel p from {HUMAN_MANTEL_PERMUTATIONS} "
-                      f"concept-label permutations, isotonic fit")
+    for axis in axes[:, 0]:
+        axis.set_ylabel("Human similarity rating (1 to 7)")
+    set_suptitle(fig, f"{subject} against human similarity, within-category pairs")
     fig.tight_layout()
     fig.savefig(out_path, dpi=300, bbox_inches="tight")
     plt.close(fig)
-
-
-def _standardised_rank(values: np.ndarray) -> np.ndarray:
-    """Average ranks scaled to zero mean and unit variance, so a least-squares slope between two of them is Spearman's rho."""
-    ranks = stats.rankdata(values)
-    return (ranks - ranks.mean()) / ranks.std()
-
-
-def plot_human_vs_expert_ranked(concepts: list, matrix: np.ndarray, metric_label: str,
-                                out_path, with_experts: set | None = None) -> None:
-    """Mirror of plot_human_vs_expert on standardised within-category ranks, with a straight least-squares line."""
-    pairs = load_human_similarity()
-    categories = sorted(pairs.category.unique())
-    fig, axes = plt.subplots(2, 4, figsize=(18, 8.5), sharex=True, sharey=True)
-    frames = []
-
-    for axis, category in zip(axes.ravel(), categories):
-        model, human, positions = _within_category_vectors(concepts, matrix, pairs, category,
-                                                           with_experts)
-        if len(model) < 3 or np.ptp(model) == 0:
-            axis.set_visible(False)
-            continue
-        ranked = pd.DataFrame({
-            "category": category,
-            "concept_a": [concepts[a] for a, _ in positions],
-            "concept_b": [concepts[b] for _, b in positions],
-            "expert_similarity": model, "human_rating": human,
-            "expert_rank_z": _standardised_rank(model), "human_rank_z": _standardised_rank(human),
-        })
-        frames.append(ranked)
-        draw_regression(axis, ranked, "expert_rank_z", "human_rank_z", size=12)
-        set_title(axis, category.capitalize(),
-                  f"{HUMAN_COEFFICIENT} rho = slope = {_spearman_rho(model, human):.2f}, n = {len(model)}")
-        axis.set_xlabel(f"Expert {metric_label}, standardised rank")
-        axis.set_ylabel("")
-    axes[0, 0].set_ylabel("Human rating, standardised rank")
-    axes[1, 0].set_ylabel("Human rating, standardised rank")
-    set_suptitle(fig, f"Expert {metric_label} against human similarity on within-category ranks\n"
-                      f"least-squares line on standardised ranks, whose slope is the {HUMAN_COEFFICIENT} rho")
-    fig.tight_layout()
-    fig.savefig(out_path, dpi=300, bbox_inches="tight")
-    plt.close(fig)
-    if frames:
-        save_dataframe(pd.concat(frames, ignore_index=True), out_path.with_suffix(".csv"))
+    save_dataframe(frame, out_path.with_suffix(".csv"))
 
 
 def plot_human_agreement_bars(table: pd.DataFrame, out_path) -> None:
     """Per-category rho over noise ceiling, starred where the Mantel test supports it."""
-    per_category = table[~table.category.isin(["POOLED", "POOLED_MEAN"])]
+    per_category = table[table.category != WEIGHTED_MEAN]
     if per_category.empty:
         return
     metrics = list(dict.fromkeys(per_category.metric))
@@ -970,10 +879,9 @@ def plot_human_agreement_bars(table: pd.DataFrame, out_path) -> None:
     axis.axhline(0, color="black", linewidth=0.8)
     axis.set_xticks(np.arange(len(categories)) + width * (len(metrics) - 1) / 2)
     axis.set_xticklabels(categories, rotation=30, ha="right")
-    axis.set_ylabel(f"{HUMAN_COEFFICIENT} rho / noise ceiling")
+    axis.set_ylabel("Spearman ρ / noise ceiling")
     set_title(axis, "Agreement with human similarity as a fraction of the noise ceiling",
-              f"* Mantel p < {HUMAN_SIGNIFICANCE_ALPHA}, "
-              f"{HUMAN_MANTEL_PERMUTATIONS} label permutations within the category")
+              f"* Mantel p < {HUMAN_SIGNIFICANCE_ALPHA}, {PERMUTATIONS:,} label permutations within the category")
     axis.legend(loc="upper center", bbox_to_anchor=(0.5, -0.30), frameon=False,
                 fontsize=9, ncol=min(len(metrics), 4))
     fig.tight_layout()
@@ -981,79 +889,42 @@ def plot_human_agreement_bars(table: pd.DataFrame, out_path) -> None:
     plt.close(fig)
 
 
-def validate_against_human(concepts: list, matrices: dict, out_dir,
-                           make_plots: bool = True,
+def validate_against_human(concepts: list, matrices: dict, out_dir, make_plots: bool = True,
                            with_experts: set | None = None, plot_dir=None, mantel: bool = True) -> pd.DataFrame:
-    """Per-category Spearman against human similarity, Mantel p and noise ceiling, plus pooled rows."""
-    pairs = load_human_similarity()
+    """Per matrix and category, Spearman rho against the human ratings with its Mantel p and the noise ceiling, and
+    their pair-weighted mean over categories with a stratified Mantel p."""
     ceilings = human_noise_ceiling()
-    rng = np.random.default_rng(0)
     rows = []
-
     for key, label in HUMAN_VALIDATED_METRICS:
         if key not in matrices:
             continue
-        matrix = matrices[key]
-        pooled_model, pooled_human, per_category_rho = [], [], []
-
-        for category in sorted(ceilings):
-            model, human, positions = _within_category_vectors(concepts, matrix, pairs,
-                                                               category, with_experts)
-            if len(model) < 3:
-                continue
-            rho = _spearman_rho(model, human)
-            ceiling = ceilings[category]
-            rows.append({"metric": key, "metric_label": label, "category": category,
-                         "coefficient": HUMAN_COEFFICIENT.lower(), "test": "mantel",
-                         "n_pairs": len(model), "rho": round(rho, 4),
-                         "mantel_p": round(_mantel_within_category(
-                             model, human, positions, matrix, rng), 4) if mantel else float("nan"),
-                         "noise_ceiling": round(ceiling, 4),
-                         "rho_over_ceiling": round(rho / ceiling, 4)})
-            pooled_model.extend(model)
-            pooled_human.extend(human)
-            per_category_rho.append(rho)
-
-        if per_category_rho:
-            pooled = _spearman_rho(pooled_model, pooled_human)
-            mean_ceiling = float(np.mean([ceilings[c] for c in sorted(ceilings)]))
-            mean_rho = float(np.nanmean(per_category_rho))
-            for name, value in [("POOLED", pooled), ("POOLED_MEAN", mean_rho)]:
-                rows.append({"metric": key, "metric_label": label, "category": name,
-                             "coefficient": HUMAN_COEFFICIENT.lower(), "test": "none",
-                             "n_pairs": len(pooled_model), "rho": round(value, 4),
-                             "mantel_p": float("nan"),
-                             "noise_ceiling": round(mean_ceiling, 4),
-                             "rho_over_ceiling": round(value / mean_ceiling, 4)})
-
+        frame, test = human_agreement(concepts, matrices[key], with_experts, PERMUTATIONS if mantel else 0)
+        if not len(test["groups"]):
+            continue
+        ceiling = np.array([ceilings[category] for category in test["groups"]])
+        valid = np.isfinite(test["rho_k"])
+        mean_ceiling = test["n_k"][valid] @ ceiling[valid] / test["n_k"][valid].sum() if valid.any() else np.nan
+        for category, n, rho, p, c in zip([*test["groups"], WEIGHTED_MEAN], [*test["n_k"], test["n"]],
+                                          [*test["rho_k"], test["rho"]], [*test["p_k"], test["p"]],
+                                          [*ceiling, mean_ceiling]):
+            rows.append({"metric": key, "metric_label": label, "category": category, "n_pairs": int(n), "rho": rho,
+                         "mantel_p": p, "noise_ceiling": c, "rho_over_ceiling": rho / c})
+        if make_plots and out_dir is not None:
+            target = out_dir if key in ("jaccard", TEXT_METRIC) else (plot_dir or out_dir)
+            plot_human_vs_expert(frame, test, label, target / f"similarity_vs_{key.removeprefix('layer_profile_')}.png",
+                                 subject=TEXT_SUBJECT if key == TEXT_METRIC else None)
     table = pd.DataFrame(rows)
-    if out_dir is None:
-        return table
-    save_dataframe(table, out_dir / "human_similarity_validation.csv")
-
-    if make_plots and not table.empty:
-        for key, label in HUMAN_VALIDATED_METRICS:
-            if key in matrices:
-                per_metric = table[table.metric == key]
-                target = out_dir if key in ("jaccard", TEXT_METRIC) else (plot_dir or out_dir)
-                plot_human_vs_expert(
-                    concepts, matrices[key], label,
-                    target / f"similarity_vs_{key.removeprefix('layer_profile_')}.png",
-                    with_experts=with_experts,
-                    mantel_p=dict(zip(per_metric.category, per_metric.mantel_p)),
-                    subject=TEXT_SUBJECT if key == TEXT_METRIC else None)
-                if key == "jaccard":
-                    plot_human_vs_expert_ranked(concepts, matrices[key], label,
-                                                target / "similarity_vs_jaccard_ranked.png",
-                                                with_experts=with_experts)
-        plot_human_agreement_bars(table, out_dir / "human_similarity_by_category.png")
+    if out_dir is not None:
+        save_dataframe(table, out_dir / "human_similarity_validation.csv")
+        if make_plots and not table.empty:
+            plot_human_agreement_bars(table, out_dir / "human_similarity_by_category.png")
     return table
 
 
 PAIRWISE_METRIC_LABELS = {
     "category_roc_auc": "Category alignment ROC-AUC",
     "category_roc_auc_z": "Category alignment ROC-AUC, z",
-    "human_rho": "Human similarity agreement (mean over categories)",
+    "human_rho": "Human similarity agreement (within-category ρ)",
     "human_rho_z": "Human similarity agreement, z",
 }
 
@@ -1097,12 +968,6 @@ def text_similarity_matrix(dataset_dir: str, concepts: tuple) -> np.ndarray:
     return similarity
 
 
-def _partial_from_rhos(xy: float, xz: float, yz: float) -> float:
-    """Correlation of x and y with z partialled out, from the three pairwise correlations, NaN when z explains x or y."""
-    denominator = np.sqrt(max(0.0, (1 - xz ** 2) * (1 - yz ** 2)))
-    return float((xy - xz * yz) / denominator) if denominator > 1e-6 else float("nan")
-
-
 TEXT_BASELINE_BARS = {
     "rho_text_human": ("Text against humans", SERIES_COLORS["muted"]),
     "rho_jaccard_human": ("Expert Jaccard against humans", SERIES_COLORS["primary"]),
@@ -1111,35 +976,38 @@ TEXT_BASELINE_BARS = {
 }
 
 
-def text_baseline_table(concepts, jaccard: np.ndarray, text: np.ndarray, with_experts: set | None) -> pd.DataFrame:
-    """Per category, Spearman of the text and of the expert Jaccard with the human ratings, of Jaccard with the text,
-    and of Jaccard with the human ratings once the text is partialled out, plus their mean over categories."""
-    pairs = load_human_similarity()
-    rows = []
-    for category in sorted(pairs.category.unique()):
-        model, human, positions = _within_category_vectors(concepts, jaccard, pairs, category, with_experts)
-        text_values = np.array([text[a, b] for a, b in positions], dtype=float)
-        usable = np.isfinite(text_values)
-        model, human, text_values = model[usable], human[usable], text_values[usable]
-        if len(model) < 3:
-            continue
-        jaccard_human, text_human = _spearman_rho(model, human), _spearman_rho(text_values, human)
-        jaccard_text = _spearman_rho(model, text_values)
-        rows.append({"category": category, "n_pairs": len(model), "rho_text_human": text_human,
-                     "rho_jaccard_human": jaccard_human, "rho_jaccard_text": jaccard_text,
-                     "partial_rho_jaccard_human_given_text": _partial_from_rhos(jaccard_human, jaccard_text,
-                                                                                text_human)})
-    table = pd.DataFrame(rows)
-    if table.empty:
-        return table
-    means = table.drop(columns=["category", "n_pairs"]).mean()
-    return pd.concat([table, pd.DataFrame([{"category": "POOLED_MEAN", "n_pairs": int(table["n_pairs"].sum()),
-                                            **means}])], ignore_index=True)
+# Zero-order coefficients of the text baseline: column, (x, y).
+TEXT_BASELINE_PAIRS = {"rho_text_human": ("text", "human"), "rho_jaccard_human": ("jaccard", "human"),
+                       "rho_jaccard_text": ("jaccard", "text")}
+
+
+def text_baseline_table(concepts, jaccard: np.ndarray, text: np.ndarray, with_experts: set | None,
+                        n_draws: int = PERMUTATIONS) -> pd.DataFrame:
+    """Per category and as their pair-weighted mean, Spearman of the text and of the expert Jaccard with the human
+    ratings, of Jaccard with the text, and of Jaccard with the ratings once the text is partialled out within each
+    category, the last with its permutation p."""
+    rated, first, second = _rated_pairs(concepts, with_experts)
+    values = {"jaccard": jaccard[first, second], "human": rated.mean_rating.to_numpy(), "text": text[first, second]}
+    partial = spearman_test(values["jaccard"], values["human"], [values["text"]], rated.category, (first, second),
+                            n_draws=n_draws)
+    if not len(partial["groups"]):
+        return pd.DataFrame()
+    used, groups = partial["used"], rated.category.to_numpy()[partial["used"]]
+    tests = {column: spearman_test(values[x][used], values[y][used], groups=groups, n_draws=0)
+             for column, (x, y) in TEXT_BASELINE_PAIRS.items()}
+    return pd.DataFrame({"category": [*partial["groups"], WEIGHTED_MEAN], "n_pairs": [*partial["n_k"], partial["n"]],
+                         **{column: [*test["rho_k"], test["rho"]] for column, test in tests.items()},
+                         "partial_rho_jaccard_human_given_text": [*partial["rho_k"], partial["rho"]],
+                         "partial_p_jaccard_human_given_text": [*partial["p_k"], partial["p"]]})
+
+
+def _category_names(table: pd.DataFrame) -> list:
+    """Category labels of a per-category table, its weighted mean row included."""
+    return [("weighted mean" if c == WEIGHTED_MEAN else c).capitalize() for c in table["category"]]
 
 
 def plot_text_baseline(table: pd.DataFrame, out_path) -> None:
     """Per category and on average, the text's and the experts' agreement with humans, and the experts' without the text."""
-    names = [("mean" if c == "POOLED_MEAN" else c).capitalize() for c in table["category"]]
     x = np.arange(len(table))
     width = 0.8 / len(TEXT_BASELINE_BARS)
     fig, ax = plt.subplots(figsize=(11, 5))
@@ -1147,10 +1015,11 @@ def plot_text_baseline(table: pd.DataFrame, out_path) -> None:
         ax.bar(x + (offset - 1) * width, table[column], width, label=label, color=color)
     ax.axhline(0, color="black", linewidth=0.8)
     ax.set_xticks(x)
-    ax.set_xticklabels(names, rotation=30, ha="right", rotation_mode="anchor")
-    ax.set_ylabel(f"{HUMAN_COEFFICIENT} rho with the human ratings")
+    ax.set_xticklabels(_category_names(table), rotation=30, ha="right", rotation_mode="anchor")
+    ax.set_ylabel("Spearman ρ with the human ratings")
     set_title(ax, "Agreement with human similarity, probing text against expert sets",
-              "within-category pairs, TF-IDF cosine of each word's positive sentences, partial Spearman")
+              "within-category pairs, TF-IDF cosine of each word's positive sentences, "
+              "partial Spearman within category")
     ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.22), ncol=3, frameon=False)
     fig.tight_layout()
     fig.savefig(out_path, dpi=300, bbox_inches="tight")
@@ -1167,68 +1036,57 @@ def _member_and_pair_parts(values: np.ndarray, rows: np.ndarray, columns: np.nda
     return member, part, values - grand - part
 
 
-def _pearson(x: np.ndarray, y: np.ndarray) -> float:
-    """Pearson r, NaN when either side is constant."""
-    if np.ptp(x) == 0 or np.ptp(y) == 0:
-        return float("nan")
-    return float(np.corrcoef(x, y)[0, 1])
-
-
-def _partial_pearson(x: np.ndarray, y: np.ndarray, z: np.ndarray) -> float:
-    """Pearson r of x and y with z partialled out."""
-    return _partial_from_rhos(_pearson(x, y), _pearson(x, z), _pearson(y, z))
+# Decomposition columns computed over members rather than pairs, averaged with member weights.
+MEMBER_COLUMNS = ("rho_members", "rho_members_given_text", "rho_typicality_centrality", "rho_centrality_label_jaccard")
 
 
 def human_similarity_decomposition_table(concepts, jaccard: np.ndarray, text: np.ndarray,
                                          with_experts: set | None) -> pd.DataFrame:
     """Per category, the Spearman of Jaccard against the human ratings split exactly into a member part, which
     typicality carries, and a pair-specific part, both with the text partialled out, and typicality against the
-    label Jaccard, plus their mean over categories."""
-    pairs = load_human_similarity()
+    label Jaccard, plus their weighted mean over categories, by pairs for the pair columns and by members for the
+    member columns."""
     index = {concept: position for position, concept in enumerate(concepts)}
+    rated, first, second = _rated_pairs(concepts, with_experts)
     rows = []
-    for category in sorted(pairs.category.unique()):
-        model, human, positions = _within_category_vectors(concepts, jaccard, pairs, category, with_experts)
-        members = sorted({position for pair in positions for position in pair})
+    for category, group in rated.groupby("category"):
+        a, b = first[group.index], second[group.index]
+        members = np.unique(np.concatenate([a, b]))
         n_members = len(members)
-        if category not in index or n_members < 4 or len(model) != n_members * (n_members - 1) // 2:
+        model, human, text_values = jaccard[a, b], group.mean_rating.to_numpy(), text[a, b]
+        complete = (len(group) == n_members * (n_members - 1) // 2 and np.isfinite(model).all()
+                    and np.isfinite(text_values).all())
+        if category not in index or n_members < 4 or not complete:
             continue
-        slot = {position: i for i, position in enumerate(members)}
-        first = np.array([slot[a] for a, _ in positions])
-        second = np.array([slot[b] for _, b in positions])
-        text_values = np.array([text[a, b] for a, b in positions], dtype=float)
-        if not np.isfinite(text_values).all():
-            continue
+        a, b = np.searchsorted(members, a), np.searchsorted(members, b)
         (j_member, j_part, j_rest), (h_member, h_part, h_rest), (t_member, _, t_rest) = (
-            _member_and_pair_parts(stats.rankdata(values), first, second, n_members)
-            for values in (model, human, text_values))
+            _member_and_pair_parts(stats.rankdata(values), a, b, n_members) for values in (model, human, text_values))
         j_centred, h_centred = j_part + j_rest, h_part + h_rest
         norm = np.sqrt((j_centred ** 2).sum() * (h_centred ** 2).sum())
-        typicality = (np.bincount(first, human, n_members) + np.bincount(second, human, n_members)) / (n_members - 1)
-        centrality = (np.bincount(first, model, n_members) + np.bincount(second, model, n_members)) / (n_members - 1)
-        label_jaccard = jaccard[members, index[category]]
+        typicality = (np.bincount(a, human, n_members) + np.bincount(b, human, n_members)) / (n_members - 1)
+        centrality = (np.bincount(a, model, n_members) + np.bincount(b, model, n_members)) / (n_members - 1)
         with np.errstate(divide="ignore", invalid="ignore"):
             rows.append({
-                "category": category, "n_members": n_members, "n_pairs": len(model),
-                "rho": _spearman_rho(model, human),
+                "category": category, "n_members": n_members, "n_pairs": len(group),
+                "rho": correlation(model, human),
                 "member_part": float((j_part * h_part).sum() / norm),
                 "pair_part": float((j_rest * h_rest).sum() / norm),
                 "member_share_jaccard": float((j_part ** 2).sum() / (j_centred ** 2).sum()),
                 "member_share_human": float((h_part ** 2).sum() / (h_centred ** 2).sum()),
-                "rho_members": _pearson(j_member, h_member),
-                "rho_pair_specific": _pearson(j_rest, h_rest),
-                "rho_members_given_text": _partial_pearson(j_member, h_member, t_member),
-                "rho_pair_specific_given_text": _partial_pearson(j_rest, h_rest, t_rest),
-                "r_typicality_label_jaccard": _pearson(typicality, label_jaccard),
-                "r_typicality_centrality": _pearson(typicality, centrality),
-                "r_centrality_label_jaccard": _pearson(centrality, label_jaccard),
+                "rho_members": correlation(j_member, h_member, ranks=False),
+                "rho_pair_specific": correlation(j_rest, h_rest, ranks=False),
+                "rho_members_given_text": correlation(j_member, h_member, [t_member], ranks=False),
+                "rho_pair_specific_given_text": correlation(j_rest, h_rest, [t_rest], ranks=False),
+                "rho_typicality_centrality": correlation(typicality, centrality),
+                "rho_centrality_label_jaccard": correlation(centrality, jaccard[members, index[category]]),
             })
     table = pd.DataFrame(rows)
     if table.empty:
         return table
-    means = table.drop(columns=["category", "n_members", "n_pairs"]).mean()
-    return pd.concat([table, pd.DataFrame([{"category": "POOLED_MEAN", "n_members": int(table["n_members"].sum()),
-                                            "n_pairs": int(table["n_pairs"].sum()), **means}])], ignore_index=True)
+    mean = {column: _weighted_mean(table[column], table["n_members" if column in MEMBER_COLUMNS else "n_pairs"])
+            for column in table.columns.drop(["category", "n_members", "n_pairs"])}
+    return pd.concat([table, pd.DataFrame([{"category": WEIGHTED_MEAN, "n_members": int(table["n_members"].sum()),
+                                            "n_pairs": int(table["n_pairs"].sum()), **mean}])], ignore_index=True)
 
 
 DECOMPOSITION_BARS = {
@@ -1239,7 +1097,6 @@ DECOMPOSITION_BARS = {
 
 def plot_human_similarity_decomposition(table: pd.DataFrame, out_path) -> None:
     """Per category and on average, the member and pair-specific parts of the Jaccard against human Spearman rho."""
-    names = [("mean" if c == "POOLED_MEAN" else c).capitalize() for c in table["category"]]
     x = np.arange(len(table))
     width = 0.8 / len(DECOMPOSITION_BARS)
     fig, ax = plt.subplots(figsize=(11, 5))
@@ -1248,8 +1105,8 @@ def plot_human_similarity_decomposition(table: pd.DataFrame, out_path) -> None:
     ax.scatter(x, table["rho"], marker="D", s=36, color=DETAIL_COLOR, zorder=3, label="Total rho, sum of the two parts")
     ax.axhline(0, color="black", linewidth=0.8)
     ax.set_xticks(x)
-    ax.set_xticklabels(names, rotation=30, ha="right", rotation_mode="anchor")
-    ax.set_ylabel(f"Contribution to {HUMAN_COEFFICIENT} rho")
+    ax.set_xticklabels(_category_names(table), rotation=30, ha="right", rotation_mode="anchor")
+    ax.set_ylabel("Contribution to Spearman ρ")
     set_title(ax, "Agreement of the expert Jaccard with human similarity, member and pair-specific parts",
               "within-category pairs on ranks, the member part is the agreement carried by typicality")
     ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.22), ncol=3, frameon=False)
@@ -1274,9 +1131,10 @@ def run_human_similarity_validation(scope, matrices: dict, out_dir, metric_dir, 
         matrices["concepts"], validated, out_dir, with_experts=with_experts, plot_dir=plot_dir,
         mantel=out_dir is not None)
     mean_rho = ({} if human.empty else
-                human[human.category == "POOLED_MEAN"].set_index("metric")["rho"].to_dict())
+                human[human.category == WEIGHTED_MEAN].set_index("metric")["rho"].to_dict())
 
-    baseline = (text_baseline_table(matrices["concepts"], matrices["jaccard"], validated[TEXT_METRIC], with_experts)
+    baseline = (text_baseline_table(matrices["concepts"], matrices["jaccard"], validated[TEXT_METRIC], with_experts,
+                                    PERMUTATIONS if out_dir is not None else 0)
                 if TEXT_METRIC in validated else pd.DataFrame())
     if out_dir is not None and not baseline.empty:
         save_dataframe(baseline, out_dir / "human_similarity_text_baseline.csv")
@@ -1294,7 +1152,7 @@ def run_human_similarity_validation(scope, matrices: dict, out_dir, metric_dir, 
         human_rho_layer_profile=mean_rho.get(profile_matrix_key(DEFAULT_PROFILE_METRIC), float("nan")),
         human_rho_text_tfidf=mean_rho.get(TEXT_METRIC, float("nan")),
         human_partial_rho_jaccard_given_text=(
-            baseline.set_index("category").loc["POOLED_MEAN", "partial_rho_jaccard_human_given_text"]
+            baseline.set_index("category").loc[WEIGHTED_MEAN, "partial_rho_jaccard_human_given_text"]
             if not baseline.empty else float("nan")),
     )
 
@@ -1304,14 +1162,20 @@ def run_human_similarity_validation(scope, matrices: dict, out_dir, metric_dir, 
 # ---------------------------------------------------------------------------
 
 TYPICALITY_SUMMARY_LABELS = {
-    "typicality_pearson_r": "Pearson r, model vs human typicality",
+    "typicality_spearman_rho": "Within-category ρ, cosine vs human typicality",
     "n_typicality_concepts": "Concepts with both scores",
-    "r_human_typicality_vs_jaccard": "r, human typicality vs Jaccard",
-    "r_jaccard_vs_cosine_typicality": "r, Jaccard vs cosine typicality",
-    "r_partial_correlation_jaccard_human_typicality": "Partial r, Jaccard vs human typicality given frequency",
-    "r_partial_correlation_jaccard_human_typicality_category":
-        "Partial r, Jaccard vs human typicality given frequency and category",
+    "rho_human_typicality_vs_jaccard": "Within-category ρ, human typicality vs Jaccard",
+    "rho_jaccard_vs_cosine_typicality": "Within-category ρ, Jaccard vs cosine typicality",
+    "rho_partial_correlation_jaccard_human_typicality_no_control": "ρ over all members, Jaccard vs human typicality",
+    "rho_partial_correlation_jaccard_human_typicality":
+        "Partial ρ over all members, Jaccard vs human typicality given frequency",
+    "rho_partial_correlation_jaccard_human_typicality_within_given_frequency":
+        "Within-category partial ρ, Jaccard vs human typicality given frequency",
 }
+
+
+# Columns of the global cosine typicality table, also when no category qualifies.
+TYPICALITY_COLUMNS = ["category", "concept", "human_typicality", "global_cosine_typicality"]
 
 
 def _valid_category_members(expert_allocation_df: pd.DataFrame, concept_metadata: pd.DataFrame):
@@ -1355,7 +1219,7 @@ def compute_global_typicality(expert_allocation_df: pd.DataFrame, concept_metada
                 'global_cosine_typicality': sims_global[i],
             })
 
-    global_typicality_df = pd.DataFrame(results)
+    global_typicality_df = pd.DataFrame(results, columns=TYPICALITY_COLUMNS)
     if typ_dir is not None:
         save_dataframe(global_typicality_df, typ_dir / "global_prototype_typicality.csv")
     return global_typicality_df
@@ -1397,8 +1261,10 @@ def compute_layer_typicality(expert_allocation_df: pd.DataFrame, concept_metadat
     return layer_typicality_df
 
 
-def generate_global_typicality_reports(global_typicality_df: pd.DataFrame, typ_dir) -> None:
-    """Per-category bars and scatter of human against cosine typicality."""
+def generate_global_typicality_reports(global_typicality_df: pd.DataFrame, test: dict, typ_dir) -> None:
+    """Per-category bars of human and cosine typicality, and their scatter with the least-squares line and the
+    category's Spearman rho."""
+    statistics = _per_group(test)
     for category in global_typicality_df['category'].unique():
         cat_dir = typ_dir / category
         cat_dir.mkdir(parents=True, exist_ok=True)
@@ -1425,22 +1291,17 @@ def generate_global_typicality_reports(global_typicality_df: pd.DataFrame, typ_d
                 figsize=(fig_width_for(cat_global['concept'].nunique(), 0.55, min_w=14.0), 6), show_x_ticks=True
             )
 
-            varied = cat_global['human_typicality'].std() > 0 and cat_global['global_cosine_typicality'].std() > 0
-            if varied:
-                r, p = pearsonr(cat_global['human_typicality'], cat_global['global_cosine_typicality'])
-                detail = stats_line("Pearson r", r, p, len(cat_global))
-            else:
-                detail = "insufficient variance for a correlation"
+            rho, p, n = statistics.get(category, (np.nan, np.nan, 0))
+            detail = (stats_line("Spearman ρ", rho, p if np.isfinite(p) else None, int(n)) if np.isfinite(rho)
+                      else "insufficient variance for a correlation")
             fig, ax = plt.subplots(figsize=(7.5, 6.5))
-            draw_regression(ax, cat_global, 'human_typicality', 'global_cosine_typicality', fit=varied, size=40)
-
-            for i in range(len(cat_global)):
-                ax.text(
-                    cat_global['human_typicality'].iloc[i],
-                    cat_global['global_cosine_typicality'].iloc[i],
-                    f"  {cat_global['concept'].iloc[i]}",
-                    fontsize=8, alpha=0.8, va='center'
-                )
+            handles = draw_regression(ax, cat_global['human_typicality'], cat_global['global_cosine_typicality'],
+                                      fit=bool(np.isfinite(rho)), size=40)
+            for x, y, concept in zip(cat_global['human_typicality'], cat_global['global_cosine_typicality'],
+                                     cat_global['concept']):
+                ax.text(x, y, f"  {concept}", fontsize=8, alpha=0.8, va='center')
+            if handles:
+                ax.legend(handles=handles, loc="best")
             set_title(ax, f"{category.capitalize()}, human typicality against cosine typicality", detail)
             ax.set_xlabel("Human typicality")
             ax.set_ylabel("Cosine typicality (global prototype)")
@@ -1498,19 +1359,18 @@ def plot_most_typical_concept_per_layer(top_concepts_per_layer_df: pd.DataFrame,
     plt.close(fig)
 
 
-def _summarize_typicality(global_typicality_df: pd.DataFrame) -> dict:
-    """Pooled Pearson r between cosine and human typicality."""
-    empty = {"typicality_pearson_r": np.nan, "typicality_pearson_p": np.nan, "n_typicality_concepts": 0}
-    if global_typicality_df.empty:
-        return empty
-    paired = global_typicality_df.dropna(subset=['human_typicality', 'global_cosine_typicality'])
-    if len(paired) < 3 or paired['human_typicality'].std() == 0 or paired['global_cosine_typicality'].std() == 0:
-        return {**empty, "n_typicality_concepts": len(paired)}
-    r, p = pearsonr(paired['human_typicality'], paired['global_cosine_typicality'])
-    return {"typicality_pearson_r": r, "typicality_pearson_p": p, "n_typicality_concepts": len(paired)}
+def typicality_agreement(global_typicality_df: pd.DataFrame, n_draws: int = PERMUTATIONS) -> dict:
+    """Spearman test of cosine against human typicality within each category."""
+    return spearman_test(global_typicality_df["human_typicality"], global_typicality_df["global_cosine_typicality"],
+                         groups=global_typicality_df["category"], n_draws=n_draws)
 
 
-# Grouped figures: (x column, x label, x name, title, [(y column, y label, y name, denominator)]).
+def _summarize_typicality(test: dict) -> dict:
+    """Within-category Spearman rho between cosine and human typicality, its p and the concepts it used."""
+    return {"typicality_spearman_rho": test["rho"], "typicality_spearman_p": test["p"],
+            "n_typicality_concepts": test["n"]}
+
+
 HUMAN_TYPICALITY_LABEL = "Human typicality (Richie and Bhatia, pairwise)"
 
 
@@ -1521,22 +1381,34 @@ FREQUENCY_CORPORA = {
 }
 
 
+def _frequency_short_label(frequency_corpus: str) -> str:
+    """The corpus frequency label without its unit, as used in titles and residual axes."""
+    return FREQUENCY_CORPORA[frequency_corpus][1].split(" (")[0]
+
+
 def grouped_correlation_figures(n_words: int, n_categorized: int, frequency_corpus: str) -> list:
-    """Specification of the two grouped figures, the measure on x against its covariates on y."""
+    """The two grouped figures as (x column, x label, x name, title, panels), the measure on x against its
+    covariates on y, each panel within categories when either variable is category-relative."""
     frequency_col, frequency_label = FREQUENCY_CORPORA[frequency_corpus]
-    frequency_name = f"frequency_{frequency_corpus}"
-    expert_count = ("expert_count", "Expert count", "expert_count", n_words)
-    jaccard = ("jaccard_pct", "Jaccard % with category label", "jaccard", n_categorized)
-    overlap = ("overlap_pct", "Overlap % with category label", "overlap", n_categorized)
-    typicality = ("human_typicality", HUMAN_TYPICALITY_LABEL, "human_typicality", n_words)
-    frequency = (frequency_col, frequency_label, frequency_name, n_words)
-    return [
-        ("human_typicality", HUMAN_TYPICALITY_LABEL, "human_typicality", "Human typicality against expert measures and frequency",
-         [expert_count, jaccard, overlap, frequency]),
-        (frequency_col, frequency_label, frequency_name,
-         f"{frequency_label.split(' (')[0]} against expert measures and human typicality",
-         [expert_count, jaccard, overlap, typicality]),
-    ]
+    # Column: (label, name, coverage denominator).
+    variables = {"expert_count": ("Expert count", "expert_count", n_words),
+                 "jaccard_pct": ("Jaccard % with category label", "jaccard", n_categorized),
+                 "overlap_pct": ("Overlap % with category label", "overlap", n_categorized),
+                 "human_typicality": (HUMAN_TYPICALITY_LABEL, "human_typicality", n_words),
+                 frequency_col: (frequency_label, f"frequency_{frequency_corpus}", n_words)}
+
+    def figure(x_col: str, title: str, y_cols: list) -> tuple:
+        x_label, x_name, _ = variables[x_col]
+        panels = [Panel(f"{x_name}_vs_{y_name}", f"vs_{y_name}", y_label, y_col, y_label, n_total,
+                        within_category(x_col, y_col))
+                  for y_col in y_cols for y_label, y_name, n_total in [variables[y_col]]]
+        return x_col, x_label, x_name, title, panels
+
+    return [figure("human_typicality", "Human typicality against expert measures and frequency",
+                   ["expert_count", "jaccard_pct", "overlap_pct", frequency_col]),
+            figure(frequency_col,
+                   f"{_frequency_short_label(frequency_corpus)} against expert measures and human typicality",
+                   ["expert_count", "jaccard_pct", "overlap_pct", "human_typicality"])]
 
 
 def plot_grouped_correlations(merged_metadata_df: pd.DataFrame, similarity_metrics_df: pd.DataFrame,
@@ -1558,109 +1430,70 @@ def plot_grouped_correlations(merged_metadata_df: pd.DataFrame, similarity_metri
         if x_col not in wide.columns:
             log.warning(f"  Skipping {x_name}_correlations: metadata has no {x_col} column.")
             continue
-        panels = [panel for panel in panels if panel[0] in wide.columns]
+        panels = [panel for panel in panels if panel.y_col in wide.columns]
         if corr_dir is None:
-            summary_rows += regression_grid_rows(wide, x_col, x_name, panels)
+            summary_rows += regression_grid_rows(wide, x_col, panels)
         else:
-            summary_rows += run_regression_grid(wide, x_col, x_label, x_name, panels, title,
+            summary_rows += run_regression_grid(wide, x_col, x_label, panels, title,
                                                 corr_dir / f"{x_name}_correlations.csv",
                                                 corr_dir / f"{x_name}_correlations.png")
     return summary_rows
 
 
-def _residualize(values: pd.Series, controls: pd.DataFrame) -> pd.Series:
-    """Residuals of values after a least-squares regression on the controls, text columns entered as indicators."""
-    design = pd.get_dummies(controls, drop_first=True, dtype=float)
-    design.insert(0, "intercept", 1.0)
-    design = design.to_numpy(dtype=float)
-    coefficients, *_ = np.linalg.lstsq(design, values.to_numpy(dtype=float), rcond=None)
-    return values - design @ coefficients
+JACCARD_LABEL = "Jaccard with category label"
 
 
-JACCARD_PARTIAL_AXIS = ("jaccard_pct", "jaccard", "Jaccard with category label (%)")
-
-
-def _frequency_short_label(frequency_corpus: str) -> str:
-    """The corpus frequency label without its unit, as used in titles and residual axes."""
-    return FREQUENCY_CORPORA[frequency_corpus][1].split(" (")[0]
-
-
-def _partial_correlation(corr_data: pd.DataFrame, corr_dir, n_total_relevant: int, plot_name: str, title: str,
-                         x: tuple, y: tuple, control: tuple) -> list:
-    """Pearson r of x and y after both are residualized on the controls, x and y as (column, name, label), control as (column or columns, label)."""
-    (x_col, x_name, x_label), (y_col, y_name, y_label), (control_cols, control_label) = x, y, control
-    control_cols = [control_cols] if isinstance(control_cols, str) else list(control_cols)
-    missing = [col for col in (x_col, y_col, *control_cols) if col not in corr_data.columns]
+def _partial_correlation_grid(corr_data: pd.DataFrame, corr_dir, n_total_relevant: int, plot_name: str,
+                              file_stem: str, x: tuple, other: tuple) -> list:
+    """x against the Jaccard with its category label as one row of panels ordered by increasing rho with one CSV,
+    Spearman's rho over all members and within categories, each without and given the other measure, on the members
+    holding every value. Returns the correlation_summary rows but that of the within-category panel without control,
+    which the grouped figure reports, x as (column, label) and other as (column, name, label)."""
+    (x_col, x_label), (other_col, other_name, other_label) = x, other
+    missing = [column for column in (x_col, "jaccard_pct", other_col, "category") if column not in corr_data.columns]
     if missing:
-        log.warning(f"  Skipping {plot_name}: no {', '.join(missing)} column.")
+        log.warning(f"  Skipping {file_stem}: no {', '.join(missing)} column.")
         return []
-    clean_data = corr_data.dropna(subset=[x_col, y_col, *control_cols]).copy()
-    n = len(clean_data)
-    coverage = n / n_total_relevant if n_total_relevant else 0.0
-    x_resid, y_resid = f"{x_name}_resid", f"{y_name}_resid"
-    summary_row = {
-        "plot_name": plot_name, "x_variable": x_resid, "y_variable": y_resid, "pearson_r": None, "pearson_p": None,
-        "n_points": n, "n_total_relevant": n_total_relevant, "coverage_pct": round(100 * coverage, 1),
-        "controlling_for": " + ".join(control_cols),
-    }
-    if n < MIN_ABSOLUTE_N or coverage < MIN_COVERAGE_FRACTION:
-        note_coverage_skip(plot_name, n, n_total_relevant)
-        return [summary_row]
-
-    clean_data[x_resid] = _residualize(clean_data[x_col], clean_data[control_cols])
-    clean_data[y_resid] = _residualize(clean_data[y_col], clean_data[control_cols])
-    r, p = stats.pearsonr(clean_data[x_resid], clean_data[y_resid])
-    summary_row["pearson_r"], summary_row["pearson_p"] = r, p
+    data = corr_data.dropna(subset=[x_col, "jaccard_pct", other_col, "category"])
+    panel = functools.partial(Panel, y_col="jaccard_pct", y_label=JACCARD_LABEL, n_total_relevant=n_total_relevant)
+    panels = [panel(f"{plot_name}_no_control", "no_control", "No control"),
+              panel(plot_name, f"given_{other_name}", f"Given {other_label}", controls=(other_col,)),
+              panel(None, "within", "Within category", within=True),
+              panel(f"{plot_name}_within_given_{other_name}", f"within_given_{other_name}",
+                    f"Within category, given {other_label}", within=True, controls=(other_col,))]
     if corr_dir is None:
-        return [summary_row]
-    columns = list(dict.fromkeys(["concept", "category", *control_cols, x_col, y_col, x_resid, y_resid]))
-    save_dataframe(clean_data[columns], corr_dir / f"{plot_name}.csv")
-
-    fig, ax = plt.subplots(figsize=(7.5, 6.5))
-    draw_regression(ax, clean_data, x_resid, y_resid)
-    set_title(ax, title, stats_line("Partial r", r, p, n))
-    ax.set_xlabel(f"{x_label}, residual after {control_label}")
-    ax.set_ylabel(f"{y_label}, residual after {control_label}")
-    fig.tight_layout()
-    fig.savefig(corr_dir / f"{plot_name}.png", dpi=300)
-    plt.close(fig)
-    return [summary_row]
+        return regression_grid_rows(data, x_col, panels)
+    return run_regression_grid(data, x_col, x_label, panels,
+                               f"{x_label} against {JACCARD_LABEL}, panels ordered by increasing ρ",
+                               corr_dir / f"{file_stem}.csv", corr_dir / f"{file_stem}.png", order_by_rho=True)
 
 
-def plot_partial_correlation(merged_metadata_df: pd.DataFrame, similarity_metrics_df: pd.DataFrame,
-                             concept_metadata: pd.DataFrame, corr_dir, frequency_corpus: str,
-                             with_category: bool = False) -> list:
-    """Jaccard against human typicality, both residualized on the model's corpus frequency, and on category when asked."""
+def plot_human_typicality_partial_correlations(merged_metadata_df: pd.DataFrame, similarity_metrics_df: pd.DataFrame,
+                                               concept_metadata: pd.DataFrame, corr_dir, frequency_corpus: str) -> list:
+    """Jaccard against human typicality without control and given the model's corpus frequency, over all members and
+    within categories."""
     corr_data = _concept_parent_frame(merged_metadata_df, similarity_metrics_df)
     if corr_data.empty:
         return []
-    frequency_col = FREQUENCY_CORPORA[frequency_corpus][0]
-    and_category = " and category" if with_category else ""
-    return _partial_correlation(
+    return _partial_correlation_grid(
         corr_data, corr_dir, concept_metadata['category'].notna().sum(),
-        "partial_correlation_jaccard_human_typicality" + ("_category" if with_category else ""),
-        f"Jaccard against human typicality, controlling for frequency{and_category}",
-        ("human_typicality", "human_typicality", "Human typicality"), JACCARD_PARTIAL_AXIS,
-        ([frequency_col] + (["category"] if with_category else []),
-         _frequency_short_label(frequency_corpus) + and_category))
+        "partial_correlation_jaccard_human_typicality", "human_typicality_partial_correlations",
+        ("human_typicality", "Human typicality"),
+        (FREQUENCY_CORPORA[frequency_corpus][0], "frequency", _frequency_short_label(frequency_corpus)))
 
 
-def plot_partial_correlation_jaccard_frequency(merged_metadata_df: pd.DataFrame, similarity_metrics_df: pd.DataFrame,
-                                               concept_metadata: pd.DataFrame, corr_dir, frequency_corpus: str,
-                                               with_category: bool = False) -> list:
-    """Jaccard against the model's corpus frequency, both residualized on human typicality, and on category when asked."""
+def plot_frequency_partial_correlations(merged_metadata_df: pd.DataFrame, similarity_metrics_df: pd.DataFrame,
+                                        concept_metadata: pd.DataFrame, corr_dir, frequency_corpus: str) -> list:
+    """Jaccard against the model's corpus frequency without control and given human typicality, over all members and
+    within categories."""
     corr_data = _concept_parent_frame(merged_metadata_df, similarity_metrics_df)
     if corr_data.empty:
         return []
-    frequency_col = FREQUENCY_CORPORA[frequency_corpus][0]
-    short_label = _frequency_short_label(frequency_corpus)
-    and_category = " and category" if with_category else ""
-    return _partial_correlation(
+    return _partial_correlation_grid(
         corr_data, corr_dir, concept_metadata['category'].notna().sum(),
-        "partial_correlation_jaccard_frequency" + ("_category" if with_category else ""),
-        f"Jaccard against frequency, controlling for human typicality{and_category}",
-        (frequency_col, "frequency", f"{short_label} (Zipf)"), JACCARD_PARTIAL_AXIS,
-        (["human_typicality"] + (["category"] if with_category else []), "human typicality" + and_category))
+        "partial_correlation_jaccard_frequency", f"frequency_{frequency_corpus}_partial_correlations",
+        (FREQUENCY_CORPORA[frequency_corpus][0], _frequency_short_label(frequency_corpus)),
+        ("human_typicality", "human_typicality", "human typicality"))
 
 
 def plot_jaccard_vs_cosine_typicality(similarity_metrics_df: pd.DataFrame, global_typicality_df: pd.DataFrame,
@@ -1684,8 +1517,9 @@ def run_typicality(scope, concept_metadata: pd.DataFrame, merged_meta: pd.DataFr
     """Cosine typicality of one scope, global and per layer, and every correlation with human typicality."""
     log.info(f"  [{scope.label}] Computing Empirical Cosine Typicality...")
     typ_global_df = compute_global_typicality(scope.expert_df, concept_metadata, out_dir)
+    typicality_test = typicality_agreement(typ_global_df)
     if out_dir is not None:
-        generate_global_typicality_reports(typ_global_df, out_dir)
+        generate_global_typicality_reports(typ_global_df, typicality_test, out_dir)
         for suffix, axis_df, axis_label in axis_variants(scope):
             log.info(f"  [{scope.label} / {axis_label}] Computing per-layer typicality prototypes...")
             typ_layer_df = compute_layer_typicality(axis_df, concept_metadata, out_dir, suffix)
@@ -1694,12 +1528,11 @@ def run_typicality(scope, concept_metadata: pd.DataFrame, merged_meta: pd.DataFr
     log.info(f"  [{scope.label}] Generating human typicality correlation plots...")
     rows = plot_grouped_correlations(merged_meta, similarity_metrics_df, concept_metadata, out_dir,
                                      ["human_typicality"], frequency_corpus)
-    rows += plot_partial_correlation(merged_meta, similarity_metrics_df, concept_metadata, out_dir, frequency_corpus)
-    rows += plot_partial_correlation(merged_meta, similarity_metrics_df, concept_metadata, out_dir, frequency_corpus,
-                                     with_category=True)
+    rows += plot_human_typicality_partial_correlations(merged_meta, similarity_metrics_df, concept_metadata, out_dir,
+                                                       frequency_corpus)
     rows += plot_jaccard_vs_cosine_typicality(similarity_metrics_df, typ_global_df, concept_metadata, out_dir)
     summary_df = _write_correlation_summary(rows, out_dir)
-    return scope_summary_row(scope, **_summarize_typicality(typ_global_df), **panel_r_columns(summary_df))
+    return scope_summary_row(scope, **_summarize_typicality(typicality_test), **panel_rho_columns(summary_df))
 
 
 # ---------------------------------------------------------------------------
@@ -1707,29 +1540,30 @@ def run_typicality(scope, concept_metadata: pd.DataFrame, merged_meta: pd.DataFr
 # ---------------------------------------------------------------------------
 
 FREQUENCY_SUMMARY_LABELS = {
-    **{f"r_frequency_{corpus}_vs_{y_name}": f"r, {_frequency_short_label(corpus)} vs {y_label}"
+    **{f"rho_frequency_{corpus}_vs_{y_name}":
+       f"{'Within-category ρ' if within else 'ρ'}, {_frequency_short_label(corpus)} vs {y_label}"
        for corpus in FREQUENCY_CORPORA
-       for y_name, y_label in (("expert_count", "expert count"), ("jaccard", "Jaccard"), ("overlap", "overlap"),
-                               ("human_typicality", "human typicality"))},
-    "r_partial_correlation_jaccard_frequency": "Partial r, Jaccard vs frequency given human typicality",
-    "r_partial_correlation_jaccard_frequency_category":
-        "Partial r, Jaccard vs frequency given human typicality and category",
+       for y_name, y_label, within in (("expert_count", "expert count", False), ("jaccard", "Jaccard", True),
+                                       ("overlap", "overlap", True), ("human_typicality", "human typicality", True))},
+    "rho_partial_correlation_jaccard_frequency_no_control": "ρ over all members, Jaccard vs frequency",
+    "rho_partial_correlation_jaccard_frequency":
+        "Partial ρ over all members, Jaccard vs frequency given human typicality",
+    "rho_partial_correlation_jaccard_frequency_within_given_human_typicality":
+        "Within-category partial ρ, Jaccard vs frequency given human typicality",
 }
 
 
 def run_frequency_correlations(scope, concept_metadata: pd.DataFrame, merged_meta: pd.DataFrame,
                                similarity_metrics_df: pd.DataFrame, out_dir, frequency_corpus: str) -> dict:
-    """The model's corpus frequency against expert count, Jaccard, overlap and human typicality, and the
-    Jaccard against frequency partial correlation controlling human typicality, alone and with category."""
+    """The model's corpus frequency against expert count, Jaccard, overlap and human typicality, and Jaccard
+    against frequency without control and given human typicality, over all members and within categories."""
     log.info(f"  [{scope.label}] Generating frequency correlation plots...")
     rows = plot_grouped_correlations(merged_meta, similarity_metrics_df, concept_metadata, out_dir,
                                      [f"frequency_{frequency_corpus}"], frequency_corpus)
-    rows += plot_partial_correlation_jaccard_frequency(merged_meta, similarity_metrics_df, concept_metadata,
-                                                       out_dir, frequency_corpus)
-    rows += plot_partial_correlation_jaccard_frequency(merged_meta, similarity_metrics_df, concept_metadata,
-                                                       out_dir, frequency_corpus, with_category=True)
+    rows += plot_frequency_partial_correlations(merged_meta, similarity_metrics_df, concept_metadata, out_dir,
+                                                frequency_corpus)
     summary_df = _write_correlation_summary(rows, out_dir)
-    return scope_summary_row(scope, **panel_r_columns(summary_df))
+    return scope_summary_row(scope, **panel_rho_columns(summary_df))
 
 
 # ---------------------------------------------------------------------------

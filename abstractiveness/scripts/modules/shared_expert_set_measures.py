@@ -10,6 +10,8 @@ import numpy as np
 import pandas as pd
 from scipy import sparse, stats
 
+from utils.statistics import PERMUTATIONS, spearman_test
+
 
 def expert_presence_matrix(expert_sets_df: pd.DataFrame, concepts: list) -> sparse.csr_matrix:
     """Binary concept-by-expert presence matrix, one row per entry of ``concepts`` in the given order and one column per distinct (layer_idx, unit) pair present in expert_sets_df."""
@@ -47,38 +49,22 @@ def expert_set_overlap_matrices(expert_sets_df: pd.DataFrame, concepts: list) ->
 
 
 def category_alignment_metrics(pair_similarity: np.ndarray, concept_categories: np.ndarray,
-                               n_permutations: int = 0, rng: np.random.Generator = None) -> dict:
-    """How well expert-set similarity tracks category membership, over all concept pairs."""
-    n = len(concept_categories)
-    iu = np.triu_indices(n, k=1)
-    same = (concept_categories[:, None] == concept_categories[None, :])[iu]
-
-    if pair_similarity.min() == pair_similarity.max():
-        return {"roc_auc": 0.5, "category_alignment_r": np.nan, "mantel_p": 1.0}
-
-    ranks = stats.rankdata(pair_similarity)
-    n1 = int(same.sum())
-    n0 = len(same) - n1
-    rank_offset = n1 * (n1 + 1) / 2
-
-    def rank_auc(same_mask):
-        return (ranks[same_mask].sum() - rank_offset) / (n1 * n0)
-
-    auc = rank_auc(same)
-    r, _ = stats.pearsonr(same.astype(float), pair_similarity)
-
-    if not n_permutations:
-        return {"roc_auc": auc, "category_alignment_r": r, "mantel_p": np.nan}
-
-    n_at_least = 0
-    for _ in range(n_permutations):
-        permuted = rng.permutation(concept_categories)
-        same_perm = (permuted[:, None] == permuted[None, :])[iu]
-        if rank_auc(same_perm) >= auc:
-            n_at_least += 1
-    mantel_p = (1 + n_at_least) / (1 + n_permutations)
-
-    return {"roc_auc": auc, "category_alignment_r": r, "mantel_p": mantel_p}
+                               n_draws: int = PERMUTATIONS) -> dict:
+    """ROC-AUC of pair similarity for same-category pairs, with the two-sided Mantel p of the equivalent Spearman rho
+    against the same-category indicator, the mean similarity within and across categories and the number of pairs,
+    over the pairs left complete once words with missing pairs are dropped. pair_similarity follows
+    np.triu_indices(n, k=1)."""
+    rows, cols = np.triu_indices(len(concept_categories), k=1)
+    same = concept_categories[rows] == concept_categories[cols]
+    test = spearman_test(same.astype(float), pair_similarity, pairs=(rows, cols), n_draws=n_draws)
+    similarity, same = pair_similarity[test["used"]], same[test["used"]]
+    n1, n0 = int(same.sum()), int((~same).sum())
+    if not n1 or not n0:
+        return {"roc_auc": np.nan, "mantel_p": np.nan, "within_mean": np.nan, "across_mean": np.nan, "n_pairs": n1 + n0}
+    ranks = stats.rankdata(similarity)
+    return {"roc_auc": (ranks[same].sum() - n1 * (n1 + 1) / 2) / (n1 * n0),
+            "mantel_p": test["p"],
+            "within_mean": similarity[same].mean(), "across_mean": similarity[~same].mean(), "n_pairs": n1 + n0}
 
 
 def pair_similarity_vector(expert_sets_df: pd.DataFrame, concepts: list) -> np.ndarray:

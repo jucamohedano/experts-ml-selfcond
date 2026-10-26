@@ -24,11 +24,10 @@ from modules.shared_expert_set_measures import pair_similarity_vector, category_
 from core.analysis_scopes import (axis_variants, scope_section_dir, scope_summary_row, to_block_axis,
                                   sublayer_expert_counts)
 from core.expert_data_loading import expert_counts_with_metadata
-from core.correlation_reporting import panel_r_columns, regression_row
+from core.correlation_reporting import panel_rho_columns, panel_detail, regression_row, score_column
 from utils.plotting import (_plot_bar_with_leaders, apply_rotated_leader_labels, fig_width_for,
                             plot_comparison_violin, build_category_color_map, set_title, set_suptitle,
-                            stats_line, coverage_line, twin_axis, LEVEL_COLORS, CORRELATION_COLORS,
-                            SERIES_COLORS, DETAIL_COLOR)
+                            draw_regression, twin_axis, LEVEL_COLORS, SERIES_COLORS, DETAIL_COLOR)
 
 log = logging.getLogger(__name__)
 
@@ -112,21 +111,12 @@ def compute_layer_descriptors(expert_allocation_df: pd.DataFrame,
         if label_probs is None and member_avg_probs is None:
             continue
 
-        if (label_probs is not None and member_avg_probs is not None
-                and np.std(label_probs) > 0 and np.std(member_avg_probs) > 0):
-            dist_corr, _ = stats.pearsonr(label_probs, member_avg_probs)
-        elif label_probs is not None and member_avg_probs is not None:
-            dist_corr = 0.0
-        else:
-            dist_corr = np.nan
-
         label_desc = layer_distribution_descriptors(label_probs, layer_indices)
         member_desc = layer_distribution_descriptors(member_avg_probs, layer_indices)
         category_results.append({
             "category": category,
             **label_desc,
             **{AVERAGE_COLUMN_NAMES[k]: v for k, v in member_desc.items()},
-            "pearson_correlation_distributions": dist_corr,
             "member_count": len(valid_members),
         })
     category_entropy_df = pd.DataFrame(category_results)
@@ -141,11 +131,10 @@ def layer_descriptors_by_axis(scope, concept_metadata: pd.DataFrame) -> list:
 
 
 def save_descriptor_tables(concept_df: pd.DataFrame, category_df: pd.DataFrame, out_dir, stem: str,
-                           descriptors: list, suffix: str = "", category_extra: tuple = ()) -> None:
+                           descriptors: list, suffix: str = "") -> None:
     """Chosen descriptor columns of both tables, as <stem>_concepts and <stem>_categories CSVs."""
     concept_cols = ["concept", *descriptors, "experts_count"]
-    category_cols = ["category", *descriptors, *(AVERAGE_COLUMN_NAMES[d] for d in descriptors),
-                     *category_extra, "member_count"]
+    category_cols = ["category", *descriptors, *(AVERAGE_COLUMN_NAMES[d] for d in descriptors), "member_count"]
     save_dataframe(concept_df.reindex(columns=concept_cols), out_dir / f"{stem}_concepts{suffix}.csv")
     save_dataframe(category_df.reindex(columns=category_cols), out_dir / f"{stem}_categories{suffix}.csv")
 
@@ -561,8 +550,7 @@ def run_layer_distribution(scope, concept_metadata: pd.DataFrame, merged_meta: p
         plot_cumulative_layer_distribution(global_dist, out_dir, suffix, title_detail)
         plot_cumulative_layer_distribution_sorted(global_dist, out_dir, suffix, title_detail)
 
-        save_descriptor_tables(concept_df, category_df, out_dir, "layer_location", LOCATION_DESCRIPTORS, suffix,
-                               category_extra=("pearson_correlation_distributions",))
+        save_descriptor_tables(concept_df, category_df, out_dir, "layer_location", LOCATION_DESCRIPTORS, suffix)
         log.info("  Generating peak vs. average layer distributions plot...")
         plot_peak_average_distributions(axis_df, concept_metadata, concept_df, category_df, out_dir, suffix)
         log.info("  Generating average-layer violin plot...")
@@ -590,7 +578,7 @@ SHAPE_SUMMARY_LABELS = {
     "entropy_mean_categories": "Mean entropy, category labels (bits)",
     "entropy_mean_concepts": "Mean entropy, concepts (bits)",
     "gearys_c_mean_concepts": "Mean Geary's C, concepts",
-    "r_shannon_entropy_vs_expert_count": "r, entropy vs expert count",
+    "rho_shannon_entropy_vs_expert_count": "ρ, entropy vs expert count",
 }
 
 
@@ -690,28 +678,25 @@ def entropy_expert_count_data(concept_entropy_df: pd.DataFrame, category_entropy
 
 def plot_entropy_vs_expert_count(concept_entropy_df: pd.DataFrame, category_entropy_df: pd.DataFrame,
                                  corr_dir, n_total_relevant: int) -> dict:
-    """Entropy against expert count over both abstraction levels."""
+    """Entropy against expert count over both abstraction levels, with the least-squares line and the pooled
+    Spearman rho."""
     data = entropy_expert_count_data(concept_entropy_df, category_entropy_df)
-    save_dataframe(data[['concept', 'group', 'shannon_entropy', 'experts_count']],
+    clean, summary_row = regression_row(data, 'shannon_entropy', 'experts_count',
+                                        "shannon_entropy_vs_expert_count", n_total_relevant)
+    x_score, y_score = score_column('shannon_entropy'), score_column('experts_count')
+    save_dataframe(clean[['concept', 'group', 'shannon_entropy', 'experts_count', x_score, y_score]],
                    corr_dir / "shannon_entropy_vs_expert_count.csv")
-    _, summary_row = regression_row(data, 'shannon_entropy', 'experts_count',
-                                    "shannon_entropy_vs_expert_count", n_total_relevant)
-    n = summary_row["n_points"]
     fig, ax = plt.subplots(figsize=(7.5, 6.5))
     for group, marker, size in (("Specific Concepts", 'o', 30), ("Broad Categories", 'D', 80)):
-        group_data = data[data['group'] == group]
+        group_data = clean[clean['group'] == group]
         ax.scatter(group_data['shannon_entropy'], group_data['experts_count'], s=size, marker=marker,
                    color=LEVEL_COLORS[group], edgecolor='white', linewidth=0.4, alpha=0.8, label=group)
-    fitted = summary_row["pearson_r"] is not None
-    if fitted:
-        sns.regplot(data=data, x='shannon_entropy', y='experts_count', scatter=False, ax=ax, seed=0,
-                    color=CORRELATION_COLORS["line"], line_kws={'linewidth': 1.8})
-    set_title(ax, "Shannon entropy against expert count",
-              stats_line("Pearson r", summary_row["pearson_r"], summary_row["pearson_p"], n)
-              if fitted else coverage_line(n, n_total_relevant))
+    handles = draw_regression(ax, clean['shannon_entropy'], clean['experts_count'],
+                              fit=summary_row["spearman_rho"] is not None, scatter=False)
+    set_title(ax, "Shannon entropy against expert count", panel_detail(summary_row))
     ax.set_xlabel("Shannon entropy (bits)")
     ax.set_ylabel("Expert count")
-    ax.legend()
+    ax.legend(handles=ax.get_legend_handles_labels()[0] + handles)
     fig.tight_layout()
     fig.savefig(corr_dir / "shannon_entropy_vs_expert_count.png", dpi=300)
     plt.close(fig)
@@ -885,7 +870,7 @@ def run_distribution_shape(scope, concept_metadata: pd.DataFrame, descriptors: l
     concept_df, category_df = descriptors[0][3], descriptors[0][4]
     log.info(f"  [{scope.label}] Generating correlation plots...")
     summary_df = plot_distribution_correlations(concept_df, category_df, concept_metadata, out_dir)
-    return scope_summary_row(scope, **_summarize_shape(concept_df, category_df), **panel_r_columns(summary_df))
+    return scope_summary_row(scope, **_summarize_shape(concept_df, category_df), **panel_rho_columns(summary_df))
 
 
 # ---------------------------------------------------------------------------
@@ -893,7 +878,7 @@ def run_distribution_shape(scope, concept_metadata: pd.DataFrame, descriptors: l
 # ---------------------------------------------------------------------------
 
 def compute_sublayer_informativeness(expert_allocation_df: pd.DataFrame, concept_metadata: pd.DataFrame,
-                                     dist_dir, n_permutations: int = 9999, seed: int = 42) -> pd.DataFrame:
+                                     dist_dir) -> pd.DataFrame:
     """Per (level, sublayer): category alignment, Geary's C, expert share, and block-axis distribution descriptors."""
     df = expert_allocation_df.copy()
     df["sublayer"] = df["layer_name"].astype(str).str.extract(r"^\d+\.L\.\d+\.(.+)$")[0]
@@ -904,13 +889,12 @@ def compute_sublayer_informativeness(expert_allocation_df: pd.DataFrame, concept
     level_of = concept_metadata.set_index("concept")["abstraction_level"].to_dict()
     concepts = sorted(c for c in df["concept"].unique() if pd.notna(categories.get(c)))
     concept_categories = np.array([categories[c] for c in concepts])
-    rng = np.random.default_rng(seed)
 
     total_experts = len(df)
     rows = []
     for sublayer, sub_df in df.groupby("sublayer", sort=False):
         pair_similarity = pair_similarity_vector(sub_df, concepts)
-        alignment = category_alignment_metrics(pair_similarity, concept_categories, n_permutations, rng)
+        alignment = category_alignment_metrics(pair_similarity, concept_categories)
 
         word_counts = sub_df.pivot_table(index="concept", columns="layer_idx", values="unit",
                                          aggfunc="count", fill_value=0).reindex(columns=layers_of[sublayer],
@@ -934,7 +918,8 @@ def compute_sublayer_informativeness(expert_allocation_df: pd.DataFrame, concept
                 "abstraction_level": level,
                 "sublayer": sublayer,
                 "gearys_c": word_gearys[word_levels == level].mean(),
-                **(alignment if level == 2 else {key: np.nan for key in alignment}),
+                "roc_auc": alignment["roc_auc"] if level == 2 else np.nan,
+                "mantel_p": alignment["mantel_p"] if level == 2 else np.nan,
                 "share_of_all_experts_pct": 100 * n_level_experts / total_experts,
                 "n_experts": n_level_experts,
                 "n_words": len(words),
@@ -1050,7 +1035,7 @@ def run_sublayer_informativeness(scope, concept_metadata: pd.DataFrame, out_dir)
     if not ranked.empty:
         top = ranked.iloc[0]
         log.info(f"  Sublayer informativeness written, top by level-2 category alignment: {top['sublayer']} "
-                 f"(ROC-AUC {top['roc_auc']:.3f}, r {top['category_alignment_r']:.3f})")
+                 f"(ROC-AUC {top['roc_auc']:.3f}, Mantel p {top['mantel_p']:.4f})")
 
 
 # ---------------------------------------------------------------------------

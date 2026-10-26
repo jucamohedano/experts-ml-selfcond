@@ -41,12 +41,12 @@ from statsmodels.nonparametric.smoothers_lowess import lowess
 
 from utils.logging_and_io import save_dataframe
 from modules.shared_expert_set_measures import pair_similarity_vector, pair_shared_count_vector
-from utils.statistics import spearman_brown
+from utils.statistics import permutation_p, reassignments, spearman_brown, spearman_test
 from core.embedding_cache import layer_slice
 from core.expert_data_loading import filter_expert_data_to_sublayer
 from utils.plotting import (_plot_heatmap_with_leaders, build_category_color_map, fig_width_for,
                             apply_rotated_leader_labels, plot_hexbin_with_trends,
-                            set_title, twin_axis, SERIES_COLORS, SEQUENTIAL_CMAP, DENSITY_CMAP)
+                            set_title, stats_line, twin_axis, SERIES_COLORS, SEQUENTIAL_CMAP, DENSITY_CMAP)
 
 log = logging.getLogger(__name__)
 
@@ -60,6 +60,7 @@ ROBUSTNESS_METRIC = "cosine_raw"
 # the headline, the plateau and the thirds contrast. Running them for every layer of a
 # 196-layer model would dominate the runtime without informing any reported claim.
 N_BOOTSTRAP = 1000
+BOOTSTRAP_SEED = 42
 
 # Per-row defaults for the columns compute_embedding_rsa_sweep only fills in
 # conditionally (chosen sublayer, primary metric, split-half cache present).
@@ -113,47 +114,16 @@ def _offdiag(square_matrix: np.ndarray) -> np.ndarray:
     return square_matrix[np.triu_indices(n, k=1)]
 
 
-def _rank_square(square_matrix: np.ndarray, centre: bool = False) -> np.ndarray:
-    """Square matrix holding the ranks of the off-diagonal values, mirrored into both triangles with a zero diagonal, so that permuting rows and columns permutes the ranks with them."""
-    n = square_matrix.shape[0]
-    iu = np.triu_indices(n, k=1)
-    ranks = stats.rankdata(square_matrix[iu])
-    if centre:
-        ranks = ranks - ranks.mean()
-    out = np.zeros((n, n), dtype=np.float64)
-    out[iu] = ranks
-    return out + out.T
+def rdm_mantel(rdm_a: np.ndarray, rdm_b: np.ndarray) -> tuple:
+    """Spearman rho between the off-diagonals of two square similarity matrices with its two-sided Mantel p."""
+    test = spearman_test(_offdiag(rdm_a), _offdiag(rdm_b), pairs=np.triu_indices(len(rdm_a), k=1))
+    return test["rho"], test["p"]
 
 
-def spearman_rdm_mantel(rdm_a: np.ndarray, rdm_b: np.ndarray, n_permutations: int = 9999,
-                        rng: np.random.Generator = None) -> dict:
-    """Spearman correlation between the off-diagonals of two square RDMs, with a concept-level Mantel permutation p-value."""
-    rng = rng if rng is not None else np.random.default_rng(42)
-    n = rdm_a.shape[0]
-    a_off, b_off = _offdiag(rdm_a), _offdiag(rdm_b)
-
-    if a_off.min() == a_off.max() or b_off.min() == b_off.max():
-        return {"spearman_rho": np.nan, "mantel_p": 1.0}
-
-    rho = float(stats.spearmanr(a_off, b_off).statistic)
-
-    rank_a = _rank_square(rdm_a)
-    rank_b_centred = _rank_square(rdm_b, centre=True)
-
-    observed = float(rank_a.ravel() @ rank_b_centred.ravel())
-    n_at_least = 0
-    for _ in range(n_permutations):
-        p = rng.permutation(n)
-        if rank_a[p][:, p].ravel() @ rank_b_centred.ravel() >= observed:
-            n_at_least += 1
-
-    return {"spearman_rho": rho, "mantel_p": (1 + n_at_least) / (1 + n_permutations)}
-
-
-def bootstrap_rdm_rho_ci(rdm_a: np.ndarray, rdm_b: np.ndarray, n_boot: int = 1000,
-                         rng: np.random.Generator = None, ci: float = 95.0) -> tuple:
-    """Percentile confidence interval for the Spearman correlation between two RDMs, resampling CONCEPTS with replacement (the unit of observation, as in the Mantel null above)."""
-    rng = rng if rng is not None else np.random.default_rng(42)
+def bootstrap_rdm_rho_ci(rdm_a: np.ndarray, rdm_b: np.ndarray, n_boot: int = N_BOOTSTRAP, ci: float = 95.0) -> tuple:
+    """Percentile interval of the Spearman rho between two similarity matrices, resampling concepts with replacement
+    from a generator of its own."""
+    rng = np.random.default_rng(BOOTSTRAP_SEED)
     n = rdm_a.shape[0]
     rhos = []
     for _ in range(n_boot):
@@ -225,9 +195,7 @@ def _embedding_matrix(embedding_cache: dict, key: str, concepts: list, layer: st
 
 def compute_embedding_rsa_sweep(sublayer_expert_df: pd.DataFrame, concept_metadata: pd.DataFrame,
                                 embedding_cache: dict, layer_mapping: pd.DataFrame,
-                                sublayer_filter: str = None,
-                                n_permutations: int = 9999,
-                                seed: int = 42) -> tuple:
+                                sublayer_filter: str = None) -> tuple:
     """
     Correlate the expert-set similarity structure against the embedding similarity
     structure of sublayer_filter's own layers, and return (sweep_df, context). Every
@@ -240,9 +208,9 @@ def compute_embedding_rsa_sweep(sublayer_expert_df: pd.DataFrame, concept_metada
                               Jaccard structure and this layer's embedding structure.
                               Both sides are similarities, so a positive value means
                               concepts sharing experts also sit close in embedding space.
-      mantel_p_value         : concept-level permutation p for that rho (primary metric
-                              only). Pairs are not independent, so concepts are shuffled
-                              rather than pairs.
+      mantel_p_value         : two-sided Mantel p for that rho (primary metric only).
+                              Pairs are not independent, so concept labels are
+                              reassigned rather than pairs.
       mantel_p_fdr_bh         : Benjamini-Hochberg across the layers of one metric.
       rho_ci95_lo/hi         : concept bootstrap interval, chosen analysis sublayer only.
       noise_ceiling_splithalf : split-half reliability of this layer's embedding structure,
@@ -251,7 +219,6 @@ def compute_embedding_rsa_sweep(sublayer_expert_df: pd.DataFrame, concept_metada
       rho_over_noise_ceiling  : rho_expert_vs_embedding / noise_ceiling_splithalf.
       n_expert_units          : size of the expert pool behind the (fixed) expert side.
     """
-    rng = np.random.default_rng(seed)
     concepts = _resolve_concepts(sublayer_expert_df, concept_metadata, embedding_cache)
     if len(concepts) < 30:
         log.warning(f"  Only {len(concepts)} usable concepts, skipping module 4")
@@ -309,26 +276,20 @@ def compute_embedding_rsa_sweep(sublayer_expert_df: pd.DataFrame, concept_metada
             if metric == PRIMARY_METRIC:
                 if is_chosen:
                     chosen_sublayer_vectors[record.layer_name] = _offdiag(similarity)
-                result = spearman_rdm_mantel(expert_similarity, similarity,
-                                             n_permutations=n_permutations, rng=rng)
-                row["rho_expert_vs_embedding"] = result["spearman_rho"]
-                row["mantel_p_value"] = result["mantel_p"]
+                row["rho_expert_vs_embedding"], row["mantel_p_value"] = rdm_mantel(expert_similarity, similarity)
                 if has_halves:
                     half_a = embedding_rdm(_embedding_matrix(embedding_cache, "half_a", concepts, layer), metric)
                     half_b = embedding_rdm(_embedding_matrix(embedding_cache, "half_b", concepts, layer), metric)
                     row["noise_ceiling_splithalf"] = spearman_brown(
                         stats.spearmanr(_offdiag(half_a), _offdiag(half_b)).statistic)
                 if is_chosen:
-                    row["rho_ci95_lo"], row["rho_ci95_hi"] = bootstrap_rdm_rho_ci(
-                        expert_similarity, similarity, n_boot=N_BOOTSTRAP, rng=rng)
+                    row["rho_ci95_lo"], row["rho_ci95_hi"] = bootstrap_rdm_rho_ci(expert_similarity, similarity)
                     held_out = leave_one_out.get(record.layer_idx)
                     if held_out is not None:
-                        loo = spearman_rdm_mantel(held_out, similarity,
-                                                  n_permutations=n_permutations, rng=rng)
-                        row["rho_expert_vs_embedding_holdout"] = loo["spearman_rho"]
-                        row["mantel_p_value_holdout"] = loo["mantel_p"]
+                        row["rho_expert_vs_embedding_holdout"], row["mantel_p_value_holdout"] = rdm_mantel(
+                            held_out, similarity)
                         row["rho_holdout_ci95_lo"], row["rho_holdout_ci95_hi"] = bootstrap_rdm_rho_ci(
-                            held_out, similarity, n_boot=N_BOOTSTRAP, rng=rng)
+                            held_out, similarity)
             else:
                 # Robustness variant: point estimate only, see doc section 4.2.
                 a, b = _offdiag(expert_similarity), _offdiag(similarity)
@@ -401,8 +362,7 @@ def _middle_layer(chosen: pd.DataFrame) -> pd.Series:
     return chosen.iloc[(chosen["block"] - middle_block).abs().argmin()]
 
 
-def summarise_rsa_sweep(sweep: pd.DataFrame, context: dict, n_permutations: int = 9999,
-                        seed: int = 42) -> pd.DataFrame:
+def summarise_rsa_sweep(sweep: pd.DataFrame, context: dict) -> pd.DataFrame:
     """
     Headline table: the middle layer's RSA, the peak and its plateau, and whether the
     middle third of the network really does beat the outer thirds. Depth claims (peak,
@@ -412,8 +372,9 @@ def summarise_rsa_sweep(sweep: pd.DataFrame, context: dict, n_permutations: int 
     peak_plateau_layers: every chosen-sublayer layer whose bootstrap interval overlaps
       the peak layer's (a bare argmax would overclaim a single best layer).
     middle_third_minus_outer_rho / middle_vs_outer_perm_p: mean rho in the middle third
-      minus the mean over the outer thirds, with a permutation p from shuffling the
-      layer-to-third assignment. Restricted to the chosen sublayer.
+      minus the mean over the outer thirds, with a two-sided permutation p from reassigning
+      the layers to the thirds, exact when the assignments are few. Restricted to the
+      chosen sublayer.
     pooled_rho_vs_expert_share_spearman: how much the pooled depth curve is explained by
       expert-share-of-pool alone (the confound the leave-one-out curve corrects for).
     """
@@ -443,18 +404,12 @@ def summarise_rsa_sweep(sweep: pd.DataFrame, context: dict, n_permutations: int 
 
     thirds = depth.groupby("depth_third", observed=True)[depth_column].mean()
     in_middle = (depth["depth_third"] == "middle").to_numpy()
-    rho = depth[depth_column].to_numpy()
+    observed, middle_p = np.nan, np.nan
     if in_middle.any() and (~in_middle).any():
-        observed = rho[in_middle].mean() - rho[~in_middle].mean()
-        rng = np.random.default_rng(seed)
-        n_at_least = 0
-        for _ in range(n_permutations):
-            shuffled = rng.permutation(in_middle)
-            if rho[shuffled].mean() - rho[~shuffled].mean() >= observed:
-                n_at_least += 1
-        middle_p = (1 + n_at_least) / (1 + n_permutations)
-    else:
-        observed, middle_p = np.nan, np.nan
+        flags = np.vstack([in_middle, in_middle[reassignments(in_middle)]])
+        rho = depth[depth_column].to_numpy()
+        contrast = flags @ rho / flags.sum(axis=1) - (~flags) @ rho / (~flags).sum(axis=1)
+        observed, middle_p = contrast[0], permutation_p(contrast[0], contrast[1:])
 
     return pd.DataFrame([{
         "middle_layer_name": middle["layer_name"],
@@ -559,7 +514,7 @@ def plot_rsa_layer_sweep(sweep: pd.DataFrame, summary: pd.DataFrame, out_path) -
                 ax.plot([i, i], [ax.get_ylim()[0], y], color=colour, linestyle="--",
                         linewidth=1.0, alpha=0.7, zorder=4)
 
-    ax.set_ylabel("Spearman rho, expert set against embedding (curves)")
+    ax.set_ylabel("Spearman ρ, expert set against embedding (curves)")
     ax.set_xlabel("Layer (in depth order)")
     set_title(ax, "Expert-set semantics against embedding semantics across depth",
               "grey bars show each layer's share of the pooled expert set")
@@ -597,7 +552,7 @@ def plot_sublayer_comparison(comparison_df: pd.DataFrame, sweeps_by_sublayer: di
     top.set_yticklabels(order["sublayer"])
     for yi, n in zip(y, order["n_expert_units"]):
         top.annotate(f"n={n:,}", (0.005, yi), fontsize=8, va="center", color="#555")
-    top.set_xlabel("Spearman rho, expert set against embedding (middle block)")
+    top.set_xlabel("Spearman ρ, expert set against embedding (middle block)")
     set_title(top, "Which sublayer's expert set best resembles the embedding semantics")
     top.legend(loc="lower right")
     top.grid(axis="y", visible=False)
@@ -677,7 +632,7 @@ def plot_rdm_comparison(expert_similarity: np.ndarray, embedding_similarity: np.
                                    category_boundaries=boundaries)
 
 
-def _scatter_rankrank(x: np.ndarray, y: np.ndarray, out_path, layer_name: str) -> None:
+def _scatter_rankrank(x: np.ndarray, y: np.ndarray, out_path, layer_name: str, detail: str = None) -> None:
     """Rank-rank density, the relationship Spearman rho actually measures, avoiding the
     zero-inflation of raw Jaccard dominating the visual."""
     fig, ax = plt.subplots(figsize=(8, 7))
@@ -685,7 +640,7 @@ def _scatter_rankrank(x: np.ndarray, y: np.ndarray, out_path, layer_name: str) -
     fig.colorbar(hb, ax=ax, label="Concept pairs (log)")
     ax.set_xlabel("Rank of expert Jaccard")
     ax.set_ylabel(f"Rank of embedding similarity ({layer_name})")
-    set_title(ax, "Rank-rank density of concept pairs", "the relationship Spearman rho measures")
+    set_title(ax, "Rank-rank density of concept pairs", detail)
     ax.grid(False)
     plt.tight_layout()
     plt.savefig(out_path, dpi=300, bbox_inches="tight")
@@ -744,7 +699,7 @@ def _scatter_binned(shared: np.ndarray, y: np.ndarray, same: np.ndarray, out_pat
 
 def plot_rsa_scatter(expert_similarity: np.ndarray, embedding_similarity: np.ndarray, shared_counts: np.ndarray,
                      concepts: list, concept_metadata: pd.DataFrame, layer_name: str,
-                     out_path) -> None:
+                     out_path, detail: str = None) -> None:
     """
     The concept pairs behind the headline rho, three variants for selection (the plain
     hexbin on raw Jaccard is unreadable: Jaccard is zero-inflated so almost every point
@@ -762,9 +717,9 @@ def plot_rsa_scatter(expert_similarity: np.ndarray, embedding_similarity: np.nda
 
     base = out_path.with_suffix("")
     _scatter_binned(shared_counts, y, same, base.with_name(base.name + "_binned.png"), layer_name)
-    _scatter_rankrank(x, y, base.with_name(base.name + "_rankrank.png"), layer_name)
+    _scatter_rankrank(x, y, base.with_name(base.name + "_rankrank.png"), layer_name, detail)
     plot_hexbin_with_trends(x, y, same, base.with_name(base.name + "_hexbin.png"),
-                            "Expert Jaccard", f"Embedding similarity ({layer_name})")
+                            "Expert Jaccard", f"Embedding similarity ({layer_name})", detail=detail)
 
 
 # ---------------------------------------------------------------------------
@@ -785,8 +740,11 @@ def _write_analysis_sublayer_extras(summary: pd.DataFrame, context: dict, embedd
     plot_rdm_comparison(context["expert_similarity"], similarity, context["concepts"],
                         concept_metadata, headline, rsa_dir)
     shared_counts = pair_shared_count_vector(context["expert_rows"], context["concepts"])
+    n = len(context["concepts"])
+    detail = stats_line("Spearman ρ", summary["middle_spearman_rho"].iloc[0], summary["middle_mantel_p"].iloc[0],
+                        n * (n - 1) // 2, p_label="Mantel p")
     plot_rsa_scatter(context["expert_similarity"], similarity, shared_counts, context["concepts"],
-                     concept_metadata, headline, rsa_dir / "rsa_pairs_scatter.png")
+                     concept_metadata, headline, rsa_dir / "rsa_pairs_scatter.png", detail)
 
     rdms = rsa_dir / "rdms"
     rdms.mkdir(parents=True, exist_ok=True)
@@ -801,8 +759,7 @@ def _write_analysis_sublayer_extras(summary: pd.DataFrame, context: dict, embedd
 def execute_module_4_embedding_rsa(sublayer_expert_df: pd.DataFrame, concept_metadata: pd.DataFrame,
                                    rsa_dir, embedding_cache: dict, layer_mapping: pd.DataFrame,
                                    sublayer_filter: str = None, full_expert_df: pd.DataFrame = None,
-                                   sublayer_rank: dict = None, sweep_sublayers: bool = True,
-                                   n_permutations: int = 9999, seed: int = 42) -> tuple:
+                                   sublayer_rank: dict = None, sweep_sublayers: bool = True) -> tuple:
     """
     Execute Module 4: expert set versus embedding semantics. See
     documentation/module_4_embedding_rsa.md for the full pipeline description.
@@ -853,14 +810,13 @@ def execute_module_4_embedding_rsa(sublayer_expert_df: pd.DataFrame, concept_met
 
         log.info(f"  [{sublayer}] correlating expert-set similarity against embedding similarity...")
         sweep, context = compute_embedding_rsa_sweep(
-            sub_df, concept_metadata, embedding_cache, layer_mapping,
-            sublayer_filter=sublayer, n_permutations=n_permutations, seed=seed)
+            sub_df, concept_metadata, embedding_cache, layer_mapping, sublayer_filter=sublayer)
         if sweep.empty:
             continue
         save_dataframe(sweep, target_dir / "embedding_rsa_layer_sweep.csv")
         sweeps_by_sublayer[sublayer] = sweep
 
-        summary = summarise_rsa_sweep(sweep, context, n_permutations=n_permutations, seed=seed)
+        summary = summarise_rsa_sweep(sweep, context)
         if not summary.empty:
             save_dataframe(summary, target_dir / "embedding_rsa_summary.csv")
             row = summary.iloc[0]

@@ -57,27 +57,35 @@ $$\mathrm{JSD}(P \,\|\, Q) = \tfrac{1}{2} D_{\mathrm{KL}}(P \,\|\, M) + \tfrac{1
 
 $$\bar{D}_k = \binom{|M_k|}{2}^{-1} \sum_{\substack{m_i, m_j \in M_k \\ i < j}} \mathrm{JSD}\!\left(p_{m_i} \,\|\, p_{m_j}\right),$$
 
-undefined (NaN) when $|M_k| < 2$. High $\bar{D}_k$ means the members themselves disagree about which layers matter, and the hypothesis under test is a positive relationship between $\bar{D}_k$ and $\mathrm{JSD}(P\|Q)$, since internally dispersed categories should be harder for a single label profile to represent. The test statistic is the Pearson correlation across categories, $r = \operatorname{corr}\big(\mathrm{JSD}(P\|Q),\, \bar{D}\big)$, annotated on the plot.
+undefined (NaN) when $|M_k| < 2$. High $\bar{D}_k$ means the members themselves disagree about which layers matter, and the hypothesis under test is a positive relationship between $\bar{D}_k$ and $\mathrm{JSD}(P\|Q)$, since internally dispersed categories should be harder for a single label profile to represent. The test statistic is the Spearman correlation across categories, $\rho = \operatorname{corr}\big(R(\mathrm{JSD}(P\|Q)),\, R(\bar{D})\big)$ with $R$ the average ranks over the categories, annotated on the plot with an exact permutation p.
+
+**The exact permutation p.** With 8 categories a parametric p would rest on a normality that 8 points cannot show, and one category moved Pearson's $r$ by up to 0.33 on the nopad trees, so since 17 October 2026 the p comes from permutations, and since 19 October through `jsd_correlation`, which calls `utils/statistics.spearman_test`, the one test of the README's *Correlations and permutation tests*. With $K$ categories it pairs the first variable with every one of the $K!$ orderings of the second and reports
+
+$$p = \frac{\#\{\pi : |\rho^{(\pi)}| \ge |\rho|\}}{K!},$$
+
+two-sided and exact, 40,320 orderings at $K = 8$, with the identity among them, so the smallest attainable p is $2/8! \approx 5 \times 10^{-5}$ when the categories are perfectly ordered. Above $9! = 362{,}880$ orderings it draws 9,999 random orderings from a generator of its own instead and reports $(1 + \text{hits})/(9{,}999 + 1)$. On GPT-2's nopad tree at AP 0.6, block axis, the grey line of the entropy panel reads `Spearman ρ = -0.79, p = 2.8e-02, n = 8`. `check_spearman_panels` confirms the $2/8!$ floor and that on unrelated data the exact p stays close to scipy's approximation.
 
 **Generated data structures.** The `avg_member_diversity_jsd` column ($\bar{D}_k$) of `dual_category_jsd{suffix}.csv` above, and one plot:
 
-- `scatter_jsd_vs_member_diversity{suffix}.png`, a **scatter plot with a linear regression line**, x: `jensen_shannon_divergence` ($\mathrm{JSD}(P\|Q)$, "Label vs. Averaged Members Divergence"), y: `avg_member_diversity_jsd` ($\bar{D}_k$, "Average Pairwise Member Divergence"), one point per category (annotated with the category name), Pearson $r$/$p$ in the title.
+- `scatter_jsd_vs_member_diversity{suffix}.png`, a scatter of the raw values, x: `jensen_shannon_divergence` ($\mathrm{JSD}(P\|Q)$), labelled "Jensen-Shannon divergence, label against member average (bits)" over the direction line "high overlap (exemplar) to low overlap (prototype)", y: `avg_member_diversity_jsd` ($\bar{D}_k$), labelled "Average pairwise member divergence (bits)" over "high cohesion to high internal diversity", one point per category (annotated with the category name), the least-squares line over the eight categories, a legend naming it, and Spearman $\rho$ with its permutation p on the grey line under the title. The line is a visual guide, and the exact p over all $8!$ orderings carries the uncertainty, since a bootstrap band over eight points would cover the true line only about 88% of the time. The FINAL trees and the nopad trees written before 20 October 2026 draw a 95% bootstrap band about the line.
 
 ### 3.3 Label concentration vs. divergence
 
-**Mathematical formulation.** The second explanatory hypothesis is that how *concentrated* a label's own allocation is predicts how far it sits from its members' average: a label with a sharp, low-entropy profile (small $H(P)$) has all its mass in few layers, so unless the members peak in exactly those layers, the mixture comparison will find large gaps. The test is the Pearson correlation across categories between the two scalars defined in 3.1:
+**Mathematical formulation.** The second explanatory hypothesis is that how *concentrated* a label's own allocation is predicts how far it sits from its members' average: a label with a sharp, low-entropy profile (small $H(P)$) has all its mass in few layers, so unless the members peak in exactly those layers, the mixture comparison will find large gaps. The test is the Spearman correlation across categories between the two scalars defined in 3.1, with the exact permutation p of section 3.2:
 
-$$r = \operatorname{corr}\big(\mathrm{JSD}(P \,\|\, Q),\; H(P)\big),$$
+$$\rho = \operatorname{corr}\big(R(\mathrm{JSD}(P \,\|\, Q)),\; R(H(P))\big),$$
 
-with a *negative* $r$ meaning more concentrated labels (lower entropy) diverge more from their member average.
+with a *negative* $\rho$ meaning more concentrated labels (lower entropy) diverge more from their member average.
 
 **Generated data structures.** No new CSV columns (both variables already live in `dual_category_jsd{suffix}.csv`), only one plot:
 
-- `scatter_jsd_vs_entropy{suffix}.png`, a **scatter plot with a linear regression line**, x: `jensen_shannon_divergence` ($\mathrm{JSD}(P\|Q)$), y: `shannon_entropy_label` ($H(P)$), one point per category (annotated with the category name), Pearson $r$/$p$ in the title.
+- `scatter_jsd_vs_entropy{suffix}.png`, the same scatter with y `shannon_entropy_label` ($H(P)$), labelled "Shannon entropy of the category label (bits)" over "concentrated to uniform".
+
+Both figures come from one function, `plot_category_scatter`, called once per entry of `CATEGORY_PANELS`, the file stem, y column, y label and title of each panel. Trees written before 19 October 2026 hold the same raw figures, with the y label of the diversity panel reading "(JSD)" in place of "(bits)". The coefficients and p are unchanged.
 
 ## Results
 
-*Scope note.* The 17-category figures below are **legacy**, from the 150-concept run. The Richie-HSJ tables are whole-model scope on the block axis from the final trees, GPT-2 in `research_plots_gpt2_richie_hsj_restructured_final` and Qwen3-1.7B-Base, called Qwen3 below, in `research_plots_qwen_base_richie_hsj_FINAL`, where there are only **8 categories**, so every correlation in this module rests on n=8 and none of it should be read as more than suggestive.
+*Scope note.* The 17-category figures below are **legacy**, from the 150-concept run. The Richie-HSJ tables are whole-model scope on the block axis from the final trees, GPT-2 in `research_plots_gpt2_richie_hsj_restructured_final` and Qwen3-1.7B-Base, called Qwen3 below, in `research_plots_qwen_base_richie_hsj_FINAL`, where there are only **8 categories**, so every correlation in this module rests on n=8 and none of it should be read as more than suggestive. The correlations they quote are Pearson's $r$, read before the switch to Spearman on 17 October 2026.
 
 **Legacy.** In the 150-concept run at AP=0.6, categories vary a lot in how well their label represents their members: JSD ranges 4x across the 17 categories, from **0.064** (animal, well aligned) to **0.248** (furniture, poorly aligned). Of the two relationships this module tests, only one holds up at that threshold: **label entropy predicts divergence** (r=-0.60, p=0.011, n=17), while **internal member diversity does not** (r=0.32, p=0.21, n=17).
 

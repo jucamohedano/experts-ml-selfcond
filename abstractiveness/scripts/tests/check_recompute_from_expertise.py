@@ -10,7 +10,8 @@ Checks, on the whole model and the block axis wherever depth order matters:
   4. 2.1 Jaccard and overlap of every member with its label, and the core shared by every member.
   5. 2.2 the pairwise Jaccard matrix and the category-mean matrix.
   6. 2.3 Spearman rho of Jaccard and of the probing-text TF-IDF against the human ratings, and the partial rho.
-  7. 2.4 and 2.5 the Pearson correlations and the four partial correlations.
+  7. 2.4 and 2.5 Spearman's rho of every panel, over all words or, when a variable is defined relative to the
+     category, as the size-weighted mean of the per-category rho, and the six rows of the two partial figures.
 
 Usage, from scripts/:
     python tests/check_recompute_from_expertise.py [--config gpt2_richie_hsj] [--ap 0.6]
@@ -34,6 +35,7 @@ from _report import run
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 EXACT, ROUNDED = 1e-9, 1e-4
+CATEGORY_RELATIVE = {"human_typicality", "jaccard_pct", "overlap_pct"}
 
 
 def read_experts(job: tuple) -> tuple:
@@ -51,14 +53,24 @@ def geary(values) -> float:
     return np.nan if len(values) < 3 or spread == 0 else float((np.diff(values) ** 2).sum() / (2 * spread))
 
 
-def residual_partial(frame: pd.DataFrame, x: str, y: str, controls: list) -> float:
-    """Pearson r of x and y after least-squares regression of both on the controls, categories as indicators."""
-    frame = frame.dropna(subset=[x, y, *controls])
-    design = pd.get_dummies(frame[controls], drop_first=True, dtype=float)
-    design.insert(0, "intercept", 1.0)
-    residual = lambda column: frame[column] - design.to_numpy() @ np.linalg.lstsq(design.to_numpy(), frame[column],
-                                                                                  rcond=None)[0]
+def rank_partial(frame: pd.DataFrame, x: str, y: str, controls: tuple) -> float:
+    """Spearman rho of x and y partial on the controls, the Pearson r of their ranks' residuals on the controls'."""
+    ranks = frame[[x, y, *controls]].rank()
+    design = np.column_stack([np.ones(len(ranks)), ranks[list(controls)].to_numpy()])
+    residual = lambda column: ranks[column] - design @ np.linalg.lstsq(design, ranks[column], rcond=None)[0]
     return pearsonr(residual(x), residual(y)).statistic
+
+
+def spearman(frame: pd.DataFrame, x: str, y: str, controls: tuple = (), within: bool = False) -> float:
+    """rank_partial over every word, or within each category averaged with weights proportional to its size, leaving
+    out categories smaller than three words plus one per control."""
+    frame = frame.dropna(subset=[x, y, *controls, *(["category"] if within else [])])
+    if not within:
+        return rank_partial(frame, x, y, controls)
+    rhos = [(rank_partial(group, x, y, controls), len(group)) for _, group in frame.groupby("category")
+            if len(group) >= 3 + len(controls)]
+    rhos = [(rho, n) for rho, n in rhos if np.isfinite(rho)]
+    return float(np.average([rho for rho, _ in rhos], weights=[n for _, n in rhos]))
 
 
 class Recomputed:
@@ -235,7 +247,7 @@ def check_human(m: Recomputed, jaccard: np.ndarray, failures: list) -> None:
 
 
 def check_correlations(m: Recomputed, failures: list) -> int:
-    """Sections 2.4 and 2.5, every Pearson r and partial r of the correlation summaries."""
+    """Sections 2.4 and 2.5, the Spearman rho of every named panel of the correlation summaries."""
     section = m.tree / "2_similarities"
     corpus = m.cfg["frequency_corpus"]
     pairs = pd.read_csv(section / "2.1_category_concept_similarities/category_concept_similarity_metrics.csv")
@@ -244,31 +256,34 @@ def check_correlations(m: Recomputed, failures: list) -> int:
     frame["human_typicality"] = frame["concept"].map(m.meta[m.cfg["typicality_column"]]).astype(float)
     frame["frequency"] = frame["concept"].map(m.meta[f"frequency_zipf_{corpus}_lemma"]).astype(float)
     frame["category"] = frame["concept"].map(m.meta["category"])
-    r = lambda x, y: pearsonr(*frame.dropna(subset=[x, y])[[x, y]].to_numpy().T).statistic
+    names = {"human_typicality": "human_typicality", "expert_count": "expert_count", "jaccard_pct": "jaccard",
+             "overlap_pct": "overlap", "frequency": f"frequency_{corpus}"}
+
+    def grouped(x: str, ys: list) -> dict:
+        return {f"{names[x]}_vs_{names[y]}": spearman(frame, x, y, within=bool({x, y} & CATEGORY_RELATIVE))
+                for y in ys}
+
+    def partials(x: str, other: str) -> dict:
+        data, base = frame.dropna(subset=[x, "jaccard_pct", other, "category"]), f"partial_correlation_jaccard_{x}"
+        return {f"{base}_no_control": spearman(data, x, "jaccard_pct"),
+                base: spearman(data, x, "jaccard_pct", (other,)),
+                f"{base}_within_given_{other}": spearman(data, x, "jaccard_pct", (other,), within=True)}
+
     expected = {
-        "2.4_typicality": {
-            "human_typicality_vs_expert_count": r("human_typicality", "expert_count"),
-            "human_typicality_vs_jaccard": r("human_typicality", "jaccard_pct"),
-            "human_typicality_vs_overlap": r("human_typicality", "overlap_pct"),
-            f"human_typicality_vs_frequency_{corpus}": r("human_typicality", "frequency"),
-            "partial_correlation_jaccard_human_typicality":
-                residual_partial(frame, "human_typicality", "jaccard_pct", ["frequency"]),
-            "partial_correlation_jaccard_human_typicality_category":
-                residual_partial(frame, "human_typicality", "jaccard_pct", ["frequency", "category"])},
-        "2.5_frequency_correlations": {
-            f"frequency_{corpus}_vs_expert_count": r("frequency", "expert_count"),
-            f"frequency_{corpus}_vs_jaccard": r("frequency", "jaccard_pct"),
-            f"frequency_{corpus}_vs_overlap": r("frequency", "overlap_pct"),
-            "partial_correlation_jaccard_frequency": residual_partial(frame, "frequency", "jaccard_pct",
-                                                                      ["human_typicality"]),
-            "partial_correlation_jaccard_frequency_category":
-                residual_partial(frame, "frequency", "jaccard_pct", ["human_typicality", "category"])},
+        "2.4_typicality": grouped("human_typicality", ["expert_count", "jaccard_pct", "overlap_pct", "frequency"])
+        | partials("human_typicality", "frequency"),
+        "2.5_frequency_correlations": grouped("frequency", ["expert_count", "jaccard_pct", "overlap_pct",
+                                                            "human_typicality"])
+        | partials("frequency", "human_typicality"),
     }
     compared = 0
     for folder, values in expected.items():
-        summary = pd.read_csv(section / folder / "correlation_summary.csv").set_index("plot_name")["pearson_r"]
+        summary = pd.read_csv(section / folder / "correlation_summary.csv").set_index("plot_name")["spearman_rho"]
         for name, value in values.items():
-            if name not in summary.index or pd.isna(summary[name]):
+            if name not in summary.index:
+                failures.append(f"{folder} {name}: no row in correlation_summary.csv")
+                continue
+            if pd.isna(summary[name]):
                 continue
             compared += 1
             if abs(value - summary[name]) > EXACT:

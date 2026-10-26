@@ -83,6 +83,7 @@ from modules.shared_layer_profile_measures import (pair_layer_profile_vectors,
                                                    layer_profile_metric_matrices,
                                                    profile_metric_label)
 from core.human_similarity_ratings import human_pair_lookup, human_noise_ceiling
+from utils.statistics import permutation_p, reassignments, spearman_test
 from utils.plotting import (COMPARISON_STYLE, COMPARISON_COLORS, comparison_legend,
                             build_category_color_map, annotate_barh_values, style_comparison_axis,
                             comparison_panel_height, set_title, set_suptitle, SERIES_COLORS)
@@ -195,7 +196,7 @@ def build_feature_grid(metrics: list) -> list:
 def nested_pairs(grid: list) -> list:
     """(reduced, full) cell pairs where full extends reduced by exactly one role,
     within one metric, the jaccard cell serving as the reduced model for both
-    two-feature cells. These are the well-defined partial F comparisons."""
+    two-feature cells. Study B compares each pair by a paired t over the held-out categories."""
     pairs = []
     for full in grid:
         for reduced in grid:
@@ -288,18 +289,15 @@ CHANCE_ACCURACY = 0.5
 def _model():
     """Standardised linear regression, Study B's estimator and nothing else.
 
-    Its only two consumers are both inside Study B, run_pair_similarity's cross_val_predict
-    over the pair table and the in-sample fits of _partial_f_test, so the units it ever sees
-    are the 2,391 within-category PAIRS and never the concepts of Study A. It is not the
-    regression baseline of Study A, which is a separate cross-validated ridge built inline in
-    run_typicality_ranking.
+    Its only consumer is run_pair_similarity's cross_val_predict over the pair table, so the
+    units it ever sees are the 2,391 within-category PAIRS and never the concepts of Study A.
+    It is not the regression baseline of Study A, which is a separate cross-validated ridge
+    built inline in run_typicality_ranking.
 
     Unpenalised least squares because a Study B cell carries at most three predictors on
     those pairs, where there is nothing to regularise, and because an unpenalised fit keeps
     the coefficients readable as the change in rated similarity per standard deviation of a
-    feature. The partial F test additionally requires an unpenalised fit, since its residual
-    sums of squares and its degrees of freedom are only the quantities the F distribution
-    describes when neither model is shrunk.
+    feature.
     """
     return make_pipeline(StandardScaler(), LinearRegression())
 
@@ -393,38 +391,6 @@ def build_design_frame(expert_allocation_df: pd.DataFrame, concept_metadata: pd.
         design[cols["z"]] = [z[item_row[c], item_row[k]]
                              for c, k in zip(design["concept"], design["category"])]
     return design.dropna(subset=[TARGET, "jaccard_pct"]).reset_index(drop=True)
-
-
-def _partial_f_test(y: np.ndarray, X_reduced: np.ndarray, X_full: np.ndarray) -> tuple:
-    """
-    Partial F test for the terms present in X_full but not X_reduced, fitted in sample.
-
-    Complements the cross-validated gain rather than replacing it. The F test asks whether
-    the added feature explains significantly more variance in THIS sample, which is a
-    question about the fitted coefficient, while the cross-validated gain asks whether it
-    helps predict pairs the model has not seen. A feature can pass one and fail the
-    other, and both readings are reported.
-
-    Its only caller is Study B, whose unit is the within-category PAIR, so both n and the
-    held-out units of the companion cross-validated gain are pairs and not concepts.
-    """
-    n = len(y)
-    p_reduced, p_full = X_reduced.shape[1], X_full.shape[1]
-    if p_full <= p_reduced or n <= p_full + 1:
-        return np.nan, np.nan
-
-    rss = []
-    for X in (X_reduced, X_full):
-        model = _model().fit(X, y)
-        rss.append(float(np.sum((y - model.predict(X)) ** 2)))
-    rss_reduced, rss_full = rss
-
-    df_num = p_full - p_reduced
-    df_den = n - p_full - 1
-    if rss_full <= 0 or df_den <= 0:
-        return np.nan, np.nan
-    f_stat = ((rss_reduced - rss_full) / df_num) / (rss_full / df_den)
-    return float(f_stat), float(stats.f.sf(f_stat, df_num, df_den))
 
 
 def _ranker():
@@ -914,10 +880,11 @@ def plot_pair_similarity(results: pd.DataFrame, per_category: pd.DataFrame, out_
     """
     Study B: agreement with the human pair ratings, and where it comes from.
 
-    Left, every cell of the generated grid against the mean per-category Spearman, with the
-    human noise ceiling drawn as a reference line. The ceiling is what makes the bar heights
-    readable, an agreement of 0.58 is not 58 percent of the way to a perfect model, it is 65
-    percent of the way to what the raters themselves manage, and no model can pass that line.
+    Left, every cell of the generated grid against the pair-weighted mean per-category
+    Spearman, with the human noise ceiling drawn as a reference line. The ceiling is what makes
+    the bar heights readable, an agreement of 0.58 is not 58 percent of the way to a perfect
+    model, it is 65 percent of the way to what the raters themselves manage, and no model can
+    pass that line.
 
     Right, the same comparison resolved per held-out category, the Jaccard cell against the
     fullest cell. This panel exists because gains from the layer profile elsewhere in this
@@ -988,7 +955,7 @@ def plot_pair_similarity(results: pd.DataFrame, per_category: pd.DataFrame, out_
                          lambda value: f"{value:.3f}  ({value / ceiling:.0%} of ceiling)")
     bold = [label for label, (model, _) in zip(labels, order) if model in HEADLINE_CELLS]
     style_comparison_axis(left_axis, labels, "Agreement with human pair similarity",
-                          "Spearman with human ratings, mean over categories", bold=bold)
+                          "Spearman ρ with human ratings, weighted mean over categories", bold=bold)
     comparison_legend(left_axis, ncol=2)
 
     if not pivot.empty:
@@ -1011,7 +978,7 @@ def plot_pair_similarity(results: pd.DataFrame, per_category: pd.DataFrame, out_
                             label="Category noise ceiling" if index == 0 else None)
         right_axis.set_xlim(0.0, 1.0)
         style_comparison_axis(right_axis, list(pivot.index), "Per held-out category",
-                              "Spearman with human ratings, held-out category")
+                              "Spearman ρ with human ratings, held-out category")
         comparison_legend(right_axis, ncol=3)
 
     fig.tight_layout()
@@ -1360,11 +1327,11 @@ def run_pair_similarity(design: pd.DataFrame, expert_allocation_df: pd.DataFrame
     the same identical-rows requirement study_a_columns and study_b_columns document.
 
     Returns (results, per_category), both empty when too few pairs survive. results carries
-    one row per grid cell keyed by (model, metric), with group_cv_spearman the pooled
-    out-of-fold Spearman and mean_category_spearman the mean of the per-category ones (see
-    rho_over_ceiling below for why the two are not interchangeable). per_category carries the
-    per-category rho, its noise ceiling, and rho_over_ceiling for every (model, metric,
-    category) triple with at least 10 pairs.
+    one row per grid cell keyed by (model, metric), with mean_category_spearman the
+    pair-weighted mean of the per-category out-of-fold Spearman coefficients, the noise
+    ceiling weighted alike, and per nested comparison the paired t over the held-out
+    categories. per_category carries the per-category rho, its noise ceiling, and
+    rho_over_ceiling for every (model, metric, category) triple with at least 10 pairs.
     """
     table = build_pair_similarity_design(design, expert_allocation_df, metrics, axis=axis)
     if table.empty:
@@ -1393,8 +1360,10 @@ def run_pair_similarity(design: pd.DataFrame, expert_allocation_df: pd.DataFrame
     target = table["human_similarity"].to_numpy(dtype=float)
     groups = table["category"].to_numpy()
     n_groups = table["category"].nunique()
-    present = list(table["category"].unique())
-    mean_ceiling = float(np.mean([ceilings[c] for c in present]))
+    counts = table["category"].value_counts()
+    rated = counts[counts >= 10]
+    keep = np.isin(groups, rated.index)
+    mean_ceiling = float(sum(rated[c] * ceilings[c] for c in rated.index) / rated.sum())
     results, per_category = [], []
 
     for cell in grid:
@@ -1402,37 +1371,21 @@ def run_pair_similarity(design: pd.DataFrame, expert_allocation_df: pd.DataFrame
         features = table[columns].to_numpy(dtype=float)
         predicted = cross_val_predict(_model(), features, target,
                                       cv=GroupKFold(n_splits=n_groups), groups=groups)
-        rho = float(stats.spearmanr(predicted, target).statistic)
-        per_category_rho = []
-        for category in sorted(present):
-            mask = groups == category
-            if mask.sum() < 10:
-                continue
-            category_rho = float(stats.spearmanr(predicted[mask], target[mask]).statistic)
-            per_category_rho.append(category_rho)
+        test = spearman_test(predicted[keep], target[keep], groups=groups[keep], n_draws=0)
+        for category, n_pairs, rho in zip(test["groups"], test["n_k"], test["rho_k"]):
             per_category.append({"model": cell["model"], "metric": cell["metric"],
-                                 "category": category,
-                                 "n_pairs": int(mask.sum()), "rho": round(category_rho, 4),
+                                 "category": category, "n_pairs": int(n_pairs), "rho": round(rho, 4),
                                  "noise_ceiling": round(ceilings[category], 4),
-                                 "rho_over_ceiling": round(category_rho / ceilings[category], 4)})
-        mean_rho = float(np.mean(per_category_rho))
+                                 "rho_over_ceiling": round(rho / ceilings[category], 4)})
         results.append({"model": cell["model"], "metric": cell["metric"],
                         "features": " + ".join(columns), "n_pairs": len(table),
                         "n_categories": n_groups,
-                        "group_cv_spearman": round(rho, 4),
-                        "mean_category_spearman": round(mean_rho, 4),
+                        "mean_category_spearman": round(test["rho"], 4),
                         "noise_ceiling_mean": round(mean_ceiling, 4),
-                        # Divides the MEAN over categories, not the pooled correlation. The
-                        # pooled figure carries a between-category component created by the
-                        # level miscalibration of out-of-fold predictions for a held-out
-                        # category, and can be strongly negative while every within-category
-                        # ordering is correct (Qwen3 AP 0.8: pooled -0.167, mean +0.493).
-                        # Dividing that by a ceiling would propagate the artefact.
-                        "rho_over_ceiling": round(mean_rho / mean_ceiling, 4),
-                        "pooled_rho_over_ceiling": round(rho / mean_ceiling, 4),
+                        "rho_over_ceiling": round(test["rho"] / mean_ceiling, 4),
                         "group_cv_r2": round(float(r2_score(target, predicted)), 4)})
 
-    results_df = pd.DataFrame(results)
+    results_df, per_category = pd.DataFrame(results), pd.DataFrame(per_category)
 
     # Delta against jaccard, on the mean-over-categories reading, for every non-jaccard cell.
     jaccard_mean_rho = float(
@@ -1441,23 +1394,20 @@ def run_pair_similarity(design: pd.DataFrame, expert_allocation_df: pd.DataFrame
     results_df.loc[non_jaccard, "delta_mean_rho_vs_jaccard"] = (
         results_df.loc[non_jaccard, "mean_category_spearman"] - jaccard_mean_rho)
 
-    # Partial F for every nested_pairs comparison the grid defines, attached to the row of
+    # Paired t over the held-out categories for every nested_pairs comparison, on the row of
     # the FULLER cell, one column pair per reduced model since jaccard_profile_both has two
-    # well-defined reduced models (jaccard_profile and jaccard_profile_z) and collapsing them
-    # into one column would silently overwrite one comparison with the other. Keyed on
-    # (model, metric) rather than model alone, the same principle Study A's paired t follows,
-    # since Study B has no reference factor and a second registered metric would otherwise
-    # collide on a shared cell name.
-    y = target
+    # reduced models. Keyed on (model, metric), since a second registered metric would
+    # otherwise collide on a shared cell name.
+    rho_k = per_category.pivot_table(index="category", columns=["model", "metric"], values="rho")
     for reduced, full in nested_pairs(grid):
-        f_stat, p_value = _partial_f_test(
-            y, table[fitted_columns[(reduced["model"], reduced["metric"])]].to_numpy(dtype=float),
-            table[fitted_columns[(full["model"], full["metric"])]].to_numpy(dtype=float))
+        both = rho_k.reindex(columns=[(full["model"], full["metric"]),
+                                      (reduced["model"], reduced["metric"])]).dropna()
+        t, p = stats.ttest_rel(both.iloc[:, 0], both.iloc[:, 1]) if len(both) >= 3 else (np.nan, np.nan)
         where = (results_df.model == full["model"]) & (results_df.metric == full["metric"])
-        results_df.loc[where, f"partial_f_vs_{reduced['model']}"] = f_stat
-        results_df.loc[where, f"partial_f_p_vs_{reduced['model']}"] = p_value
+        results_df.loc[where, f"paired_t_vs_{reduced['model']}"] = t
+        results_df.loc[where, f"paired_t_p_vs_{reduced['model']}"] = p
 
-    return results_df, pd.DataFrame(per_category)
+    return results_df, per_category
 
 
 # --- study C, concept structure ---------------------------------------------------------
@@ -1496,10 +1446,6 @@ CLUSTER_CUT_K = 8
 # Hellinger distance, so sqrt-profiles are the Euclidean space this problem legitimately has.
 # Feeding a non-Euclidean distance to Ward is a common silent error and is not done here.
 DISTANCE_LINKAGES = ("average", "complete")
-
-# Label permutations behind every p value of this study. 2000 resolves p to 0.0005, finer
-# than any claim made from these tables needs.
-CLUSTER_PERMUTATIONS = 2000
 
 # Edges kept per node in a link graph. Fedzechkina's Figure 4 draws 40 concepts in 10 domains
 # and can afford every edge, while this dataset has 205 words and 20,910 pairs, which at any
@@ -1903,15 +1849,24 @@ def _cell_or_nan(frame: pd.DataFrame, column: str, position: int = 0) -> float:
     return float(frame[column].iloc[position])
 
 
-def group_separation(distance: np.ndarray, groups: np.ndarray, rng: np.random.Generator,
-                     group_label: str = "group") -> pd.DataFrame:
+def _group_means(distance: np.ndarray, assigned: np.ndarray, sizes: np.ndarray) -> tuple:
+    """Mean distance among each group's members and from them to the other items, per one-hot assignment of shape
+    (assignments, items, groups)."""
+    inside = (assigned * (distance @ assigned)).sum(axis=1)
+    outside = np.swapaxes(assigned, 1, 2) @ distance.sum(axis=1) - inside
+    with np.errstate(divide="ignore", invalid="ignore"):
+        return inside / (sizes * (sizes - 1)), outside / (sizes * (len(distance) - sizes))
+
+
+def group_separation(distance: np.ndarray, groups: np.ndarray, group_label: str = "group") -> pd.DataFrame:
     """
     How well each group of a labelling holds together in the distance space, one row per
     group plus an ALL GROUPS row.
 
     within_mean is the mean distance among the group's own members, between_mean the mean
     distance from a member to a non-member, separation their difference. p_permutation is the
-    share of CLUSTER_PERMUTATIONS label shuffles reaching a separation at least as large. The
+    two-sided permutation p over label reassignments drawn from a generator of its own,
+    centred at zero, the expected separation of any group under random labels. The
     permutation null is mandatory rather than optional here, since the groups are very
     unequal in size (8 label words against 197 members, categories of 20 to 32) and a plain
     comparison of means would reward the small groups by construction.
@@ -1922,51 +1877,33 @@ def group_separation(distance: np.ndarray, groups: np.ndarray, rng: np.random.Ge
     labels = pd.Series(groups)
     usable = labels.notna().to_numpy()
     labels = labels[usable].to_numpy()
-    distance = distance[np.ix_(usable, usable)]
+    distance = distance[np.ix_(usable, usable)].copy()
+    np.fill_diagonal(distance, 0.0)
     unique = np.unique(labels)
     if len(unique) < 2:
         return pd.DataFrame()
 
-    def separations(assignment: np.ndarray) -> dict:
-        out = {}
-        for name in unique:
-            member = assignment == name
-            if member.sum() < 2:
-                out[name] = np.nan
-                continue
-            within = distance[np.ix_(member, member)][np.triu_indices(member.sum(), k=1)].mean()
-            out[name] = distance[np.ix_(member, ~member)].mean() - within
-        return out
+    onehot = (labels[:, None] == unique[None, :]).astype(float)
+    sizes = onehot.sum(axis=0)
+    within, between = (means[0] for means in _group_means(distance, onehot[None], sizes))
+    observed = between - within
+    draws, null = reassignments(labels), []
+    chunk = max(1, 4_000_000 // onehot.size)
+    for start in range(0, len(draws), chunk):
+        within_null, between_null = _group_means(distance, onehot[draws[start:start + chunk]], sizes)
+        null.append(between_null - within_null)
+    null = np.vstack(null)
+    p = permutation_p(observed, null)
+    valid = sizes >= 2
 
-    observed = separations(labels)
-    observed_all = np.nanmean(list(observed.values()))
-    exceed = {name: 0 for name in unique}
-    exceed_all = 0
-    for _ in range(CLUSTER_PERMUTATIONS):
-        shuffled = separations(rng.permutation(labels))
-        for name in unique:
-            if np.isfinite(shuffled[name]) and shuffled[name] >= observed[name]:
-                exceed[name] += 1
-        exceed_all += np.nanmean(list(shuffled.values())) >= observed_all
-
-    rows = []
-    for name in unique:
-        member = labels == name
-        within = (distance[np.ix_(member, member)][np.triu_indices(member.sum(), k=1)].mean()
-                  if member.sum() > 1 else np.nan)
-        rows.append({
-            group_label: name,
-            "n": int(member.sum()),
-            "within_mean": round(float(within), 4),
-            "between_mean": round(float(distance[np.ix_(member, ~member)].mean()), 4),
-            "separation": round(float(observed[name]), 4),
-            "p_permutation": round((exceed[name] + 1) / (CLUSTER_PERMUTATIONS + 1), 4),
-        })
-    summary = pd.DataFrame(rows).sort_values("separation", ascending=False)
+    summary = pd.DataFrame({group_label: unique, "n": sizes.astype(int), "within_mean": within.round(4),
+                            "between_mean": between.round(4), "separation": observed.round(4),
+                            "p_permutation": np.round(p, 4)}).sort_values("separation", ascending=False)
     summary.loc[len(summary)] = {
-        group_label: "ALL GROUPS", "n": len(labels), "within_mean": np.nan,
-        "between_mean": np.nan, "separation": round(float(observed_all), 4),
-        "p_permutation": round((exceed_all + 1) / (CLUSTER_PERMUTATIONS + 1), 4),
+        group_label: "ALL GROUPS", "n": len(labels), "within_mean": np.nan, "between_mean": np.nan,
+        "separation": round(float(observed[valid].mean()), 4) if valid.any() else np.nan,
+        "p_permutation": (round(permutation_p(observed[valid].mean(), null[:, valid].mean(axis=1)), 4)
+                          if valid.any() else np.nan),
     }
     summary["silhouette_all_groups"] = round(
         float(silhouette_score(distance, labels, metric="precomputed")), 4)
@@ -2073,8 +2010,7 @@ def concept_graph_edges(similarity: np.ndarray, items: list, meta: pd.DataFrame,
     return pd.DataFrame(rows).sort_values("weight", ascending=False)
 
 
-def graph_domain_structure(edges: pd.DataFrame, meta: pd.DataFrame,
-                           rng: np.random.Generator) -> pd.DataFrame:
+def graph_domain_structure(edges: pd.DataFrame, meta: pd.DataFrame) -> pd.DataFrame:
     """
     Whether a link graph's edges respect the semantic domains, against the permutation
     baseline the ExpertLens paper uses for the same question.
@@ -2082,8 +2018,10 @@ def graph_domain_structure(edges: pd.DataFrame, meta: pd.DataFrame,
     That paper validates its domain structure against randomly resampled domain groupings,
     its example being "animal" put with "jacket", "liver", "doctor" and "red". The same logic
     here: the observed share of edges joining two words of one category is compared against
-    the share obtained when the category labels are shuffled over the words, which preserves
-    the graph and the category sizes and destroys only the assignment.
+    the share obtained when the category labels are reassigned over the words, which preserves
+    the graph and the category sizes and destroys only the assignment. The p is two-sided,
+    centred at the share expected under random labels, the sum over categories of
+    n_k (n_k - 1) / (N (N - 1)).
 
     Reported over all edges and over the strongest quartile separately, since the figure
     draws attention to the thick edges and a structure carried only by the weak ones would be
@@ -2093,29 +2031,26 @@ def graph_domain_structure(edges: pd.DataFrame, meta: pd.DataFrame,
     if categorized.empty:
         return pd.DataFrame()
     words = meta.dropna(subset=["category"])
-    labels = words["category"].to_numpy()
-    category_of = dict(zip(words["concept"], labels))
-
-    def within_share(assignment: dict, frame: pd.DataFrame) -> float:
-        same = [assignment[a] == assignment[b] for a, b in
-                zip(frame["concept_a"], frame["concept_b"])
-                if a in assignment and b in assignment]
-        return float(np.mean(same)) if same else float("nan")
+    codes = pd.factorize(words["category"])[0]
+    slot = dict(zip(words["concept"], range(len(words))))
+    sizes = np.bincount(codes)
+    expected = float((sizes * (sizes - 1)).sum() / (len(codes) * (len(codes) - 1)))
+    assignments = np.vstack([codes, codes[reassignments(codes)]])
 
     rows = []
     strong = categorized[categorized["weight"] >= categorized["weight"].quantile(0.75)]
     for name, frame in (("all edges", categorized), ("strongest quartile", strong)):
-        observed = within_share(category_of, frame)
-        null = np.asarray([within_share(dict(zip(words["concept"], rng.permutation(labels))),
-                                        frame) for _ in range(CLUSTER_PERMUTATIONS)])
+        first, second = (frame[column].map(slot).to_numpy() for column in ("concept_a", "concept_b"))
+        shares = (assignments[:, first] == assignments[:, second]).mean(axis=1)
+        observed, null = shares[0], shares[1:]
         rows.append({
             "edge_set": name,
             "n_edges": len(frame),
             "within_category_pct": round(100.0 * observed, 1),
-            "null_within_category_pct": round(100.0 * float(np.nanmean(null)), 1),
-            "null_sd_pct": round(100.0 * float(np.nanstd(null)), 2),
-            "ratio_observed_over_null": round(observed / float(np.nanmean(null)), 2),
-            "p_permutation": round((int((null >= observed).sum()) + 1) / (CLUSTER_PERMUTATIONS + 1), 4),
+            "null_within_category_pct": round(100.0 * float(null.mean()), 1),
+            "null_sd_pct": round(100.0 * float(null.std()), 2),
+            "ratio_observed_over_null": round(observed / float(null.mean()), 2),
+            "p_permutation": round(permutation_p(observed - expected, null - expected), 4),
         })
     return pd.DataFrame(rows)
 
@@ -2280,12 +2215,10 @@ def run_dendrograms(space: str, distance: np.ndarray, usable: np.ndarray, items:
     save_dataframe(cluster_category_enrichment(labels, kept_meta),
                    out_dir / f"cluster_category_enrichment_k{CLUSTER_CUT_K}.csv")
 
-    rng = np.random.default_rng(CLUSTER_SEED)
-    category_separation = group_separation(distance, kept_meta["category"].to_numpy(),
-                                           rng, "category")
+    category_separation = group_separation(distance, kept_meta["category"].to_numpy(), "category")
     save_dataframe(category_separation, out_dir / "category_separation.csv")
     level_separation = group_separation(distance, kept_meta["abstraction_level"].to_numpy(),
-                                        rng, "abstraction_level")
+                                        "abstraction_level")
     save_dataframe(level_separation, out_dir / "level_separation.csv")
 
     at_cut = best_curve[best_curve["k"] == CLUSTER_CUT_K].iloc[0]
@@ -2328,7 +2261,7 @@ def run_linkgraph(name: str, label: str, similarity: np.ndarray, distance: np.nd
     coords = _layout_coordinates(distance)
     edges = concept_graph_edges(similarity, items, meta)
     save_dataframe(edges, out_dir / "concept_graph_edges.csv")
-    structure = graph_domain_structure(edges, meta, np.random.default_rng(CLUSTER_SEED))
+    structure = graph_domain_structure(edges, meta)
     save_dataframe(structure, out_dir / "concept_graph_domain_structure.csv")
     plot_concept_graph(coords, edges, items, meta, CLUSTER_COLOR_MAP[0],
                        f"Concept graph, edge thickness = {label} "
@@ -2554,8 +2487,7 @@ def execute_module_5_typicality_prediction(scope, concept_metadata: pd.DataFrame
 
     Self-sufficient: every feature is computed here from scope.expert_df, so module 2
     need not be enabled and future profile metrics touch no other module. The default
-    metric's label-word columns equal section 2.1's CSV values by construction, asserted
-    by tests/check_module5_features_match_module2.py.
+    metric's label-word columns equal section 2.1's CSV values by construction.
 
     ONE design frame is built and ONE set of centroid features is added, then each study
     derives its OWN row set from it by dropping the rows missing any of that study's own

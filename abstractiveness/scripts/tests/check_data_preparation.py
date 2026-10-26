@@ -8,8 +8,9 @@ Checks:
   2. Web frequency: OpenWebText and FineWeb totals match their provenance sidecars, full
      coverage on the Zipf scale, a lemma never below its surface form, an absent word gives
      None, a missing count file raises an error naming it.
-  3. Source comparison: identical sources correlate at 1 with no Zipf offset, each surface word
-     counted once, every pair of the four sources reported on the real metadata.
+  3. Source comparison: identical sources give Spearman rho 1 with no Zipf offset and no Pearson
+     column, each surface word counted once, every pair of the four sources reported on the real
+     metadata.
   4. Typicality: every stored value reproduced exactly, pairwise and SpAM coverage, unique keys
      with both squash senses.
 
@@ -165,15 +166,16 @@ def check_source_comparison(metadata) -> str:
     n_pairs = len(columns) * (len(columns) - 1) // 2
     assert len(table) == n_pairs, f"{len(table)} pairs, expected {n_pairs}"
     assert (table["n"] == 3).all(), "duplicate surface words must be counted once"
-    assert ((table["pearson_r"] - 1).abs() < 1e-12).all(), "identical sources must give r = 1"
+    assert "pearson_r" not in table, "the Pearson column must be gone"
     assert ((table["spearman_rho"] - 1).abs() < 1e-12).all(), "identical sources must give rho = 1"
     assert (table["mean_zipf_difference"].abs() < 1e-12).all(), "identical sources must have no offset"
 
     real = compare.source_correlations(compare.unique_words(metadata))
-    assert len(real) == n_pairs and real["pearson_r"].notna().all(), "real comparison incomplete"
+    assert len(real) == n_pairs and real["spearman_rho"].notna().all(), "real comparison incomplete"
     web = real[(real["source_a"] == "openwebtext") & (real["source_b"] == "fineweb")].iloc[0]
     assert web["n"] == 205, f"openwebtext against fineweb over {web['n']} words, expected 205"
-    return f"comparison: {n_pairs} source pairs, openwebtext against fineweb r = {web['pearson_r']:.3f} over {web['n']} words"
+    return (f"comparison: {n_pairs} source pairs, openwebtext against fineweb rho = {web['spearman_rho']:.3f} "
+            f"over {web['n']} words")
 
 
 def check_typicality(metadata) -> str:

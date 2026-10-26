@@ -40,15 +40,17 @@ $$\rho_\ell = \mathrm{Spearman}\big(\mathrm{offdiag}(S^{\mathrm{exp}}), \, \math
 
 Spearman rather than Pearson because the relationship is monotonic but strongly saturating, which the pairs-scatter variants show directly (`rsa_pairs_scatter_binned.png` most directly, since it turns 19,503 overplotted, zero-inflated Jaccard points into legible binned medians): Jaccard is compressed near zero for most pairs while embedding similarity spans a wide range. Both sides are similarities rather than distances, so a positive $\rho$ reads directly, concepts sharing experts also sit close in embedding space.
 
-**Significance.** Concept pairs are not independent observations, since each concept appears in $n-1$ of them. The null therefore shuffles concepts, never pairs. For a permutation $\pi$, one matrix is re-indexed as $S_{\pi(c)\pi(d)}$ and the statistic recomputed, which preserves each matrix's internal geometry and breaks only the concept-to-concept correspondence under test. The one-sided p-value is
+**Significance.** Concept pairs are not independent observations, since each concept appears in $n-1$ of them. The null therefore reassigns concepts, never pairs. For a permutation $\pi$, one matrix is re-indexed as $S_{\pi(c)\pi(d)}$ and the statistic recomputed, which preserves each matrix's internal geometry and breaks only the concept-to-concept correspondence under test. The two-sided p-value is
 
-$$p = \frac{1 + \#\{\pi : \rho_\pi \ge \rho\}}{1 + B}, \qquad B = 9999,$$
+$$p = \frac{1 + \#\{\pi : |\rho_\pi| \ge |\rho|\}}{1 + B}, \qquad B = 9999,$$
 
-so the smallest reportable value is $10^{-4}$. This is the same Mantel scheme module 1 uses for its category alignment, extended from a binary target to a continuous one.
+so the smallest reportable value is $10^{-4}$. This is the same Mantel scheme module 1 uses for its category alignment, extended from a binary target to a continuous one. `rdm_mantel` computes it through `utils/statistics.spearman_test` in its pairs mode, the matrix modality of the README's *Correlations and permutation tests*, with a generator of its own per layer, so a layer's p does not depend on how many layers were tested before it. When either matrix is constant, $\rho$ and $p$ are NaN and the layer leaves the Benjamini-Hochberg correction. Until 19 October 2026 the test was one-sided, every layer drew from one generator seeded at 42, and a constant matrix gave p 1.
 
-Permuting rows and columns is a bijection on the off-diagonal multiset, so the ranks are computed once and permuted with the matrix rather than recomputed per shuffle, and the permuted rank vector's mean and standard deviation are invariant. Spearman under permutation therefore reduces to one dot product, which measured about six times faster than gathering the upper triangle each time.
+The concept-bootstrap intervals resample the concepts 1,000 times with replacement, from a generator seeded at 42 in every call, so the interval of one layer does not depend on the layers computed before it.
 
 **The p-value is not the interesting axis.** At 198 concepts every layer reaches the $10^{-4}$ floor, exactly as module 1 already reports for every sublayer. Effect size, the bootstrap interval and the noise ceiling carry the argument, and Benjamini-Hochberg across layers is reported for completeness rather than because it discriminates.
+
+**Middle third against the outer thirds.** The summary contrasts the mean depth-curve $\rho$ of the layers in the middle third of the network with the mean over the outer two thirds, $\Delta = \bar\rho_{\mathrm{middle}} - \bar\rho_{\mathrm{outer}}$, the depth claim of the layer-probing literature. Its p reassigns the layers to the thirds, keeping the number in each, and is two-sided, $p = (1 + \#\{|\Delta_b| \ge |\Delta|\}) / (1 + B)$, enumerating every reassignment when there are at most $9!$ of them (495 on GPT-2's 12 layers) and drawing $B = 9{,}999$ otherwise. Until 19 October 2026 it was one-sided, counting only reassignments with a larger $\Delta$, so a middle third significantly below the outer thirds read as p near 1.
 
 ### 4.3 Noise ceiling
 
@@ -124,7 +126,7 @@ The two architectures agree on every qualitative point. Agreement is strong at p
 
 **Agreement falls steeply as the threshold tightens**, from 0.64 to 0.06 in GPT-2 and 0.66 to 0.17 in Qwen3. This is expected and is not a failure: at strict thresholds most concept pairs share no experts at all, and a nearly empty Jaccard matrix cannot track a full geometry. It does set a practical ceiling on how strict a threshold can be before the expert set stops describing the model, which is useful alongside module 1's zero-expert findings.
 
-**The middle layer is not better than the rest.** The middle-third contrast never reaches significance at any threshold, and is slightly negative at the permissive end. This does not refute the layer-probing literature, which concerns downstream task performance rather than representational geometry, and it should not be read as evidence against it. The reason it cannot adjudicate the question is the stability measure above: with cross-layer similarity at 0.92 to 0.94 there is barely any depth variation for a middle-layer advantage to show up in. For this comparison the choice of layer is close to immaterial, which is itself a useful negative result, and it means the pipeline's use of one analysis sublayer costs nothing here.
+**The middle layer is not better than the rest.** **Earlier definition.** The middle-third contrast never reaches significance at any threshold on the one-sided test of the reference trees, which asked only whether the middle third beats the outer thirds, and it is slightly negative at the permissive end. The current two-sided test finds the middle third significantly *below* the outer thirds on the nopad trees at AP 0.6, p 0.0051 / 0.0141 (Qwen3 / GPT-2, the second exact over the 495 reassignments) where the one-sided p read 0.9956 / 1.0. This does not refute the layer-probing literature, which concerns downstream task performance rather than representational geometry, and it should not be read as evidence against it. The reason it cannot adjudicate the question is the stability measure above: with cross-layer similarity at 0.92 to 0.94 there is barely any depth variation for a middle-layer advantage to show up in. For this comparison the choice of layer is close to immaterial, which is itself a useful negative result, and it means the pipeline's use of one analysis sublayer costs nothing here.
 
 **The density association weakens as the threshold tightens in GPT-2**, from 0.95 at AP 0.5 to 0.43 and 0.26 at AP 0.8 and 0.9, so the more selective the expert set, the less its depth profile is governed by raw expert counts. Qwen3 does not show this: its density association is lower to begin with (0.77) and rises rather than falls (0.92 at AP 0.8). The pattern is therefore architecture-specific and should not be stated as a general property of thresholding.
 
@@ -172,11 +174,11 @@ One row per (`embedding_metric`, layer) of one sublayer's own layers, swept agai
 | expert_share_of_pool_pct | This layer's share of the pooled expert set | float in [0, 100] |
 | rho_expert_vs_embedding | Spearman $\rho$ between the expert Jaccard and this layer's embedding similarity | float in [-1, 1] |
 | rho_ci95_lo, rho_ci95_hi | 95% concept-bootstrap interval around rho_expert_vs_embedding | float in [-1, 1], NaN on `cosine_raw` rows |
-| mantel_p_value | Concept-permutation p-value, primary metric only | float in [0, 1], floor 1e-4 |
-| mantel_p_fdr_bh | Benjamini-Hochberg correction of mantel_p_value across the layers of one embedding_metric | float in [0, 1] |
+| mantel_p_value | Two-sided Mantel p-value, primary metric only | float in [0, 1], floor 1e-4, NaN for a constant matrix |
+| mantel_p_fdr_bh | Benjamini-Hochberg correction of mantel_p_value across the layers of one embedding_metric | float in [0, 1], NaN where mantel_p_value is NaN |
 | rho_expert_vs_embedding_holdout | rho_expert_vs_embedding recomputed with this layer's own contribution removed from the pool | float in [-1, 1], NaN on `cosine_raw` rows |
 | rho_holdout_ci95_lo, rho_holdout_ci95_hi | 95% bootstrap interval around rho_expert_vs_embedding_holdout | float in [-1, 1], NaN on `cosine_raw` rows |
-| mantel_p_value_holdout | Concept-permutation p-value for the holdout rho | float in [0, 1], NaN on `cosine_raw` rows |
+| mantel_p_value_holdout | Two-sided Mantel p-value for the holdout rho | float in [0, 1], NaN on `cosine_raw` rows |
 | noise_ceiling_splithalf | Split-half, Spearman-Brown corrected reliability of this layer's embedding matrix | float in (0, 1] or NaN |
 | rho_over_noise_ceiling | rho_expert_vs_embedding divided by noise_ceiling_splithalf | float, typically in [0, 1] |
 
@@ -215,10 +217,10 @@ One row per sublayer's own file, the middle layer's RSA with its interval, p-val
 | peak_plateau_depth_lo, peak_plateau_depth_hi | Depth-fraction span of the plateau | float in [0, 1] |
 | mean_rho_early, mean_rho_middle, mean_rho_late | Mean depth-curve rho within each depth third | float in [-1, 1] |
 | middle_third_minus_outer_rho | mean_rho_middle minus the mean of the outer thirds | float |
-| middle_vs_outer_perm_p | Permutation p for middle_third_minus_outer_rho | float in [0, 1] |
+| middle_vs_outer_perm_p | Two-sided permutation p for middle_third_minus_outer_rho, layers reassigned to the thirds | float in [0, 1] |
 | n_concepts, n_expert_units, n_layers_swept | Run-level counts | int |
 
-Example (one row, GPT-2, AP 0.5, analysis sublayer `mlp.c_fc`, `research_plots_gpt2_richie_hsj_restructured_final`, shown as two tables since one table at 29 columns would not be readable):
+Example (one row, GPT-2, AP 0.5, analysis sublayer `mlp.c_fc`, `research_plots_gpt2_richie_hsj_restructured_final`, shown as two tables since one table at 29 columns would not be readable, `middle_vs_outer_perm_p` being the one-sided p of that date, **Earlier definition**):
 
 | middle_layer_name | middle_layer_idx | middle_block | middle_spearman_rho | middle_rho_ci_lo | middle_rho_ci_hi | middle_mantel_p | middle_noise_ceiling | middle_rho_normalized | middle_spearman_rho_loo | depth_curve_column |
 |---|---|---|---|---|---|---|---|---|---|---|
@@ -260,7 +262,7 @@ Example (all rows, GPT-2, AP 0.5, `research_plots_gpt2_richie_hsj_restructured_f
 
 #### `rsa_layer_sweep.png`
 
-One per sublayer directory (the analysis sublayer's own copy in `4_embedding_rsa/`, every other sublayer's own copy under `sublayers/<rank>_<name>/`, the rank being the run-wide expert-count ranking shared with every other module, see module 1's *Analysis scopes and the two layer axes*). Spearman rho against depth for that sublayer's own layers, with the bootstrap band, the split-half noise ceiling, and the middle third of the network shaded. The pooled curve and the leave-one-out curve are drawn together so how much of the pooled shape is a layer's own self-contribution is visible directly. A grey bar series on a secondary axis shows each layer's share of the pooled expert set. The legend sits below the axes rather than overlapping the curves, and the two y-axes are labelled "(curves)" for the rho axis and "(bars)" for the expert-share axis, to disambiguate them.
+One per sublayer directory (the analysis sublayer's own copy in `4_embedding_rsa/`, every other sublayer's own copy under `sublayers/<rank>_<name>/`, the rank being the run-wide expert-count ranking shared with every other module, see module 1's *Analysis scopes and the two layer axes*). Spearman $\rho$ against depth for that sublayer's own layers, with the bootstrap band, the split-half noise ceiling, and the middle third of the network shaded. The pooled curve and the leave-one-out curve are drawn together so how much of the pooled shape is a layer's own self-contribution is visible directly. A grey bar series on a secondary axis shows each layer's share of the pooled expert set. The legend sits below the axes rather than overlapping the curves, and the two y-axes are labelled "Spearman ρ, expert set against embedding (curves)" and "(bars)" for the expert-share axis, to disambiguate them.
 
 #### RDM heatmaps
 
@@ -272,9 +274,9 @@ Also written only for the sublayer under analysis, at its own middle layer, dire
 
 `rsa_pairs_scatter_binned.png` bins pairs by their raw shared-expert count (0, 1, 2, 3-4, 5-9, 10+), plotting the median embedding similarity and interquartile band per bin, split into same- and different-category lines, the most interpretable of the three. A straight OLS fit and a LOWESS smooth are also drawn per category, fit on the raw (shared-expert-count, embedding-similarity) pairs before binning and evaluated at each bin's representative count, then plotted at the same evenly spaced bin positions as the median line (the x-axis itself is categorical, not the real count, so the fitted curves are computed in real units and only displayed at the categorical tick positions). Because shared-expert count is heavily right-skewed, the straight OLS line stays close to flat while LOWESS tracks the median's rise, visually arguing for the module's choice of a rank-based statistic (Spearman) over a linear one.
 
-`rsa_pairs_scatter_rankrank.png` plots the rank of expert Jaccard against the rank of embedding similarity, one hexagonal density cell per group of concept pairs, magma colormap. This is the literal relationship Spearman rho measures, a diagonal-leaning density means a positive rho, and the compressed low-rank band reflects Jaccard's zero-inflation (many tied pairs at Jaccard 0 all receive similarly low ranks).
+`rsa_pairs_scatter_rankrank.png` plots the rank of expert Jaccard against the rank of embedding similarity, one hexagonal density cell per group of concept pairs, magma colormap. This is the literal relationship Spearman $\rho$ measures, a diagonal-leaning density means a positive $\rho$, the grey line under the title gives the middle layer's $\rho$ with its Mantel p and the 19,503 pairs, and the compressed low-rank band reflects Jaccard's zero-inflation (many tied pairs at Jaccard 0 all receive similarly low ranks).
 
-`rsa_pairs_scatter_hexbin.png` plots raw expert Jaccard against raw embedding similarity, split into same- and different-category panels, magma colormap, with a binned-median trend, a straight OLS fit (its Pearson r annotated in the legend), and a LOWESS smooth all drawn per panel. The OLS line, extrapolated across the observed Jaccard range, rises past what the data ever reaches (embedding similarity is bounded well under the value a straight fit predicts at high Jaccard), while LOWESS stays within the observed range, the same argument as the binned variant, made on the raw rather than binned scale.
+`rsa_pairs_scatter_hexbin.png` plots raw expert Jaccard against raw embedding similarity, split into same- and different-category panels, with a binned-median trend and a LOWESS smooth drawn per panel, and the middle layer's $\rho$ with its Mantel p on the grey line under the title, through the same `plot_hexbin_with_trends` as module 2's all-pairs figures. Trees written before 19 October 2026 also drew a straight least-squares fit per panel with its Pearson r in the legend, **not generated by the current code**, which, extrapolated across the observed Jaccard range, rose past what the data ever reaches while LOWESS stayed within it, the same argument as the binned variant, made on the raw rather than binned scale.
 
 #### `sublayer_comparison.png`
 

@@ -198,7 +198,7 @@ Those figures compare the two surface-form columns, the listed word alone on bot
 
 **FineWeb sample-10BT is the Qwen3 exposure proxy.** Qwen3 was pretrained on about 36 trillion tokens whose composition is described only by broad source category, with web text the bulk of it. FineWeb is the standard open reconstruction of modern Common Crawl pretraining data, 15 trillion tokens from 96 snapshots between 2013 and 2024, and sample-10BT is a random 10 billion token sample of it. It approximates the kind of text Qwen3 was trained on, not its exact content, since the multilingual, synthetic and distilled parts of Qwen3's training have no open counterpart.
 
-**Wikipedia is the written-register reference.** 2.47 billion tokens. It was the pretraining proxy before the two web corpora were counted, and it is kept so that earlier results stay reproducible and the raw `frequency` column keeps its meaning. It is a weaker proxy for both models, for GPT-2 because WebText excluded Wikipedia, and for both because encyclopedic prose is a narrower register than web text. Wikipedia and SUBTLEX-US correlate at only r = 0.73 across the stimulus set, while both web corpora reach 0.86 against SUBTLEX-US, see section 6.8.
+**Wikipedia is the written-register reference.** 2.47 billion tokens. It was the pretraining proxy before the two web corpora were counted, and it is kept so that earlier results stay reproducible and the raw `frequency` column keeps its meaning. It is a weaker proxy for both models, for GPT-2 because WebText excluded Wikipedia, and for both because encyclopedic prose is a narrower register than web text. Wikipedia and SUBTLEX-US correlate at only $\rho$ = 0.74 across the stimulus set, while both web corpora reach 0.88 against SUBTLEX-US, see section 6.8.
 
 **SUBTLEX-UK is a reference column only.** 201 million tokens of BBC broadcast subtitles, from van Heuven, Mandera, Keuleers and Brysbaert (2014), the paper that introduced the Zipf scale. It is carried so that the British against American gap described above can be tabulated as the stated limitation it is. No analysis should be run on it.
 
@@ -278,7 +278,7 @@ The net effect is 163 concepts summed over two forms and 42 scored on one. The s
 
 Frequency enters as a predictor in its own right, asking whether a more frequent word recruits more experts, and as a control in section 2.4's frequency-partialled correlation, asking whether a typicality effect survives once frequency is held fixed. It never touches expert extraction, so changing a frequency column cannot alter an Average Precision or an expert set, only the analyses that read it.
 
-Module 2 reads one frequency column per run, the one matched to the model through the config's `frequency_corpus` field, `frequency_zipf_openwebtext_lemma` for GPT-2 and `frequency_zipf_fineweb_lemma` for Qwen3. It is the x variable of the section 2.5 figure, the frequency panel of section 2.4, the control of the section 2.4 partial correlation, and the variable of the section 2.5 partial correlation, which holds human typicality fixed instead, each partial also computed with category as a second control. The SUBTLEX-US, Wikipedia and SUBTLEX-UK columns stay in the metadata for reference and for the source comparison of section 6.8, and no analysis reads them.
+Module 2 reads one frequency column per run, the one matched to the model through the config's `frequency_corpus` field, `frequency_zipf_openwebtext_lemma` for GPT-2 and `frequency_zipf_fineweb_lemma` for Qwen3. It is the x variable of the section 2.5 figure, the frequency panel of section 2.4, the control of the section 2.4 partial correlation, and the variable of the section 2.5 partial correlation, which holds human typicality fixed instead, each also computed within categories, without and with the other variable as a control. The SUBTLEX-US, Wikipedia and SUBTLEX-UK columns stay in the metadata for reference and for the source comparison of section 6.8, and no analysis reads them.
 
 The raw `frequency` column is retained unchanged so that earlier results stay reproducible. `expert_counts_with_metadata` in `core/expert_data_loading.py` still maps it to $\log_{10} f_c$ and drops rows with a missing or non-positive count.
 
@@ -287,22 +287,22 @@ The raw `frequency` column is retained unchanged so that earlier results stay re
 - **Homographs are conflated**, because a corpus count cannot separate senses. `squash__vegetables` and `squash__sports` are separate concepts with separate expert sets, but they share one Wikipedia count and one SUBTLEX rate, since no corpus frequency list distinguishes the two. The same applies to every word the sense audit touched.
 - **The British column is not register matched** to this stimulus set, by 0.215 Spearman in professions, which is why it is a reference column rather than an analysis column.
 - **Wikipedia is a formal register.** Corpora built from written material overestimate the frequency of formal words relative to how often a person meets them (Brysbaert, Mandera and Keuleers, 2018). This is the accepted cost of choosing a corpus that approximates pretraining exposure instead of human familiarity.
-- **Corpus choice matters more than the summation.** The Wikipedia and SUBTLEX-US columns correlate at only r = 0.73, so roughly half the variance is corpus specific and a frequency-partialled result genuinely can differ between them. Reporting both is what turns that into evidence rather than an unexamined choice.
+- **Corpus choice matters more than the summation.** The Wikipedia and SUBTLEX-US columns correlate at only $\rho$ = 0.74, so roughly half the variance is corpus specific and a frequency-partialled result genuinely can differ between them. Reporting both is what turns that into evidence rather than an unexamined choice.
 
 ### 6.8 How the sources compare
 
-`compare_frequency_sources.py` correlates every pair of lemma Zipf columns and writes `results/frequency_sources/frequency_source_correlations.csv`. The unit is the unique surface word, so `squash` counts once and n is 205, or 204 for every pair with SUBTLEX-US, which lacks `physiotherapist`. Because the three written-corpus columns share one scale, the mean difference is a meaningful offset as well as the correlations.
+`compare_frequency_sources.py` correlates every pair of lemma Zipf columns by Spearman's $\rho$ and writes `results/frequency_sources/frequency_source_correlations.csv`. The unit is the unique surface word, so `squash` counts once and n is 205, or 204 for every pair with SUBTLEX-US, which lacks `physiotherapist`. Because the three written-corpus columns share one scale, the mean difference is a meaningful offset as well as the correlations. The `pearson_r` column of the file written before 19 October 2026 is **not generated by the current code**, and every Pearson value it held lay within 0.015 of the Spearman value beside it.
 
-| Source a | Source b | n | Pearson r | Spearman ρ | Mean Zipf difference, a minus b |
-|---|---|---|---|---|---|
-| Wikipedia | OpenWebText | 205 | 0.892 | 0.891 | 0.079 |
-| Wikipedia | FineWeb | 205 | 0.811 | 0.814 | −0.106 |
-| Wikipedia | SUBTLEX-US | 204 | 0.727 | 0.739 | 0.045 |
-| OpenWebText | FineWeb | 205 | 0.947 | 0.947 | −0.185 |
-| OpenWebText | SUBTLEX-US | 204 | 0.863 | 0.875 | −0.033 |
-| FineWeb | SUBTLEX-US | 204 | 0.864 | 0.877 | 0.150 |
+| Source a | Source b | n | Spearman ρ | Mean Zipf difference, a minus b |
+|---|---|---|---|---|
+| Wikipedia | OpenWebText | 205 | 0.891 | 0.079 |
+| Wikipedia | FineWeb | 205 | 0.814 | −0.106 |
+| Wikipedia | SUBTLEX-US | 204 | 0.739 | 0.045 |
+| OpenWebText | FineWeb | 205 | 0.947 | −0.185 |
+| OpenWebText | SUBTLEX-US | 204 | 0.875 | −0.033 |
+| FineWeb | SUBTLEX-US | 204 | 0.877 | 0.150 |
 
-Three readings follow. The two web corpora agree closely with each other, at r = 0.947, so the choice between them matters far less than the choice between web text and Wikipedia. Both web corpora agree with the subtitle norms much better than Wikipedia does, 0.86 against 0.73, which places encyclopedic prose as the outlier register among the four rather than speech. And FineWeb sits 0.185 Zipf above OpenWebText on these words, so the two proxies differ in level as well as in rank, which matters for any analysis that reads absolute values rather than correlations.
+Three readings follow. The two web corpora agree closely with each other, at $\rho$ = 0.947, so the choice between them matters far less than the choice between web text and Wikipedia. Both web corpora agree with the subtitle norms much better than Wikipedia does, 0.88 against 0.74, which places encyclopedic prose as the outlier register among the four rather than speech. And FineWeb sits 0.185 Zipf above OpenWebText on these words, so the two proxies differ in level as well as in rank, which matters for any analysis that reads absolute values rather than correlations.
 
 ## 7. Regenerating the metadata
 

@@ -5,8 +5,9 @@ Checks:
   1. Split: on a random complete symmetric design the pair residuals sum to zero over every member, are
      orthogonal to the member part, and the member and pair parts of the ranked correlation add up to Spearman's rho.
   2. Table: on synthetic matrices over every metadata concept, every rated pair is used, each category's two parts
-     add up to its rho, rho equals the text baseline's, POOLED_MEAN averages the categories, and a label column
-     equal to each member's mean rating gives a typicality correlation of 1.
+     add up to its rho, rho equals the text baseline's, WEIGHTED_MEAN weighs the pair columns by pairs and the member
+     columns by members so its two parts still add up to its rho, and with a label column equal to each member's mean
+     rating, centrality correlates with the label as it does with typicality.
 
 Usage, from scripts/:
     python tests/check_module2_decomposition.py
@@ -19,7 +20,7 @@ import numpy as np
 from scipy.stats import rankdata, spearmanr
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
-from modules.module_2_similarities import (_member_and_pair_parts, human_similarity_decomposition_table,
+from modules.module_2_similarities import (WEIGHTED_MEAN, _member_and_pair_parts, human_similarity_decomposition_table,
                                            text_baseline_table)
 from core.human_similarity_ratings import load_human_similarity
 from _report import run
@@ -63,16 +64,21 @@ def check_table() -> str:
     text = (text + text.T) / 2
 
     table = human_similarity_decomposition_table(concepts, jaccard, text, None)
-    rows = table[table.category != "POOLED_MEAN"].set_index("category")
+    rows = table[table.category != WEIGHTED_MEAN].set_index("category")
     rated = pairs.groupby("category").size()
     assert (rows["n_pairs"] == rated.reindex(rows.index)).all(), "every rated pair must be used"
     gap = (rows["member_part"] + rows["pair_part"] - rows["rho"]).abs().max()
     assert gap < 1e-12, f"parts miss rho by {gap}"
-    baseline = text_baseline_table(concepts, jaccard, text, None).set_index("category")
+    baseline = text_baseline_table(concepts, jaccard, text, None, n_draws=0).set_index("category")
     assert np.allclose(rows["rho"], baseline.loc[rows.index, "rho_jaccard_human"]), "rho must match the text baseline"
-    mean = table.set_index("category").loc["POOLED_MEAN"]
-    assert abs(mean["member_part"] - rows["member_part"].mean()) < 1e-12, "POOLED_MEAN must average"
-    assert np.allclose(rows["r_typicality_label_jaccard"], 1), "label Jaccard equal to typicality must give r = 1"
+    mean = table.set_index("category").loc[WEIGHTED_MEAN]
+    by_pairs, by_members = rows["n_pairs"] / rows["n_pairs"].sum(), rows["n_members"] / rows["n_members"].sum()
+    assert abs(mean["member_part"] - (by_pairs * rows["member_part"]).sum()) < 1e-12, "pair columns weigh by pairs"
+    assert abs(mean["rho_members"] - (by_members * rows["rho_members"]).sum()) < 1e-12, \
+        "member columns weigh by members"
+    assert abs(mean["member_part"] + mean["pair_part"] - mean["rho"]) < 1e-12, "the weighted parts must add up to rho"
+    assert np.allclose(rows["rho_centrality_label_jaccard"], rows["rho_typicality_centrality"]), \
+        "a label Jaccard equal to typicality must correlate with centrality as typicality does"
     return (f"table: {int(rows['n_pairs'].sum())} rated pairs, parts add up to rho within {gap:.0e}, "
             f"member share {mean['member_part'] / mean['rho']:.2f}")
 

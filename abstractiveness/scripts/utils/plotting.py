@@ -7,11 +7,11 @@ Explanations: none needed.
 """
 
 import matplotlib.pyplot as plt
+from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
 import numpy as np
 import pandas as pd
 import seaborn as sns
-from scipy import stats
 
 
 FONT_FAMILY = "Nimbus Sans"
@@ -50,9 +50,10 @@ def _title_scale(fig) -> float:
 
 
 def set_title(ax, title: str, detail: str = None) -> None:
-    """Sentence-case title in regular weight, with an optional smaller grey detail line below it."""
+    """Sentence-case title in regular weight, with optional smaller grey detail lines below it."""
     scale = _title_scale(ax.figure)
-    ax.set_title(title, fontsize=TITLE_SIZE * scale, pad=(10 + (16 if detail else 0)) * scale)
+    lines = detail.count("\n") + 1 if detail else 0
+    ax.set_title(title, fontsize=TITLE_SIZE * scale, pad=(10 + 16 * lines) * scale)
     if detail:
         ax.annotate(detail, xy=(0.5, 1.0), xycoords="axes fraction", xytext=(0, 7 * scale),
                     textcoords="offset points", ha="center", va="bottom",
@@ -73,23 +74,25 @@ def twin_axis(ax):
     return twin
 
 
-def draw_regression(ax, data: pd.DataFrame, x_col: str, y_col: str, fit: bool = True, scatter: bool = True,
-                    size: float = 22) -> None:
-    """Scatter with its linear fit and 95% band in the shared correlation colours, seeded so reruns match."""
-    point_kws = {"s": size, "alpha": 0.75, "edgecolors": "white", "linewidths": 0.4}
-    if not fit:
-        ax.scatter(data[x_col], data[y_col], color=CORRELATION_COLORS["points"], **point_kws)
-        return
-    sns.regplot(data=data, x=x_col, y=y_col, ax=ax, scatter=scatter, seed=0,
-                color=CORRELATION_COLORS["line"], scatter_kws={**point_kws, "color": CORRELATION_COLORS["points"]},
-                line_kws={"color": CORRELATION_COLORS["line"], "linewidth": 1.8})
+def draw_regression(ax, x, y, fit: bool = True, scatter: bool = True, size: float = 22) -> list:
+    """Values with the least-squares line of their complete points over the range of x, and its legend handles."""
+    x, y = np.asarray(x, dtype=float), np.asarray(y, dtype=float)
+    if scatter:
+        ax.scatter(x, y, s=size, alpha=0.75, edgecolors="white", linewidths=0.4, color=CORRELATION_COLORS["points"])
+    complete = np.isfinite(x) & np.isfinite(y)
+    x, y = x[complete], y[complete]
+    if not fit or len(x) < 3 or np.ptp(x) == 0:
+        return []
+    ends = np.array([x.min(), x.max()])
+    ax.plot(ends, np.polyval(np.polyfit(x, y, 1), ends), color=CORRELATION_COLORS["line"], linewidth=1.8)
+    return [Line2D([], [], color=CORRELATION_COLORS["line"], linewidth=1.8, label="Least-squares line")]
 
 
-def stats_line(coefficient: str, value, p=None, n=None) -> str:
-    """Statistics in one format everywhere, e.g. 'Pearson r = 0.32, p = 1.2e-04, n = 198'."""
+def stats_line(coefficient: str, value, p=None, n=None, p_label: str = "p") -> str:
+    """Statistics in one format everywhere, e.g. 'Spearman ρ = 0.32, p = 1.2e-04, n = 198'."""
     parts = [f"{coefficient} = {value:.2f}"]
     if p is not None:
-        parts.append(f"p = {p:.1e}")
+        parts.append(f"{p_label} = {p:.1e}")
     if n is not None:
         parts.append(f"n = {n}")
     return ", ".join(parts)
@@ -266,8 +269,8 @@ def plot_comparison_violin(values_by_group: dict, y_label: str, title: str, out_
 
 
 def plot_hexbin_with_trends(x, y, same, out_path, x_label: str, y_label: str,
-                            colorbar_label: str = "Concept pairs (log)") -> None:
-    """Density hexbin of tens of thousands of concept pairs, split into same-category and different-category panels, each carrying a binned median, a straight OLS fit, and a LOWESS smooth."""
+                            colorbar_label: str = "Concept pairs (log)", detail: str = None) -> None:
+    """Density hexbin of concept pairs, same and different category, with binned medians, LOWESS and the detail line."""
     from statsmodels.nonparametric.smoothers_lowess import lowess
 
     fig, axes = plt.subplots(1, 2, figsize=(13, 6), sharey=True)
@@ -284,21 +287,20 @@ def plot_hexbin_with_trends(x, y, same, out_path, x_label: str, y_label: str,
                 for lo, hi in zip(edges[:-1], edges[1:])]
         ax.plot(centers, meds, color="#1a1a1a", linewidth=1.6, marker="o", markersize=3, label="Binned median")
         if xb.std() > 0:
-            pearson_r = stats.pearsonr(xb, yb).statistic
-            slope, intercept = np.polyfit(xb, yb, 1)
-            xs_line = np.array([xb.min(), xb.max()])
-            ax.plot(xs_line, intercept + slope * xs_line, color=CORRELATION_COLORS["line"],
-                    linewidth=1.8, label=f"Linear fit, Pearson r = {pearson_r:.2f}")
             # Heavy ties at x = 0 make some local fits degenerate, statsmodels handles them but warns.
             with np.errstate(divide="ignore", invalid="ignore"):
                 smoothed = lowess(yb, xb, frac=0.4, return_sorted=True)
-            ax.plot(smoothed[:, 0], smoothed[:, 1], color="#1a1a1a", linestyle=":",
+            ax.plot(smoothed[:, 0], smoothed[:, 1], color=CORRELATION_COLORS["line"], linestyle=":",
                     linewidth=1.8, label="LOWESS")
         set_title(ax, title)
         ax.grid(False)
         ax.set_xlabel(x_label)
         ax.legend(loc="upper left")
     axes[0].set_ylabel(y_label)
+    if detail:
+        set_suptitle(fig, f"{x_label} against {y_label[0].lower()}{y_label[1:]}, all pairs", y=1.055)
+        fig.text(0.5, 0.975, detail, ha="center", va="bottom", fontsize=(TICK_SIZE + 1) * _title_scale(fig),
+                 color=DETAIL_COLOR)
     if hb is not None:
         fig.colorbar(hb, ax=axes, label=colorbar_label)
     plt.savefig(out_path, dpi=300, bbox_inches="tight")

@@ -2,10 +2,10 @@ import logging
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-from scipy import stats
 from scipy.stats import entropy
 from scipy.spatial.distance import jensenshannon, pdist
 from utils.logging_and_io import save_dataframe
+from utils.statistics import PERMUTATIONS, spearman_test
 from modules.shared_layer_distribution_measures import build_layer_probability_matrix
 from core.analysis_scopes import axis_variants, scope_out_dir, scope_summary_row
 from utils.plotting import (fig_width_for, apply_rotated_leader_labels, draw_regression, set_title, set_suptitle,
@@ -18,8 +18,28 @@ log = logging.getLogger(__name__)
 SUMMARY_LABELS = {
     "mean_jensen_shannon_divergence": "Mean label vs member-average JSD",
     "mean_member_diversity_jsd": "Mean within-category member JSD",
-    "jsd_vs_diversity_r": "Pearson r, divergence vs diversity",
+    "jsd_vs_diversity_rho": "ρ, divergence vs diversity",
 }
+
+JSD_AXIS = ("Jensen-Shannon divergence, label against member average (bits)\n"
+            "high overlap (exemplar) to low overlap (prototype)")
+
+# Category-level panels of the label-to-members JSD: file stem, y column, y axis label, title.
+CATEGORY_PANELS = (
+    ("scatter_jsd_vs_member_diversity", "avg_member_diversity_jsd",
+     "Average pairwise member divergence (bits)\nhigh cohesion to high internal diversity",
+     "Label-to-members divergence against internal category diversity"),
+    ("scatter_jsd_vs_entropy", "shannon_entropy_label",
+     "Shannon entropy of the category label (bits)\nconcentrated to uniform",
+     "Label-to-members divergence against label entropy"),
+)
+
+
+def jsd_correlation(jsd_results_df: pd.DataFrame, y_col: str, n_draws: int = PERMUTATIONS) -> dict:
+    """spearman_test of the label-to-members JSD against y_col over the categories, exact over their orderings, rho and
+    p NaN below three categories."""
+    test = spearman_test(jsd_results_df["jensen_shannon_divergence"], jsd_results_df[y_col], n_draws=n_draws)
+    return test if test["n"] > 2 else {**test, "rho": np.nan, "p": np.nan}
 
 
 def compute_dual_category_jsd(expert_allocation_df: pd.DataFrame, concept_metadata: pd.DataFrame, jsd_dir,
@@ -88,39 +108,28 @@ def compute_dual_category_jsd(expert_allocation_df: pd.DataFrame, concept_metada
     # Return both the dataframe and the layer labels for the X-axis of the micro plot
     return jsd_results_df, layer_labels
 
-def plot_jsd_vs_diversity_scatter(jsd_results_df: pd.DataFrame, jsd_dir, suffix: str = "") -> None:
-    """
-    Plots Label-Centroid Divergence (X-axis) against Internal Category Diversity (Y-axis).
-    Tests if high member dispersion forces the model to create a distinct prototype label.
-    """
-    # An empty results frame has no columns at all, so guard before dropna(subset=...).
-    if jsd_results_df.empty:
-        log.warning("  Skipping JSD vs. diversity scatter: no JSD results.")
-        return
-    # Drop rows missing either of the two metrics we need
-    df = jsd_results_df.dropna(subset=['jensen_shannon_divergence', 'avg_member_diversity_jsd']).copy()
-    if df.empty:
-        log.warning("  Skipping JSD vs. diversity scatter: no rows with both metrics present.")
-        return
 
+def plot_category_scatter(jsd_results_df: pd.DataFrame, y_col: str, y_label: str, title: str, out_path) -> None:
+    """The label-to-members JSD against y_col, one labelled point per category, with the least-squares line and the
+    categories' Spearman rho."""
+    test = jsd_correlation(jsd_results_df, y_col)
+    if test["n"] == 0:
+        log.warning(f"  Skipping {out_path.stem}: no category with both values.")
+        return
+    used = test["used"]
+    x, y = jsd_results_df["jensen_shannon_divergence"][used], jsd_results_df[y_col][used]
     fig, ax = plt.subplots(figsize=(8, 7))
-    fitted = len(df) > 2
-    detail = None
-    if fitted:
-        r, p = stats.pearsonr(df['jensen_shannon_divergence'], df['avg_member_diversity_jsd'])
-        detail = stats_line("Pearson r", r, p, len(df))
-    draw_regression(ax, df, "jensen_shannon_divergence", "avg_member_diversity_jsd", fit=fitted, size=60)
-    for i in range(df.shape[0]):
-        ax.annotate(df['category'].iloc[i].capitalize(),
-                    (df['jensen_shannon_divergence'].iloc[i], df['avg_member_diversity_jsd'].iloc[i]),
-                    xytext=(6, 3), textcoords='offset points', ha='left', fontsize=8, alpha=0.8)
-
-    set_title(ax, "Label-to-members divergence against internal category diversity", detail)
-    ax.set_xlabel("Jensen-Shannon divergence, label against member average (bits)\n"
-                  "high overlap (exemplar) to low overlap (prototype)")
-    ax.set_ylabel("Average pairwise member divergence (JSD)\nhigh cohesion to high internal diversity")
+    handles = draw_regression(ax, x, y, fit=test["n"] > 2, size=60)
+    for name, x_value, y_value in zip(jsd_results_df["category"][used], x, y):
+        ax.annotate(name.capitalize(), (x_value, y_value), xytext=(6, 3), textcoords='offset points', ha='left',
+                    fontsize=8, alpha=0.8)
+    if handles:
+        ax.legend(handles=handles, loc="best")
+    set_title(ax, title, stats_line("Spearman ρ", test["rho"], test["p"], test["n"]) if test["n"] > 2 else None)
+    ax.set_xlabel(JSD_AXIS)
+    ax.set_ylabel(y_label)
     fig.tight_layout()
-    fig.savefig(jsd_dir / f"scatter_jsd_vs_member_diversity{suffix}.png", dpi=300)
+    fig.savefig(out_path, dpi=300)
     plt.close(fig)
 
 def plot_jsd_micro_distributions(jsd_results_df: pd.DataFrame, layer_labels: list, jsd_dir, suffix: str = "") -> None:
@@ -176,49 +185,13 @@ def plot_jsd_micro_distributions(jsd_results_df: pd.DataFrame, layer_labels: lis
     plt.close()
 
 
-def plot_jsd_vs_entropy_scatter(jsd_results_df: pd.DataFrame, jsd_dir, suffix: str = "") -> None:
-    """Visualization 3: Scatter plot checking if concentrated concepts diverge more."""
-    # An empty results frame has no columns at all, so guard before dropna(subset=...).
-    if jsd_results_df.empty:
-        log.warning("  Skipping JSD vs. entropy scatter: no JSD results.")
-        return
-    divergence_entropy_data = jsd_results_df.dropna(subset=['jensen_shannon_divergence', 'shannon_entropy_label']).copy()
-    if divergence_entropy_data.empty:
-        log.warning("  Skipping JSD vs. entropy scatter: no rows with both metrics present.")
-        return
-
-    data = divergence_entropy_data
-    fig, ax = plt.subplots(figsize=(8, 7))
-    fitted = len(data) > 2
-    detail = None
-    if fitted:
-        r, p = stats.pearsonr(data['jensen_shannon_divergence'], data['shannon_entropy_label'])
-        detail = stats_line("Pearson r", r, p, len(data))
-    draw_regression(ax, data, "jensen_shannon_divergence", "shannon_entropy_label", fit=fitted, size=60)
-    for i in range(data.shape[0]):
-        ax.annotate(data['category'].iloc[i].capitalize(),
-                    (data['jensen_shannon_divergence'].iloc[i], data['shannon_entropy_label'].iloc[i]),
-                    xytext=(6, 3), textcoords='offset points', ha='left', fontsize=8, alpha=0.8)
-
-    set_title(ax, "Label-to-members divergence against label entropy", detail)
-    ax.set_xlabel("Jensen-Shannon divergence, label against member average (bits)\n"
-                  "high overlap (exemplar) to low overlap (prototype)")
-    ax.set_ylabel("Shannon entropy of the category label (bits)\nconcentrated to uniform")
-    fig.tight_layout()
-    fig.savefig(jsd_dir / f"scatter_jsd_vs_entropy{suffix}.png", dpi=300)
-    plt.close(fig)
-
 def _summarize_jsd(jsd_results_df: pd.DataFrame) -> dict:
-    """Mean divergence, mean internal diversity, and the correlation the scatter plots."""
-    empty = {key: np.nan for key in SUMMARY_LABELS}
+    """Mean divergence, mean internal diversity, and the rho of the diversity panel."""
     if jsd_results_df.empty:
-        return empty
-    paired = jsd_results_df.dropna(subset=['jensen_shannon_divergence', 'avg_member_diversity_jsd'])
-    r = (stats.pearsonr(paired['jensen_shannon_divergence'], paired['avg_member_diversity_jsd'])[0]
-         if len(paired) > 2 else np.nan)
+        return {key: np.nan for key in SUMMARY_LABELS}
     return {"mean_jensen_shannon_divergence": jsd_results_df['jensen_shannon_divergence'].mean(),
             "mean_member_diversity_jsd": jsd_results_df['avg_member_diversity_jsd'].mean(),
-            "jsd_vs_diversity_r": r}
+            "jsd_vs_diversity_rho": jsd_correlation(jsd_results_df, "avg_member_diversity_jsd", n_draws=0)["rho"]}
 
 
 def execute_module_3_dual_category_jsd(scope, concept_metadata: pd.DataFrame, jsd_dir,
@@ -251,8 +224,8 @@ def execute_module_3_dual_category_jsd(scope, concept_metadata: pd.DataFrame, js
             log.warning("  Skipping JSD visualisations: no qualifying categories at this AP threshold.")
             continue
         log.info("  Generating JSD visualisations...")
-        plot_jsd_vs_diversity_scatter(jsd_results_df, out_dir, suffix)
+        for stem, y_col, y_label, title in CATEGORY_PANELS:
+            plot_category_scatter(jsd_results_df, y_col, y_label, title, out_dir / f"{stem}{suffix}.png")
         plot_jsd_micro_distributions(jsd_results_df, jsd_layer_labels, out_dir, suffix)
-        plot_jsd_vs_entropy_scatter(jsd_results_df, out_dir, suffix)
 
     return canonical_results, canonical_labels, scope_summary_row(scope, **_summarize_jsd(canonical_results))
