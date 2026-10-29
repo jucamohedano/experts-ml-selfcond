@@ -12,6 +12,7 @@ import os
 import pathlib
 import random
 import re
+import sys
 import typing as t
 
 import dspy
@@ -25,6 +26,13 @@ except Exception:
     nltk = None
 
 from nltk.corpus.reader.wordnet import Synset
+
+# Validation uses the matcher of the context-only deletion, so a kept sentence is one the deletion empties.
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "abstractiveness" / "scripts"))
+from core.data_preparation.build_context_only_dataset import form_pattern  # noqa: E402
+from core.data_preparation.frequency_covariates import inflected_forms  # noqa: E402
+
+MIN_WORDS, MAX_WORDS = 8, 40
 
 @dataclasses.dataclass
 class GenerationConfig:
@@ -282,6 +290,20 @@ def normalize_sentence(raw: str) -> str:
     return s
 
 
+def word_forms_text(concept: str) -> str:
+    """The concept's inflected forms as listed in the prompt, e.g. 'penguin, penguins'."""
+    return ", ".join(sorted(inflected_forms(concept)))
+
+
+def rejection_reason(sentence: str, pattern: re.Pattern) -> t.Optional[str]:
+    """'length' outside MIN_WORDS to MAX_WORDS words, 'no_word' without a concept form, None when valid."""
+    if not MIN_WORDS <= len(sentence.split()) <= MAX_WORDS:
+        return "length"
+    if not pattern.search(sentence):
+        return "no_word"
+    return None
+
+
 def unique_preserve_order(items: t.Iterable[str]) -> t.List[str]:
     seen = set()
     out: t.List[str] = []
@@ -300,6 +322,9 @@ class GenerateFacts(dspy.Signature):
     """Generate 10 diverse, factual sentences about the given concept.
 
     Output exactly 10 sentences, one per line, with no numbering or bullets.
+    Every sentence must contain the concept word, in one of the forms listed in word_forms.
+    Vary where the concept word appears in the sentence.
+    Each sentence should be between 15 and 25 words long.
     Refer to the concept only by its name without specific classes, types, or names.
     If the concept name could refer to more than one thing, use the category and
     definition to write about the intended one only.
@@ -316,10 +341,13 @@ class GenerateFacts(dspy.Signature):
     sense_hint: str = dspy.InputField(desc="Synonyms of the intended sense and what kind of "
                                            "thing it is, e.g. 'date (a kind of edible fruit)'. "
                                            "Write about this sense only.")
+    word_forms: str = dspy.InputField(desc="The forms of the concept word a sentence may use, "
+                                           "e.g. 'penguin, penguins'. Every sentence must contain one.")
     random_seed: str = dspy.InputField(desc="Random seed to ensure diversity.")
 
     sentences: t.List[str] = dspy.OutputField(
-        desc="10 factual sentences about the concept, one per line, no numbering."
+        desc="10 factual sentences about the concept, one per line, no numbering, "
+             "each containing one of the word forms."
     )
 
 
@@ -328,6 +356,9 @@ class GenerateStories(dspy.Signature):
 
     Output exactly 10 sentences, one per line, with no numbering or bullets.
     Each sentence should be a short story about the concept.
+    Every sentence must contain the concept word, in one of the forms listed in word_forms.
+    Vary where the concept word appears in the sentence.
+    Each sentence should be between 15 and 25 words long.
     Refer to the concept only by its name without specific classes, types, or names.
     If the concept name could refer to more than one thing, use the category and
     definition to write about the intended one only.
@@ -344,10 +375,13 @@ class GenerateStories(dspy.Signature):
     sense_hint: str = dspy.InputField(desc="Synonyms of the intended sense and what kind of "
                                            "thing it is, e.g. 'date (a kind of edible fruit)'. "
                                            "Write about this sense only.")
+    word_forms: str = dspy.InputField(desc="The forms of the concept word a sentence may use, "
+                                           "e.g. 'penguin, penguins'. Every sentence must contain one.")
     random_seed: str = dspy.InputField(desc="Random seed to ensure diversity.")
 
     sentences: t.List[str] = dspy.OutputField(
-        desc="10 story sentences about the concept, one per line, no numbering."
+        desc="10 story sentences about the concept, one per line, no numbering, "
+             "each containing one of the word forms."
     )
 
 
@@ -371,21 +405,18 @@ class ConceptGenerator(dspy.Module):
     
     def forward(self, concept: str, definition: str, article: str, category: str = "",
                 sense_hint: str = ""):
-        """Generate sentences for a concept (synchronous)."""
+        """Generate sentences for a concept (synchronous), keeping only valid ones."""
         positives = []
+        inputs = dict(concept=concept, category=category, article=article, definition=definition,
+                      sense_hint=sense_hint, word_forms=word_forms_text(concept))
+        pattern = form_pattern(concept)
 
         # Generate facts
         fact_batches_needed = (self.fact_count + 9) // 10  # Ceiling division
         for _ in range(fact_batches_needed):
             try:
-                result = self.fact_generator(
-                    concept=concept,
-                    category=category,
-                    article=article,
-                    definition=definition,
-                    sense_hint=sense_hint
-                )
-                positives.extend([sentence for sentence in result.sentences if sentence])
+                result = self.fact_generator(**inputs, random_seed=str(random.random()))
+                positives.extend([s for s in result.sentences if s and rejection_reason(s, pattern) is None])
             except Exception as e:
                 print(f"    Warning: Fact generation batch failed for {concept}: {e}")
 
@@ -393,14 +424,8 @@ class ConceptGenerator(dspy.Module):
         story_batches_needed = (self.story_count + 9) // 10  # Ceiling division
         for _ in range(story_batches_needed):
             try:
-                result = self.story_generator(
-                    concept=concept,
-                    category=category,
-                    article=article,
-                    definition=definition,
-                    sense_hint=sense_hint
-                )
-                positives.extend([sentence for sentence in result.sentences if sentence])
+                result = self.story_generator(**inputs, random_seed=str(random.random()))
+                positives.extend([s for s in result.sentences if s and rejection_reason(s, pattern) is None])
             except Exception as e:
                 print(f"    Warning: Story generation batch failed for {concept}: {e}")
         
@@ -413,83 +438,50 @@ class ConceptGenerator(dspy.Module):
             fact_count=min(self.fact_count, len(positives)),
             story_count=min(self.story_count, len(positives) - self.fact_count) if len(positives) > self.fact_count else 0
         )
-    
+
+    async def _acollect(self, predictor, kind: str, target: int, inputs: dict,
+                        pattern: re.Pattern) -> t.Tuple[t.List[str], dict]:
+        """Call the predictor until target valid unique sentences or 2 x target calls, counting rejections."""
+        kept: t.List[str] = []
+        stats = {"calls": 0, "received": 0, "length": 0, "no_word": 0, "duplicate": 0, "rejected": []}
+        while len(kept) < target and stats["calls"] < target * 2:
+            stats["calls"] += 1
+            try:
+                result = await predictor.acall(**inputs, random_seed=str(random.random()))
+            except Exception as e:
+                print(f"    Warning: {kind} generation attempt {stats['calls']} failed for {inputs['concept']}: {e}")
+                continue
+            added = 0
+            for sentence in [s for s in result.sentences if s]:
+                stats["received"] += 1
+                reason = rejection_reason(sentence, pattern)
+                if reason is None and sentence in kept:
+                    reason = "duplicate"
+                if reason is None:
+                    kept.append(sentence)
+                    added += 1
+                    continue
+                stats[reason] += 1
+                if reason != "duplicate":
+                    stats["rejected"].append([reason, sentence])
+            if added or stats["calls"] % 5 == 0:
+                print(f"    [{inputs['concept']}] {kind}: {len(kept)}/{target} (Attempt {stats['calls']})")
+        return kept[:target], stats
+
     async def aforward(self, concept: str, definition: str, article: str, category: str = "",
                        sense_hint: str = ""):
-        """Generate sentences for a concept (asynchronous)."""
-        positives = []
-
-        # Generate facts
-        # --- Generate Facts ---
-        facts_collected = []
-        attempts = 0
-        max_attempts = self.fact_count * 2  # Safety limit
-
-        while len(facts_collected) < self.fact_count and attempts < max_attempts:
-            attempts += 1
-            try:
-                result = await self.fact_generator.acall(
-                    concept=concept,
-                    category=category,
-                    article=article,
-                    definition=definition,
-                    sense_hint=sense_hint,
-                    random_seed=str(random.random())
-                )
-                # Add unique valid sentences
-                new_facts = [s for s in result.sentences if s]
-                added_count = 0
-                for fact in new_facts:
-                    if fact not in facts_collected:
-                        facts_collected.append(fact)
-                        added_count += 1
-                
-                # Log progress every 5 attempts or if we added something
-                if added_count > 0 or attempts % 5 == 0:
-                    print(f"    [{concept}] Facts: {len(facts_collected)}/{self.fact_count} (Attempt {attempts})")
-                    
-            except Exception as e:
-                print(f"    Warning: Fact generation attempt {attempts} failed for {concept}: {e}")
-                # Optional: await asyncio.sleep(1) to be nice to API
-        
-        # --- Generate Stories ---
-        stories_collected = []
-        attempts = 0
-        max_attempts = self.story_count * 2
-        
-        while len(stories_collected) < self.story_count and attempts < max_attempts:
-            attempts += 1
-            try:
-                result = await self.story_generator.acall(
-                    concept=concept,
-                    category=category,
-                    article=article,
-                    definition=definition,
-                    sense_hint=sense_hint,
-                    random_seed=str(random.random())
-                )
-                new_stories = [s for s in result.sentences if s]
-                added_count = 0
-                for story in new_stories:
-                    if story not in stories_collected:
-                        stories_collected.append(story)
-                        added_count += 1
-
-                # Log progress
-                if added_count > 0 or attempts % 5 == 0:
-                    print(f"    [{concept}] Stories: {len(stories_collected)}/{self.story_count} (Attempt {attempts})")
-
-            except Exception as e:
-                print(f"    Warning: Story generation attempt {attempts} failed for {concept}: {e}")
-        
-        # Combine and Deduplicate
-        all_sentences = facts_collected[:self.fact_count] + stories_collected[:self.story_count]
-        positives = unique_preserve_order(all_sentences)
-        
+        """Generate sentences for a concept (asynchronous), keeping only valid ones."""
+        inputs = dict(concept=concept, category=category, article=article, definition=definition,
+                      sense_hint=sense_hint, word_forms=word_forms_text(concept))
+        pattern = form_pattern(concept)
+        facts, fact_stats = await self._acollect(self.fact_generator, "Facts", self.fact_count, inputs, pattern)
+        stories, story_stats = await self._acollect(self.story_generator, "Stories", self.story_count,
+                                                    inputs, pattern)
         return dspy.Prediction(
-            positives=positives,
-            fact_count=len(facts_collected),
-            story_count=len(stories_collected)
+            positives=unique_preserve_order(facts + stories),
+            fact_count=len(facts),
+            story_count=len(stories),
+            validation={"facts": fact_stats, "stories": story_stats},
         )
 
 
@@ -502,7 +494,7 @@ async def generate_concept_positives_async(
     storage_key: str,
     category: t.Optional[str],
     generator: ConceptGenerator,
-) -> t.Tuple[str, str, t.Optional[str], t.List[str]]:
+) -> t.Tuple[str, str, t.Optional[str], t.List[str], dict]:
     """Generate positives for a single concept asynchronously using DSPy's native async support."""
     synset = select_wordnet_sense(concept, category)
     definition = synset.definition() if synset else f"{concept} (definition unavailable)"
@@ -519,7 +511,10 @@ async def generate_concept_positives_async(
     if len(result.positives) < total_target:
         print(f"    WARNING: {concept} only generated {len(result.positives)}/{total_target} positives!")
 
-    return concept, storage_key, category, result.positives
+    validation = {**result.validation, "prompt_inputs": {
+        "sense": synset.name() if synset else None, "definition": definition, "sense_hint": sense_hint,
+        "article": article, "word_forms": word_forms_text(concept)}}
+    return concept, storage_key, category, result.positives, validation
 
 
 # ============================================================================
@@ -733,10 +728,13 @@ def write_intermediate_positives(
     storage_key: str,
     category: t.Optional[str],
     positives: t.List[str],
+    validation: t.Optional[dict] = None,
 ) -> None:
     intermediate_dir.mkdir(parents=True, exist_ok=True)
     out = {"concept": storage_key, "word": concept, "storage_key": storage_key,
            "category": category, "positives": positives}
+    if validation is not None:
+        out["validation"] = validation
     with (intermediate_dir / f"{storage_key}.json").open("w", encoding="utf-8") as fp:
         json.dump(out, fp, ensure_ascii=False)
 
@@ -839,13 +837,14 @@ async def generate_positives(
                 failed_storage_keys.append(storage_key)
                 continue
 
-            _, _, _, positives = result
+            _, _, _, positives, validation = result
             write_intermediate_positives(
                 intermediate_dir=intermediate_dir,
                 concept=concept,
                 storage_key=storage_key,
                 category=category,
                 positives=positives,
+                validation=validation,
             )
             print(f"    Generated {len(positives)} positives for {storage_key}")
 
@@ -1009,6 +1008,7 @@ async def async_main() -> None:
         help="Generator to use for DSPy",
     )
     args = parser.parse_args()
+    ensure_nltk_wordnet()
 
     # Load config
     cfg = load_config(args.config)
