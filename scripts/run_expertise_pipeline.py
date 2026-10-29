@@ -42,6 +42,13 @@ RESPONSES_PATH = str(REPO_ROOT / "abstractiveness" / "responses" / "GPT2_abstrac
 
 # --- Dataset (shared by all models). -----------------------------------------
 DATA_PATH      = str(REPO_ROOT / "abstractiveness" / "assets" / "Qwen3-30B-A3B-Instruct-2507_abstractiveness_Richie_HSJ_cot")
+
+# Context-only control: the same sentences with every concept word deleted, built by
+# `python -m core.data_preparation.build_context_only_dataset` from abstractiveness/scripts/.
+# Uncomment both lines and pick the RESPONSES_PATH of the selected model.
+# DATA_PATH      = str(REPO_ROOT / "abstractiveness" / "assets" / "Qwen3-30B-A3B-Instruct-2507_abstractiveness_Richie_HSJ_cot_context_only")
+# RESPONSES_PATH = str(REPO_ROOT / "abstractiveness" / "responses" / "GPT2_abstractiveness_Richie_HSJ_responses_context_only")
+# RESPONSES_PATH = str(REPO_ROOT / "abstractiveness" / "responses" / "Qwen3_1.7Base_abstractiveness_Richie_HSJ_responses_context_only")
 CONCEPTS_PATH  = str(pathlib.Path(DATA_PATH) / "concept_list.csv")
 
 if __name__ == "__main__":

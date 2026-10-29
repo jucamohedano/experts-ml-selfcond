@@ -161,6 +161,34 @@ MODEL_CONFIGS = {
         "probing_sentences_dir": "Qwen3-30B-A3B-Instruct-2507_abstractiveness_Richie_HSJ_cot",
         "embedding_cache_file": "concept_embeddings_gpt2_richie_hsj_nopad.npz",
     },
+    # The two nopad runs on the context-only copy of the sentences, every concept word deleted from
+    # the model input (core.data_preparation.build_context_only_dataset), text baseline included.
+    "qwen3_base_richie_hsj_context_only": {
+        "responses_subdir": "Qwen3_1.7Base_abstractiveness_Richie_HSJ_responses_context_only",
+        "model_subdir": "Qwen",
+        "architecture": "qwen3",
+        "metadata_file": "metadata_Richie_HSJ.json",
+        "layer_mapping_file": "layer_mapping_Qwen3_1-7B.csv",
+        "typicality_column": "typicality_HSJ_pairwise",
+        "output_subdir": "research_plots_qwen_base_richie_hsj_context_only",
+        "sublayer_filter": "mlp.gate_proj",
+        "frequency_corpus": "fineweb",
+        "probing_sentences_dir": "Qwen3-30B-A3B-Instruct-2507_abstractiveness_Richie_HSJ_cot_context_only",
+        "embedding_cache_file": "concept_embeddings_qwen3_base_richie_hsj_context_only.npz",
+    },
+    "gpt2_richie_hsj_context_only": {
+        "responses_subdir": "GPT2_abstractiveness_Richie_HSJ_responses_context_only",
+        "model_subdir": "gpt2",
+        "architecture": "gpt2",
+        "metadata_file": "metadata_Richie_HSJ.json",
+        "layer_mapping_file": "layer_mapping_GPT2.csv",
+        "typicality_column": "typicality_HSJ_pairwise",
+        "output_subdir": "research_plots_gpt2_richie_hsj_context_only",
+        "sublayer_filter": "mlp.c_fc",
+        "frequency_corpus": "openwebtext",
+        "probing_sentences_dir": "Qwen3-30B-A3B-Instruct-2507_abstractiveness_Richie_HSJ_cot_context_only",
+        "embedding_cache_file": "concept_embeddings_gpt2_richie_hsj_context_only.npz",
+    },
 }
 
 # Configuration run when --config is not given on the command line.

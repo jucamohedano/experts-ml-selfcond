@@ -103,7 +103,9 @@ class PytorchTransformersTokenizer:
         pad_tokens: int = max(min_num_tokens - num_effective_tokens, 0)
         return indexed_tokens + [pad_token_id] * pad_tokens
 
-    def pre_process_sequence(self, text: str, min_num_tokens: int = None) -> Dict[str, List]:
+    def pre_process_sequence(
+        self, text: str, min_num_tokens: int = None, delete_spans: List[List[int]] = None
+    ) -> Dict[str, List]:
         """
         Pre-processes a text sequence by applying a tokenizer and padding up till min_num_tokens tokens.
         The final sequence will have then (min_num_tokens) tokens.
@@ -119,11 +121,20 @@ class PytorchTransformersTokenizer:
         Args:
             text: The text to be pre-processed
             min_num_tokens: If not None, the tokens sequence will be padded with padding_str up till min_num_tokens.
+            delete_spans: Character spans [start, end) whose tokens are deleted, the later tokens closing up.
 
         Returns:
             named_data: dict of extra data, for example: `{'attention_mask': attention_mask_values}`
         """
-        indexed_tokens: List[int] = self._tokenizer.encode(text)
+        if delete_spans:
+            encoded = self._tokenizer(text, return_offsets_mapping=True)
+            indexed_tokens = [
+                i
+                for i, (a, b) in zip(encoded["input_ids"], encoded["offset_mapping"])
+                if not any(a < end and b > start for start, end in delete_spans)
+            ]
+        else:
+            indexed_tokens = self._tokenizer.encode(text)
 
         num_effective_tokens = len(indexed_tokens)
         if min_num_tokens is not None:
@@ -139,7 +150,10 @@ class PytorchTransformersTokenizer:
         return named_data
 
     def preprocess_dataset(
-        self, sentence_list: List[str], min_num_tokens: int = None
+        self,
+        sentence_list: List[str],
+        min_num_tokens: int = None,
+        delete_spans: List[List[List[int]]] = None,
     ) -> Dict[str, List]:
         """
         Pre-proces a list of sentences.
@@ -147,17 +161,24 @@ class PytorchTransformersTokenizer:
         Args:
             sentence_list: List of sentences.
             min_num_tokens: Min number of tokens a sentence will have, if shorter it will be padded.
+            delete_spans: Per sentence, the character spans to delete (see `pre_process_sequence`).
 
         Returns:
             named_data: dict of data that will be fed as kwargs to the model.
         """
+        if delete_spans is None:
+            delete_spans = [None] * len(sentence_list)
+        assert len(delete_spans) == len(sentence_list)
         named_data: t.Dict[str, t.List] = defaultdict(list)
-        for seq in tqdm(sentence_list, desc="Preprocessing", total=len(sentence_list)):
+        for seq, spans in zip(
+            tqdm(sentence_list, desc="Preprocessing", total=len(sentence_list)), delete_spans
+        ):
             if type(seq) != str:
                 continue
             named_data_seq = self.pre_process_sequence(
                 text=seq,
                 min_num_tokens=min_num_tokens,
+                delete_spans=spans,
             )
 
             for k, v in named_data_seq.items():
@@ -198,6 +219,7 @@ class DatasetForSeqModels(Dataset):
         self._seq_len = seq_len
         self._num_per_concept = num_per_concept
         self._tokenizer = tokenizer
+        self._delete_spans: Optional[List] = None
 
         unprocessed_data, self._labels = self._load_data(
             path=path,
@@ -210,6 +232,7 @@ class DatasetForSeqModels(Dataset):
         preprocessed_named_data = self._tokenizer.preprocess_dataset(
             sentence_list=unprocessed_data,
             min_num_tokens=self.seq_len,
+            delete_spans=self._delete_spans,
         )
 
         # self._model_input_fields = list(preprocessed_data.keys())
@@ -309,7 +332,8 @@ class ConceptDataset(DatasetForSeqModels):
         }
     }
     ```
-    with nx, and px strings.
+    with nx, and px strings. An optional 'delete_spans' entry, shaped like 'sentences' with a list of
+    [start, end] character spans per sentence, deletes those spans' tokens from the model input.
     """
 
     def __init__(
@@ -350,11 +374,13 @@ class ConceptDataset(DatasetForSeqModels):
             json_data = json.load(fp)
 
         json_sentences = json_data["sentences"]
+        json_spans = json_data.get("delete_spans")
         unique_labels = sorted(list(json_sentences.keys()))
 
         # Reduce amount of data to required.
         sentences: List[str] = []
         labels: List[int] = []
+        spans: List = []
         for label in unique_labels:
             if num_per_concept is not None and num_per_concept < len(json_sentences[label]):
                 idx = random_state.choice(
@@ -364,6 +390,9 @@ class ConceptDataset(DatasetForSeqModels):
                 idx = np.arange(len(json_sentences[label]))
             sentences += [json_sentences[label][i] for i in idx]
             labels += [label_map[label]] * len(idx)
+            if json_spans is not None:
+                spans += [json_spans[label][i] for i in idx]
+        self._delete_spans = spans if json_spans is not None else None
         return sentences, labels
 
     @property
