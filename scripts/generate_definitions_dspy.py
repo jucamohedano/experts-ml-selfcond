@@ -14,6 +14,7 @@ import random
 import re
 import sys
 import typing as t
+import unicodedata
 
 import dspy
 from tqdm import tqdm
@@ -27,12 +28,16 @@ except Exception:
 
 from nltk.corpus.reader.wordnet import Synset
 
-# Validation uses the matcher of the context-only deletion, so a kept sentence is one the deletion empties.
+# Validation uses the matcher of the context-only masking, so a kept sentence is one the masking empties.
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "abstractiveness" / "scripts"))
 from core.data_preparation.build_context_only_dataset import form_pattern  # noqa: E402
 from core.data_preparation.frequency_covariates import inflected_forms  # noqa: E402
 
 MIN_WORDS, MAX_WORDS = 8, 40
+OPENING = re.compile(r"[\s\"'\u201c\u2018(]*(?:(?:a|an|the)\s+)?", re.IGNORECASE)
+OPENERS, CLOSERS = "\"'\u201c\u2018(", "\"'\u201d\u2019)"
+SECOND_SENTENCE = re.compile(r"[a-z0-9][.!?][\"'\u201d\u2019)]?\s+[\"'\u201c\u2018(]?[A-Z]")
+ABBREVIATION = re.compile(r"\b(Mr|Mrs|Ms|Dr|St|Mt|Jr|Sr|Prof|vs|etc|approx)\.")
 
 @dataclasses.dataclass
 class GenerationConfig:
@@ -189,6 +194,16 @@ SENSE_OVERRIDES: t.Dict[t.Tuple[str, str], str] = {
     ("minister", "professions"): "minister.n.02",
     # riding in a sailboat, not seafaring.n.01 "the work of a sailor"
     ("sailing", "sports"): "sailing.n.02",
+    # public transport, not bus.n.04 "a car that is old and unreliable", the only sense under vehicle.n.01
+    ("bus", "vehicles"): "bus.n.01",
+    # trousers (US), not bloomers.n.01 "underpants worn by women"
+    ("pants", "clothing"): "trouser.n.01",
+    # the shop cashier, not teller.n.03 "an employee of a bank"
+    ("cashier", "professions"): "cashier.n.02",
+    # nightclothes, not pajama.n.01 "loose trousers tied by a drawstring"
+    ("pajamas", "clothing"): "pajama.n.02",
+    # ice hockey (US), not field_hockey.n.01, listed first
+    ("hockey", "sports"): "ice_hockey.n.01",
 }
 
 
@@ -296,12 +311,39 @@ def word_forms_text(concept: str) -> str:
 
 
 def rejection_reason(sentence: str, pattern: re.Pattern) -> t.Optional[str]:
-    """'length' outside MIN_WORDS to MAX_WORDS words, 'no_word' without a concept form, None when valid."""
+    """The first failed rule of length, script, unfinished, multi, lowercase and no_word, None when valid."""
     if not MIN_WORDS <= len(sentence.split()) <= MAX_WORDS:
         return "length"
+    if any(c.isalpha() and not unicodedata.name(c, "").startswith("LATIN") for c in sentence):
+        return "script"
+    if not sentence.rstrip(CLOSERS).endswith((".", "!", "?")):
+        return "unfinished"
+    if SECOND_SENTENCE.search(ABBREVIATION.sub(r"\1", sentence)):
+        return "multi"
+    if sentence.lstrip(OPENERS)[:1].islower():
+        return "lowercase"
     if not pattern.search(sentence):
         return "no_word"
     return None
+
+
+def starts_with_concept(sentence: str, pattern: re.Pattern) -> bool:
+    """True when a concept form is the first word, after any opening quote and at most an article."""
+    match = pattern.search(sentence)
+    return bool(match) and OPENING.fullmatch(sentence[:match.start()]) is not None
+
+
+def screen(sentence: str, kept: t.List[str], pattern: re.Pattern, first_cap: int,
+           seen: t.Sequence[str] = ()) -> t.Optional[str]:
+    """Rejection reason against the sentences kept so far and those of the other kind, ignoring case,
+    'word_first' once first_cap of the kept ones open with the concept."""
+    reason = rejection_reason(sentence, pattern)
+    if reason is None and sentence.lower() in {k.lower() for k in (*seen, *kept)}:
+        reason = "duplicate"
+    if reason is None and starts_with_concept(sentence, pattern):
+        if sum(starts_with_concept(s, pattern) for s in kept) >= first_cap:
+            reason = "word_first"
+    return reason
 
 
 def unique_preserve_order(items: t.Iterable[str]) -> t.List[str]:
@@ -321,10 +363,12 @@ def unique_preserve_order(items: t.Iterable[str]) -> t.List[str]:
 class GenerateFacts(dspy.Signature):
     """Generate 10 diverse, factual sentences about the given concept.
 
-    Output exactly 10 sentences, one per line, with no numbering or bullets.
+    Output exactly 10 sentences.
+    State general facts that hold for the concept, not events involving a particular person or object.
     Every sentence must contain the concept word, in one of the forms listed in word_forms.
-    Vary where the concept word appears in the sentence.
-    Each sentence should be between 15 and 25 words long.
+    At most 3 of the 10 sentences may begin with the concept word, with or without "a", "an" or "the" before it.
+    In the other sentences, place the concept word in the middle or near the end.
+    Each sentence must have 18 to 30 words, a main clause plus at least one clause adding context such as time, place, cause or consequence.
     Refer to the concept only by its name without specific classes, types, or names.
     If the concept name could refer to more than one thing, use the category and
     definition to write about the intended one only.
@@ -346,19 +390,20 @@ class GenerateFacts(dspy.Signature):
     random_seed: str = dspy.InputField(desc="Random seed to ensure diversity.")
 
     sentences: t.List[str] = dspy.OutputField(
-        desc="10 factual sentences about the concept, one per line, no numbering, "
-             "each containing one of the word forms."
+        desc="10 factual sentences about the concept, each containing one of the word forms "
+             "and 18 to 30 words long, at most 3 of them beginning with the concept word."
     )
 
 
 class GenerateStories(dspy.Signature):
     """Generate 10 diverse, story-based sentences about the given concept.
 
-    Output exactly 10 sentences, one per line, with no numbering or bullets.
+    Output exactly 10 sentences.
     Each sentence should be a short story about the concept.
     Every sentence must contain the concept word, in one of the forms listed in word_forms.
-    Vary where the concept word appears in the sentence.
-    Each sentence should be between 15 and 25 words long.
+    At most 3 of the 10 sentences may begin with the concept word, with or without "a", "an" or "the" before it.
+    In the other sentences, place the concept word in the middle or near the end.
+    Each sentence must have 18 to 30 words, a main clause plus at least one clause adding context such as time, place, cause or consequence.
     Refer to the concept only by its name without specific classes, types, or names.
     If the concept name could refer to more than one thing, use the category and
     definition to write about the intended one only.
@@ -380,8 +425,8 @@ class GenerateStories(dspy.Signature):
     random_seed: str = dspy.InputField(desc="Random seed to ensure diversity.")
 
     sentences: t.List[str] = dspy.OutputField(
-        desc="10 story sentences about the concept, one per line, no numbering, "
-             "each containing one of the word forms."
+        desc="10 story sentences about the concept, each containing one of the word forms "
+             "and 18 to 30 words long, at most 3 of them beginning with the concept word."
     )
 
 
@@ -406,17 +451,20 @@ class ConceptGenerator(dspy.Module):
     def forward(self, concept: str, definition: str, article: str, category: str = "",
                 sense_hint: str = ""):
         """Generate sentences for a concept (synchronous), keeping only valid ones."""
-        positives = []
         inputs = dict(concept=concept, category=category, article=article, definition=definition,
                       sense_hint=sense_hint, word_forms=word_forms_text(concept))
         pattern = form_pattern(concept)
+        facts: t.List[str] = []
+        stories: t.List[str] = []
 
         # Generate facts
         fact_batches_needed = (self.fact_count + 9) // 10  # Ceiling division
         for _ in range(fact_batches_needed):
             try:
                 result = self.fact_generator(**inputs, random_seed=str(random.random()))
-                positives.extend([s for s in result.sentences if s and rejection_reason(s, pattern) is None])
+                for s in [" ".join(s.split()) for s in result.sentences if s and s.strip()]:
+                    if screen(s, facts, pattern, self.fact_count // 3) is None:
+                        facts.append(s)
             except Exception as e:
                 print(f"    Warning: Fact generation batch failed for {concept}: {e}")
 
@@ -425,12 +473,14 @@ class ConceptGenerator(dspy.Module):
         for _ in range(story_batches_needed):
             try:
                 result = self.story_generator(**inputs, random_seed=str(random.random()))
-                positives.extend([s for s in result.sentences if s and rejection_reason(s, pattern) is None])
+                for s in [" ".join(s.split()) for s in result.sentences if s and s.strip()]:
+                    if screen(s, stories, pattern, self.story_count // 3, seen=facts) is None:
+                        stories.append(s)
             except Exception as e:
                 print(f"    Warning: Story generation batch failed for {concept}: {e}")
         
         # Deduplicate and return
-        positives = unique_preserve_order(positives)
+        positives = unique_preserve_order(facts + stories)
         target = self.fact_count + self.story_count
         
         return dspy.Prediction(
@@ -439,11 +489,12 @@ class ConceptGenerator(dspy.Module):
             story_count=min(self.story_count, len(positives) - self.fact_count) if len(positives) > self.fact_count else 0
         )
 
-    async def _acollect(self, predictor, kind: str, target: int, inputs: dict,
-                        pattern: re.Pattern) -> t.Tuple[t.List[str], dict]:
-        """Call the predictor until target valid unique sentences or 2 x target calls, counting rejections."""
+    async def _acollect(self, predictor, kind: str, target: int, inputs: dict, pattern: re.Pattern,
+                        seen: t.Sequence[str] = ()) -> t.Tuple[t.List[str], dict]:
+        """Call the predictor until target valid unique sentences or 2 x target calls, at most a third opening with the concept."""
         kept: t.List[str] = []
-        stats = {"calls": 0, "received": 0, "length": 0, "no_word": 0, "duplicate": 0, "rejected": []}
+        stats = {"calls": 0, "received": 0, "kept": 0, "length": 0, "script": 0, "unfinished": 0, "multi": 0,
+                 "lowercase": 0, "no_word": 0, "duplicate": 0, "word_first": 0, "rejected": []}
         while len(kept) < target and stats["calls"] < target * 2:
             stats["calls"] += 1
             try:
@@ -452,11 +503,9 @@ class ConceptGenerator(dspy.Module):
                 print(f"    Warning: {kind} generation attempt {stats['calls']} failed for {inputs['concept']}: {e}")
                 continue
             added = 0
-            for sentence in [s for s in result.sentences if s]:
+            for sentence in [" ".join(s.split()) for s in result.sentences if s and s.strip()]:
                 stats["received"] += 1
-                reason = rejection_reason(sentence, pattern)
-                if reason is None and sentence in kept:
-                    reason = "duplicate"
+                reason = screen(sentence, kept, pattern, target // 3, seen)
                 if reason is None:
                     kept.append(sentence)
                     added += 1
@@ -466,6 +515,7 @@ class ConceptGenerator(dspy.Module):
                     stats["rejected"].append([reason, sentence])
             if added or stats["calls"] % 5 == 0:
                 print(f"    [{inputs['concept']}] {kind}: {len(kept)}/{target} (Attempt {stats['calls']})")
+        stats["kept"] = min(len(kept), target)
         return kept[:target], stats
 
     async def aforward(self, concept: str, definition: str, article: str, category: str = "",
@@ -476,7 +526,7 @@ class ConceptGenerator(dspy.Module):
         pattern = form_pattern(concept)
         facts, fact_stats = await self._acollect(self.fact_generator, "Facts", self.fact_count, inputs, pattern)
         stories, story_stats = await self._acollect(self.story_generator, "Stories", self.story_count,
-                                                    inputs, pattern)
+                                                    inputs, pattern, seen=facts)
         return dspy.Prediction(
             positives=unique_preserve_order(facts + stories),
             fact_count=len(facts),

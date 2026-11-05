@@ -35,6 +35,16 @@ The problem was found by reading the module 5 similarity heatmaps, where `date`,
 
 The last four rows are judgment calls rather than plain errors, in the sense that the generated sense is valid English and, for `carriage` and `minister`, still satisfies the category. They are corrected because the Richie and Bhatia norms are US norms collected over everyday objects and occupations, and because `handball` as an object sits inside a category whose every other member is an activity, which breaks comparability at level 2.
 
+Five more were found on 29 October 2026 while preparing the v3 dataset (Roadmap item PROBING-SENTENCE PROMPT V3 of `abstractiveness/CLAUDE.md`) and are corrected in `SENSE_OVERRIDES` for it. The current dataset still carries them, in part: its hockey positives mention a ball 136 times and a field 102 times against ice 6 times, its cashier positives a bank 60 times, its pajamas positives a drawstring 40 times and Asia 17 times, and its pants positives an undergarment 19 times.
+
+| Concept | Category | Sense selected before | Corrected sense |
+|---|---|---|---|
+| bus | vehicles | `bus.n.04`, a car that is old and unreliable, the only sense under `vehicle.n.01` | `bus.n.01`, a vehicle carrying many passengers |
+| pants | clothing | `bloomers.n.01`, underpants worn by women | `trouser.n.01`, a garment covering each leg separately |
+| cashier | professions | `teller.n.03`, an employee of a bank | `cashier.n.02`, a person receiving payments in a shop or restaurant |
+| pajamas | clothing | `pajama.n.01`, loose trousers tied by a drawstring | `pajama.n.02`, nightclothes |
+| hockey | sports | `field_hockey.n.01` | `ice_hockey.n.01`, a judgment call from the US norms, as above |
+
 ### Root cause
 
 Sense selection lives in `scripts/generate_definitions_dspy.py`. The old `fetch_wordnet_gloss` chose the lowest-indexed sense accepted by `is_relevant_concept`, which accepts any synset whose hypernym chain reaches `artifact.n.01`, `living_thing.n.01` or `body_part.n.01`. Because `person` inherits from `organism` and then from `living_thing`, every noun.person sense passes that filter, and WordNet usually lists the person sense first. That is why `date` resolved to the escort sense and `canary` to the informer sense.
