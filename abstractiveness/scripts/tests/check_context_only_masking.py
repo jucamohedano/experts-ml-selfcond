@@ -1,5 +1,5 @@
 """
-The context-only dataset marks every concept word form its rule names, and selfcond deletes those tokens.
+The context-only dataset marks every concept word form its rule names, and selfcond masks those tokens.
 
 Checks:
   1. Forms: the frequency rules decide the forms (irregular plurals, listed singulars, single forms),
@@ -7,14 +7,15 @@ Checks:
   2. Rule: positives lose their own concept, negatives the target concept and the concept they were
      drawn from, other concept words stay, a negative drawn from no concept raises an error.
   3. Build: the written files keep their sentences, carry spans aligned with them, copy the concept list.
-  4. Real dataset: no form of the target or of a negative's source survives the deletion, with the
+  4. Real dataset: no form of the target or of a negative's source survives the masking, with the
      share of positives and negatives losing a word reported.
-  5. Tokenizer: the tokens a span overlaps are deleted and the rest close up with attention mask 1,
-     and ConceptDataset applies each label's spans in its negatives-first order.
-  6. Text baseline: the positive documents of a context-only dataset lose the deleted spans.
+  5. Tokenizer: the tokens a span overlaps take the pad id and attention mask 0 with every position kept,
+     the masked tokens opening a sentence are dropped, ConceptDataset applies each label's spans in its
+     negatives-first order, and max pooling skips the masked positions.
+  6. Text baseline: the positive documents of a context-only dataset lose the masked spans.
 
 Usage, from scripts/:
-    python tests/check_context_only_deletion.py
+    python tests/check_context_only_masking.py
 """
 import contextlib
 import io
@@ -25,6 +26,8 @@ import re
 import sys
 import tempfile
 
+import torch
+
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
@@ -33,9 +36,10 @@ from core.data_preparation import build_context_only_dataset as ctx
 from core.data_preparation.frequency_covariates import inflected_forms
 from core.probing_sentences import load_positive_documents
 from selfcond.data import ConceptDataset, PytorchTransformersTokenizer
+from selfcond.models import pool_responses
 from _report import run
 
-DATASET = REPO_ROOT / "abstractiveness/assets/Qwen3-30B-A3B-Instruct-2507_abstractiveness_Richie_HSJ_cot"
+DATASET = REPO_ROOT / "abstractiveness/assets/Qwen3-30B-A3B-Instruct-2507_abstractiveness_Richie_HSJ_cot_v3"
 PAD = 50256
 
 FORM_CASES = [
@@ -61,6 +65,8 @@ EXPECTED_SPANS = {
 
 S1, S2 = "Penguins waddled near the chair.", "A chair by the penguin pool."
 S1_IDS = [47, 13561, 1040, 266, 2860, 992, 1474, 262, 5118, 13]
+S2_MASKED = [32, PAD, 416, 262, PAD, PAD, 5933, 13]
+S2_MASK = [1, 0, 1, 1, 0, 0, 1, 1]
 
 
 def fixture() -> dict:
@@ -102,7 +108,7 @@ def check_rule(failures) -> str:
     """Positives lose their own word, negatives the target's and their source's."""
     out = ctx.context_only_concepts(fixture())
     for key, want in EXPECTED_SPANS.items():
-        got = out[key].get("delete_spans")
+        got = out[key].get("mask_spans")
         if got != want:
             failures.append(f"{key}: spans {got}, expected {want}")
     stray = fixture()
@@ -126,8 +132,8 @@ def check_build(failures) -> str:
             written = json.loads((out / "custom" / f"{key}.json").read_text(encoding="utf-8"))
             if written["sentences"] != data["sentences"]:
                 failures.append(f"{key}: sentences changed")
-            if written.get("delete_spans") != EXPECTED_SPANS[key]:
-                failures.append(f"{key}: written spans {written.get('delete_spans')}")
+            if written.get("mask_spans") != EXPECTED_SPANS[key]:
+                failures.append(f"{key}: written spans {written.get('mask_spans')}")
         if (out / "concept_list.csv").read_text() != (src / "concept_list.csv").read_text():
             failures.append("concept_list.csv not copied")
     return "build writes 3 files"
@@ -144,11 +150,11 @@ def check_real_dataset(failures) -> str:
         for sentence in data["sentences"]["positive"]:
             sources.setdefault(sentence, set()).add(key)
     out = ctx.context_only_concepts(concepts)
-    deleted = {"positive": [0, 0], "negative": [0, 0]}
+    masked = {"positive": [0, 0], "negative": [0, 0]}
     for key, data in out.items():
         target = inflected_forms(concepts[key]["word"])
         for label in ("positive", "negative"):
-            texts, spans = data["sentences"][label], data["delete_spans"][label]
+            texts, spans = data["sentences"][label], data["mask_spans"][label]
             if len(texts) != len(spans):
                 failures.append(f"{key} {label}: {len(spans)} span lists for {len(texts)} sentences")
                 continue
@@ -161,49 +167,57 @@ def check_real_dataset(failures) -> str:
                 if left:
                     failures.append(f"{key} {label}: {sorted(left)} left in {text!r}")
                 if concepts[key]["category"]:
-                    deleted[label][0] += bool(text_spans)
-                    deleted[label][1] += 1
-    share = {label: hit / total for label, (hit, total) in deleted.items()}
+                    masked[label][0] += bool(text_spans)
+                    masked[label][1] += 1
+    share = {label: hit / total for label, (hit, total) in masked.items()}
     return (f"{len(concepts)} concepts, no form left, members lose a word in {share['positive']:.1%} "
             f"of positives and {share['negative']:.1%} of negatives")
 
 
 def check_tokenizer(failures) -> str:
-    """Deleted tokens leave the input, ConceptDataset keeps the label order."""
+    """Masked tokens keep their slot, opening ones are dropped, ConceptDataset keeps the label order, pooling skips them."""
     with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
         tokenizer = PytorchTransformersTokenizer("gpt2", cache_dir=None)
         plain = tokenizer.pre_process_sequence(S1, min_num_tokens=12)
-        deleted = tokenizer.pre_process_sequence(S1, min_num_tokens=12, delete_spans=[[0, 8]])
+        opening = tokenizer.pre_process_sequence(S1, min_num_tokens=12, mask_spans=[[0, 8]])
+        both = tokenizer.pre_process_sequence(S1, min_num_tokens=12, mask_spans=[[0, 8], [26, 31]])
         batch = tokenizer.preprocess_dataset([S1, S2], min_num_tokens=10,
-                                             delete_spans=[[[0, 8]], [[2, 7], [15, 22]]])
+                                             mask_spans=[[[0, 8]], [[2, 7], [15, 22]]])
         with tempfile.TemporaryDirectory() as tmp:
             path = pathlib.Path(tmp) / "penguin.json"
             path.write_text(json.dumps({
                 "concept": "penguin", "group": "custom",
                 "sentences": {"positive": [S1], "negative": [S2]},
-                "delete_spans": {"positive": [[[0, 8]]], "negative": [[[2, 7], [15, 22]]]},
+                "mask_spans": {"positive": [[[0, 8]]], "negative": [[[2, 7], [15, 22]]]},
             }), encoding="utf-8")
             dataset = ConceptDataset(json_file=path, tokenizer=tokenizer, seq_len=12)
     if plain != {"input_ids": S1_IDS + [PAD, PAD], "attention_mask": [1] * 10 + [0, 0]}:
         failures.append(f"sentence without spans changed: {plain}")
     want = {"input_ids": S1_IDS[3:] + [PAD] * 5, "attention_mask": [1] * 7 + [0] * 5}
-    if deleted != want:
-        failures.append(f"sentence with a deleted span {deleted}, expected {want}")
-    want_ids = [S1_IDS[3:] + [PAD] * 3, [32, 416, 262, 5933, 13] + [PAD] * 5]
-    want_mask = [[1] * 7 + [0] * 3, [1] * 5 + [0] * 5]
+    if opening != want:
+        failures.append(f"sentence opening with a masked span {opening}, expected {want}")
+    want = {"input_ids": S1_IDS[3:8] + [PAD, 13] + [PAD] * 5, "attention_mask": [1] * 5 + [0, 1] + [0] * 5}
+    if both != want:
+        failures.append(f"sentence with an opening and an inner span {both}, expected {want}")
+    want_ids = [S1_IDS[3:] + [PAD] * 3, S2_MASKED + [PAD] * 2]
+    want_mask = [[1] * 7 + [0] * 3, S2_MASK + [0] * 2]
     if batch["input_ids"] != want_ids or batch["attention_mask"] != want_mask:
         failures.append(f"batch {dict(batch)}, expected ids {want_ids} and mask {want_mask}")
-    want_dataset = [[1] * 5 + [0] * 7, [1] * 7 + [0] * 5]
+    want_dataset = [S2_MASK + [0] * 4, [1] * 7 + [0] * 5]
     if dataset.data["attention_mask"] != want_dataset or dataset.data["labels"] != [0, 1]:
         failures.append(f"ConceptDataset mask {dataset.data['attention_mask']}, labels {dataset.data['labels']}")
-    return "tokenizer and ConceptDataset on GPT-2"
+    response = torch.tensor([[[1.0, 5.0], [9.0, 9.0], [2.0, 0.0], [7.0, 7.0]]])
+    pooled = pool_responses(response, axis=1, attention_mask=torch.tensor([[1, 0, 1, 0]]))
+    if pooled.tolist() != [[2.0, 5.0]]:
+        failures.append(f"max pooling over a masked slot gave {pooled.tolist()}, expected [[2.0, 5.0]]")
+    return "tokenizer, ConceptDataset and pooling on GPT-2"
 
 
 def check_text_baseline(failures) -> str:
-    """The text baseline reads the positives without their deleted spans."""
+    """The text baseline reads the positives without their masked spans."""
     concepts = fixture()
     for key, data in concepts.items():
-        data["delete_spans"] = EXPECTED_SPANS[key]
+        data["mask_spans"] = EXPECTED_SPANS[key]
     with tempfile.TemporaryDirectory() as tmp:
         write_dataset(pathlib.Path(tmp), concepts)
         documents = load_positive_documents(tmp, ("penguin", "chair", "birds"))
@@ -214,7 +228,7 @@ def check_text_baseline(failures) -> str:
 
 
 def checks(failures) -> str:
-    """Every property of the context-only deletion."""
+    """Every property of the context-only masking."""
     return ", ".join([check_forms(failures), check_rule(failures), check_build(failures),
                       check_real_dataset(failures), check_tokenizer(failures),
                       check_text_baseline(failures)])

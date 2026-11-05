@@ -1,9 +1,9 @@
 """
-Context-only copy of a stimulus dataset, every sentence carrying the character spans of the concept words to delete.
+Context-only copy of a stimulus dataset, every sentence carrying the character spans of the concept words to mask.
 
 Positives lose their own concept's forms, negatives the target concept's forms and those of the concept
-they were drawn from, with the forms of frequency_covariates.inflected_forms. selfcond deletes the tokens
-the spans overlap before the forward pass, and the text baseline cuts them.
+they were drawn from, with the forms of frequency_covariates.inflected_forms. selfcond masks the tokens
+the spans overlap before the forward pass, dropping those that open a sentence, and the text baseline cuts them.
 
 Usage, from scripts/:
     python -m core.data_preparation.build_context_only_dataset [source_dir] [output_dir]
@@ -19,8 +19,8 @@ import shutil
 
 from core.data_preparation.frequency_covariates import ASSETS_DIR, inflected_forms
 
-SOURCE_DIR = ASSETS_DIR / "Qwen3-30B-A3B-Instruct-2507_abstractiveness_Richie_HSJ_cot"
-OUTPUT_DIR = ASSETS_DIR / "Qwen3-30B-A3B-Instruct-2507_abstractiveness_Richie_HSJ_cot_context_only"
+SOURCE_DIR = ASSETS_DIR / "Qwen3-30B-A3B-Instruct-2507_abstractiveness_Richie_HSJ_cot_v3"
+OUTPUT_DIR = ASSETS_DIR / "Qwen3-30B-A3B-Instruct-2507_abstractiveness_Richie_HSJ_cot_v3_context_only"
 
 
 def form_pattern(word: str) -> re.Pattern:
@@ -42,7 +42,7 @@ def match_spans(text: str, patterns: list) -> list:
 
 
 def context_only_concepts(concepts: dict) -> dict:
-    """Each concept's data, keyed by storage key, with the delete_spans of its positives and negatives."""
+    """Each concept's data, keyed by storage key, with the mask_spans of its positives and negatives."""
     patterns = {key: form_pattern(data["word"]) for key, data in concepts.items()}
     sources = {}
     for key, data in concepts.items():
@@ -54,7 +54,7 @@ def context_only_concepts(concepts: dict) -> dict:
         orphans = [s for s in negatives if s not in sources]
         if orphans:
             raise ValueError(f"{key}: {len(orphans)} negatives are no concept's positive, e.g. {orphans[0]!r}")
-        out[key] = {**data, "delete_spans": {
+        out[key] = {**data, "mask_spans": {
             "positive": [match_spans(s, [patterns[key]]) for s in data["sentences"]["positive"]],
             "negative": [match_spans(s, [patterns[key]] + [patterns[c] for c in sources[s]]) for s in negatives],
         }}
@@ -88,7 +88,7 @@ def main() -> None:
     args = parser.parse_args()
     out = build(args.source_dir, args.output_dir)
     for label in ("positive", "negative"):
-        spans = [s for data in out.values() for s in data["delete_spans"][label]]
+        spans = [s for data in out.values() for s in data["mask_spans"][label]]
         print(f"{label}: {sum(map(bool, spans))} of {len(spans)} sentences lose a word")
     print(f"Wrote {len(out)} concepts to {args.output_dir}")
 
