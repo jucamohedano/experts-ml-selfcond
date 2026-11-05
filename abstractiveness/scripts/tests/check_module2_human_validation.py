@@ -91,7 +91,7 @@ def checks(failures: list) -> str:
     assert len(ranked) == int(rated.sum()), f"the figure keeps {len(ranked)} of {int(rated.sum())} rated pairs"
     raw = jaccard[ranked.concept_a.map(index), ranked.concept_b.map(index)]
     assert np.allclose(ranked.expert_similarity, raw), "the figure's CSV must hold the raw model values"
-    figure = next(f for f in figures if f._suptitle is not None and f._suptitle.get_text().startswith("Expert Jaccard"))
+    figure = next(f for f in figures if any(axis.get_xlabel() == "Jaccard index (%)" for axis in f.axes))
     visible = [axis for axis in figure.axes if axis.get_visible()]
     assert len(visible) == ranked.category.nunique(), f"{len(visible)} panels"
     for axis in visible:
@@ -99,8 +99,9 @@ def checks(failures: list) -> str:
         assert same_points(points(axis), group.expert_similarity, group.human_rating), f"{axis.get_title()}: points"
         expected = np.polyfit(group.expert_similarity, group.human_rating, 1)[0]
         assert abs(line_slope(axis) - expected) < 1e-9 and not has_band(axis), f"{axis.get_title()}: line or band"
-    assert legend_texts(visible[0]) == ["Least-squares line"] and not legend_texts(visible[1]), "legend once"
-    assert visible[0].get_ylabel() == "Human similarity rating (1 to 7)", f"y label {visible[0].get_ylabel()!r}"
+    assert [text.get_text() for text in figure.legends[0].get_texts()] == ["Least-squares line"] \
+        and not any(legend_texts(axis) for axis in visible), "one legend, under the panels"
+    assert visible[0].get_ylabel() == "Mean similarity\nrating (1 to 7)", f"y label {visible[0].get_ylabel()!r}"
     weighted = table[table.category == WEIGHTED_MEAN].set_index("metric")
     return (f"{int(rated.sum())} rated pairs per matrix, weighted rho {weighted.rho['jaccard']:.3f} at p "
             f"{weighted.mantel_p['jaccard']} for the related matrix, p {weighted.mantel_p.iloc[1]:.3f} "

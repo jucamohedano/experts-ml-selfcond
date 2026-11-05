@@ -9,9 +9,11 @@ and which sublayers carry category information. Explanations live in documentati
 
 import logging
 import re
+import textwrap
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
+from matplotlib.ticker import MaxNLocator
 import numpy as np
 import pandas as pd
 import seaborn as sns
@@ -27,7 +29,8 @@ from core.expert_data_loading import expert_counts_with_metadata
 from core.correlation_reporting import panel_rho_columns, panel_detail, regression_row, score_column
 from utils.plotting import (_plot_bar_with_leaders, apply_rotated_leader_labels, fig_width_for,
                             plot_comparison_violin, build_category_color_map, set_title, set_suptitle,
-                            draw_regression, twin_axis, LEVEL_COLORS, SERIES_COLORS, DETAIL_COLOR)
+                            draw_regression, twin_axis, print_style, label_points, legend_below,
+                            LEVEL_COLORS, SERIES_COLORS, DETAIL_COLOR, PRINT_WIDTH, NOTE_SIZE)
 
 log = logging.getLogger(__name__)
 
@@ -161,6 +164,7 @@ LAYER_DISTRIBUTION_SUMMARY_LABELS = {
 
 
 ABSTRACTION_COLORS = {1: LEVEL_COLORS["Broad Categories"], 2: LEVEL_COLORS["Specific Concepts"]}
+LEVEL_NAMES = {1: "Category names", 2: "Members"}
 
 
 def compute_layer_distributions(expert_allocation_df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.Series]:
@@ -221,15 +225,19 @@ def layer_distribution_summary(global_layer_dist: pd.DataFrame, concept_count_ma
 
 BLOCK_NAME = re.compile(r"\d+\.B\.(\d+)")
 DEPTH_AXIS_TITLES = {"block": "Transformer block", "layer": "Model layer"}
+PRINT_ROW_TICKS = 16
+NARROW_FONT = "Nimbus Sans Narrow"
 
 
-def _label_depth_axis(ax, layer_names) -> tuple[list, str]:
-    """Block numbers as plain ticks on the block axis, rotated layer names otherwise, returns the labels and the unit."""
+def _label_depth_axis(ax, layer_names, stagger: bool = False) -> tuple[list, str]:
+    """Block numbers as plain ticks on the block axis, every other one a line lower and in the narrow cut when
+    staggered, rotated layer names otherwise, returns the labels and the unit."""
     blocks = [BLOCK_NAME.fullmatch(str(name)) for name in layer_names]
     if all(blocks):
         labels = [match.group(1) for match in blocks]
         ax.set_xticks(range(len(labels)))
-        ax.set_xticklabels(labels, fontsize=10)
+        ax.set_xticklabels([f"\n{label}" if stagger and i % 2 else label for i, label in enumerate(labels)],
+                           **({"fontfamily": NARROW_FONT} if stagger else {}))
         return labels, "block"
     labels = [str(name) for name in layer_names]
     apply_rotated_leader_labels(ax, labels, fontsize=9)
@@ -246,118 +254,147 @@ def _stacked_bars(ax, layer_order: list, stack: pd.DataFrame, colors: dict) -> N
         bottom += values
 
 
+def _axis_label(text: str, printing: bool) -> str:
+    """An axis label, wrapped onto short lines when the figure is drawn at print size."""
+    return textwrap.fill(text, 20) if printing else text
+
+
 def plot_cumulative_layer_distribution(global_layer_dist: pd.DataFrame, dist_dir,
                                        suffix: str = "", title_detail: str = None, name: str = "mean",
                                        title_name: str = "Mean", stack: pd.DataFrame = None,
-                                       stack_colors: dict = None, bar_label: str = "Average % of experts") -> None:
-    """Depth-ordered mean distribution per level with cumulative mass curves."""
+                                       stack_colors: dict = None, bar_label: str = "Mean percentage of expert units",
+                                       print_width: float = None) -> None:
+    """Depth-ordered mean distribution per level with cumulative curves, untitled at print_width inches when given."""
+    printing = print_width is not None
     layer_order = list(dict.fromkeys(global_layer_dist['layer_name']))
     n = len(layer_order)
-    fig, ax1 = plt.subplots(figsize=(fig_width_for(n, 0.28, min_w=16.0), 10.4))
-    if stack is None:
-        sns.barplot(data=global_layer_dist, x='layer_name', y='mean_expert_allocation_pct',
-                    hue='abstraction_level', palette=ABSTRACTION_COLORS,
-                    edgecolor='black', linewidth=0.5, order=layer_order, ax=ax1)
-        legend_title = "Abstraction level"
-    else:
-        _stacked_bars(ax1, layer_order, stack, stack_colors)
-        ax1.set_xlim(-0.5, n - 0.5)
-        legend_title = "Sublayer"
-    tick_labels, unit = _label_depth_axis(ax1, layer_order)
-    ax1.set_xlabel(DEPTH_AXIS_TITLES[unit], fontsize=14)
-    ax1.set_ylabel(f"{bar_label} (bars)", fontsize=14)
+    n_levels = global_layer_dist['abstraction_level'].nunique()
+    sep = "\n" if printing else " "
+    label_size = {} if printing else {"fontsize": 14}
+    line_width, marker_size, guide_width, diamond = (1.2, 2, 0.8, 16) if printing else (2, 3, 1.2, 70)
+    with print_style(printing):
+        fig, ax1 = plt.subplots(figsize=(print_width, 2.3) if printing else
+                                (fig_width_for(n, 0.28, min_w=16.0), 10.4))
+        if stack is None:
+            sns.barplot(data=global_layer_dist, x='layer_name', y='mean_expert_allocation_pct',
+                        hue='abstraction_level', palette=ABSTRACTION_COLORS,
+                        edgecolor='black', linewidth=0.3 if printing else 0.5, order=layer_order, ax=ax1)
+        else:
+            _stacked_bars(ax1, layer_order, stack, stack_colors)
+            ax1.set_xlim(-0.5, n - 0.5)
+        tick_labels, unit = _label_depth_axis(ax1, layer_order, stagger=printing and n > PRINT_ROW_TICKS)
+        if not printing and unit == "block":
+            ax1.tick_params(axis="x", labelsize=10)
+        ax1.set_xlabel(DEPTH_AXIS_TITLES[unit], **label_size)
+        ax1.set_ylabel(_axis_label(f"{bar_label} (bars)", printing), **label_size)
 
-    ax2 = twin_axis(ax1)
-    ax2.set_xlim(ax1.get_xlim())
-    for level, level_df in global_layer_dist.groupby('abstraction_level'):
-        curve = level_df.set_index('layer_name')['cumulative_pct'].reindex(layer_order)
-        idx50 = int(np.argmax(curve.values >= 50))
-        idx90 = int(np.argmax(curve.values >= 90))
-        label = (f"Cumulative, level {level}: 50% reached by {unit} {tick_labels[idx50]}, "
-                 f"90% by {unit} {tick_labels[idx90]}")
-        ax2.plot(range(n), curve.values, color=ABSTRACTION_COLORS[level], linewidth=2,
-                 marker='o', markersize=3, alpha=0.9, label=label)
-        for idx in (idx50, idx90):
-            y = curve.values[idx]
-            ax2.plot([idx, idx], [0, y], linestyle=':', linewidth=1.2,
-                     color=ABSTRACTION_COLORS[level], alpha=0.8)
-            ax2.plot([idx, ax2.get_xlim()[1]], [y, y], linestyle=':', linewidth=1.2,
-                     color=ABSTRACTION_COLORS[level], alpha=0.8)
-        ax2.scatter([idx50, idx90], [curve.values[idx50], curve.values[idx90]],
-                    color=ABSTRACTION_COLORS[level], marker='D', s=70,
-                    edgecolor='black', linewidth=0.8, zorder=5)
-    ax2.set_ylim(0, 105)
-    ax2.set_ylabel("Cumulative % of experts (lines)", fontsize=14)
-    ax2.grid(False)
-    bar_handles, bar_labels = ax1.get_legend_handles_labels()
-    line_handles, line_labels = ax2.get_legend_handles_labels()
-    if ax1.get_legend():
-        ax1.get_legend().remove()
-    ax1.legend(bar_handles + line_handles, [f"{legend_title} {label}" for label in bar_labels] + line_labels,
-               loc="upper center", bbox_to_anchor=(0.5, -0.16), ncol=2, frameon=False)
+        ax2 = twin_axis(ax1)
+        ax2.set_xlim(ax1.get_xlim())
+        for level, level_df in global_layer_dist.groupby('abstraction_level'):
+            curve = level_df.set_index('layer_name')['cumulative_pct'].reindex(layer_order)
+            idx50 = int(np.argmax(curve.values >= 50))
+            idx90 = int(np.argmax(curve.values >= 90))
+            prefix = f"{LEVEL_NAMES[level]}, cumulative" if n_levels > 1 else "Cumulative"
+            label = (f"{prefix}{sep}(50% at {unit} {tick_labels[idx50]}, "
+                     f"90% at {unit} {tick_labels[idx90]})")
+            ax2.plot(range(n), curve.values, color=ABSTRACTION_COLORS[level], linewidth=line_width,
+                     marker='o', markersize=marker_size, alpha=0.9, label=label)
+            for idx in (idx50, idx90):
+                y = curve.values[idx]
+                ax2.plot([idx, idx], [0, y], linestyle=':', linewidth=guide_width,
+                         color=ABSTRACTION_COLORS[level], alpha=0.8)
+                ax2.plot([idx, ax2.get_xlim()[1]], [y, y], linestyle=':', linewidth=guide_width,
+                         color=ABSTRACTION_COLORS[level], alpha=0.8)
+            ax2.scatter([idx50, idx90], [curve.values[idx50], curve.values[idx90]],
+                        color=ABSTRACTION_COLORS[level], marker='D', s=diamond,
+                        edgecolor='black', linewidth=0.5 if printing else 0.8, zorder=5)
+        ax2.set_ylim(0, 105)
+        ax2.set_ylabel(_axis_label("Cumulative percentage (lines)", printing), **label_size)
+        ax2.grid(False)
+        bar_handles, bar_labels = ax1.get_legend_handles_labels()
+        line_handles, line_labels = ax2.get_legend_handles_labels()
+        if ax1.get_legend():
+            ax1.get_legend().remove()
+        bar_labels = [f"Sublayer {label}" for label in bar_labels] if stack is not None else \
+            [LEVEL_NAMES[int(label)] for label in bar_labels]
 
-    set_title(ax1, f"{title_name} expert distribution with cumulative mass", title_detail)
-    plt.tight_layout()
-    plt.savefig(dist_dir / f"{name}_expert_layer_distribution_cumulative{suffix}.png",
-                dpi=300, bbox_inches="tight")
-    plt.close(fig)
+        if not printing:
+            set_title(ax1, f"{title_name} depth profile with cumulative percentage", title_detail)
+        plt.tight_layout()
+        legend_below(ax1, bar_handles + line_handles, bar_labels + line_labels, ncol=1 if printing else 2)
+        plt.savefig(dist_dir / f"{name}_expert_layer_distribution_cumulative{suffix}.png",
+                    dpi=300, bbox_inches="tight")
+        plt.close(fig)
 
 
 def plot_cumulative_layer_distribution_sorted(global_layer_dist: pd.DataFrame, dist_dir,
                                               suffix: str = "", title_detail: str = None,
                                               name: str = "mean", title_name: str = None,
                                               stack: pd.DataFrame = None, stack_colors: dict = None,
-                                              bar_label: str = "Average % of experts") -> None:
-    """Layers sorted by expert mass per level, with the cumulative share of the top layers."""
+                                              bar_label: str = "Mean percentage of expert units",
+                                              print_width: float = None) -> None:
+    """Layers sorted by percentage per level with the cumulative percentage of the top layers, untitled at
+    print_width inches when given."""
+    printing = print_width is not None
     levels = sorted(global_layer_dist['abstraction_level'].unique())
     n = global_layer_dist['layer_name'].nunique()
-    fig, axes = plt.subplots(len(levels), 1,
-                             figsize=(fig_width_for(n, 0.28, min_w=16.0), 7.0 * len(levels)))
-    axes = np.atleast_1d(axes)
+    sep = "\n" if printing else " "
+    label_size, panel_label_size = ({}, {}) if printing else ({"fontsize": 14}, {"fontsize": 13})
+    line_width, marker_size, guide_width, diamond = (1.2, 2, 0.8, 16) if printing else (2, 3, 1.2, 70)
+    with print_style(printing):
+        fig, axes = plt.subplots(len(levels), 1,
+                                 figsize=(print_width, 2.0 * len(levels)) if printing else
+                                 (fig_width_for(n, 0.28, min_w=16.0), 7.0 * len(levels)))
+        axes = np.atleast_1d(axes)
 
-    for ax, level in zip(axes, levels):
-        level_df = (global_layer_dist[global_layer_dist['abstraction_level'] == level]
-                    .sort_values('mean_expert_allocation_pct', ascending=False).reset_index(drop=True))
-        sorted_cumulative = level_df['mean_expert_allocation_pct'].cumsum()
-        k50 = int(np.argmax(sorted_cumulative.values >= 50))
-        k90 = int(np.argmax(sorted_cumulative.values >= 90))
+        for ax, level in zip(axes, levels):
+            level_df = (global_layer_dist[global_layer_dist['abstraction_level'] == level]
+                        .sort_values('mean_expert_allocation_pct', ascending=False).reset_index(drop=True))
+            sorted_cumulative = level_df['mean_expert_allocation_pct'].cumsum()
+            k50 = int(np.argmax(sorted_cumulative.values >= 50))
+            k90 = int(np.argmax(sorted_cumulative.values >= 90))
 
-        if stack is None:
-            ax.bar(range(len(level_df)), level_df['mean_expert_allocation_pct'],
-                   color=ABSTRACTION_COLORS[level], edgecolor='black', linewidth=0.5)
-        else:
-            _stacked_bars(ax, level_df['layer_name'].astype(str).tolist(), stack, stack_colors)
-            ax.legend(title="Sublayer", loc='upper right')
-        _, unit = _label_depth_axis(ax, level_df['layer_name'])
-        ax.set_ylabel(f"{bar_label} (bars)", fontsize=13)
-        set_title(ax, f"Abstraction level {level}, {unit}s sorted by expert mass",
-                  f"top {k50 + 1} {unit}s hold 50% of the mass, top {k90 + 1} of {len(level_df)} hold 90%")
+            if stack is None:
+                ax.bar(range(len(level_df)), level_df['mean_expert_allocation_pct'],
+                       color=ABSTRACTION_COLORS[level], edgecolor='black', linewidth=0.3 if printing else 0.5)
+            else:
+                _stacked_bars(ax, level_df['layer_name'].astype(str).tolist(), stack, stack_colors)
+                ax.legend(title="Sublayer", loc='upper right')
+            _, unit = _label_depth_axis(ax, level_df['layer_name'], stagger=printing and len(level_df) > PRINT_ROW_TICKS)
+            ax.set_ylabel(_axis_label(f"{bar_label} (bars)", printing), **panel_label_size)
+            if printing:
+                ax.yaxis.set_major_locator(MaxNLocator(nbins=5, steps=[1, 2, 5, 10]))
+            elif unit == "block":
+                ax.tick_params(axis="x", labelsize=10)
+            set_title(ax, LEVEL_NAMES[level] if printing else f"{LEVEL_NAMES[level]}, {unit}s sorted by percentage",
+                      f"{k50 + 1} {unit}s hold 50% of the expert units,{sep}"
+                      f"{k90 + 1} of {len(level_df)} hold 90%")
 
-        ax2 = twin_axis(ax)
-        ax2.set_xlim(ax.get_xlim())
-        ax2.plot(range(len(level_df)), sorted_cumulative.values, color="#444444",
-                 linewidth=2, marker='o', markersize=3)
-        for k in (k50, k90):
-            y = sorted_cumulative.values[k]
-            ax2.plot([k, k], [0, y], linestyle=':', linewidth=1.2,
-                     color=ABSTRACTION_COLORS[level], alpha=0.8)
-            ax2.plot([k, ax2.get_xlim()[1]], [y, y], linestyle=':', linewidth=1.2,
-                     color=ABSTRACTION_COLORS[level], alpha=0.8)
-        ax2.scatter([k50, k90], [sorted_cumulative.values[k50], sorted_cumulative.values[k90]],
-                    color=ABSTRACTION_COLORS[level], marker='D', s=70,
-                    edgecolor='black', linewidth=0.8, zorder=5)
-        ax2.set_ylim(0, 105)
-        ax2.set_ylabel("Cumulative % of experts (line)", fontsize=13)
-        ax2.grid(False)
+            ax2 = twin_axis(ax)
+            ax2.set_xlim(ax.get_xlim())
+            ax2.plot(range(len(level_df)), sorted_cumulative.values, color="#444444",
+                     linewidth=line_width, marker='o', markersize=marker_size)
+            for k in (k50, k90):
+                y = sorted_cumulative.values[k]
+                ax2.plot([k, k], [0, y], linestyle=':', linewidth=guide_width,
+                         color=ABSTRACTION_COLORS[level], alpha=0.8)
+                ax2.plot([k, ax2.get_xlim()[1]], [y, y], linestyle=':', linewidth=guide_width,
+                         color=ABSTRACTION_COLORS[level], alpha=0.8)
+            ax2.scatter([k50, k90], [sorted_cumulative.values[k50], sorted_cumulative.values[k90]],
+                        color=ABSTRACTION_COLORS[level], marker='D', s=diamond,
+                        edgecolor='black', linewidth=0.5 if printing else 0.8, zorder=5)
+            ax2.set_ylim(0, 105)
+            ax2.set_ylabel(_axis_label("Cumulative percentage (line)", printing), **panel_label_size)
+            ax2.grid(False)
 
-    axes[-1].set_xlabel(f"{DEPTH_AXIS_TITLES[unit]}, descending expert mass", fontsize=14)
-    heading = f"{title_name}, cumulative expert mass concentration" if title_name else \
-        "Cumulative expert mass concentration"
-    set_suptitle(fig, f"{heading}, {title_detail}" if title_detail else heading, y=1.0)
-    plt.tight_layout()
-    plt.savefig(dist_dir / f"{name}_expert_layer_distribution_cumulative_sorted{suffix}.png",
-                dpi=300, bbox_inches="tight")
-    plt.close(fig)
+        axes[-1].set_xlabel(f"{DEPTH_AXIS_TITLES[unit]}, sorted by percentage", **label_size)
+        if not printing:
+            heading = f"{title_name}, sorted depth profile" if title_name else "Sorted depth profile"
+            set_suptitle(fig, f"{heading}, {title_detail}" if title_detail else heading, y=1.0)
+        plt.tight_layout()
+        plt.savefig(dist_dir / f"{name}_expert_layer_distribution_cumulative_sorted{suffix}.png",
+                    dpi=300, bbox_inches="tight")
+        plt.close(fig)
 
 
 def sublayer_shares_by_block(expert_allocation_df: pd.DataFrame) -> pd.DataFrame:
@@ -403,10 +440,10 @@ def plot_per_concept_distributions(scope, dist_dir) -> None:
             title_name = concept.capitalize()
             plot_cumulative_layer_distribution(frame, concept_dir, suffix, title_detail, name=concept,
                                                title_name=title_name, stack=stack, stack_colors=colors,
-                                               bar_label="% of experts")
+                                               bar_label="Percentage of expert units")
             plot_cumulative_layer_distribution_sorted(frame, concept_dir, suffix, title_detail, name=concept,
                                                       title_name=title_name, stack=stack,
-                                                      stack_colors=colors, bar_label="% of experts")
+                                                      stack_colors=colors, bar_label="Percentage of expert units")
 
 
 def plot_peak_average_distributions(expert_allocation_df: pd.DataFrame, concept_metadata: pd.DataFrame, concept_entropy_df: pd.DataFrame, category_entropy_df: pd.DataFrame, out_dir, suffix: str = "") -> None:
@@ -547,8 +584,9 @@ def run_layer_distribution(scope, concept_metadata: pd.DataFrame, merged_meta: p
         save_dataframe(layer_distribution_summary(global_dist, concept_counts),
                        out_dir / f"mean_expert_layer_distribution_summary{suffix}.csv")
         title_detail = f"{scope.label}, {axis_label}"
-        plot_cumulative_layer_distribution(global_dist, out_dir, suffix, title_detail)
-        plot_cumulative_layer_distribution_sorted(global_dist, out_dir, suffix, title_detail)
+        print_width = PRINT_WIDTH["half"] if suffix == "_by_block" else None
+        plot_cumulative_layer_distribution(global_dist, out_dir, suffix, title_detail, print_width=print_width)
+        plot_cumulative_layer_distribution_sorted(global_dist, out_dir, suffix, title_detail, print_width=print_width)
 
         save_descriptor_tables(concept_df, category_df, out_dir, "layer_location", LOCATION_DESCRIPTORS, suffix)
         log.info("  Generating peak vs. average layer distributions plot...")
@@ -799,58 +837,57 @@ def category_shape_summary(axis_df: pd.DataFrame, concept_metadata: pd.DataFrame
     return pd.DataFrame(rows), members_by_category
 
 
-def plot_category_entropy_gearys(axis_df: pd.DataFrame, concept_metadata: pd.DataFrame, out_dir,
-                                 suffix: str = "", axis_label: str = "") -> pd.DataFrame:
-    """Per-category normalised entropy and Geary's C, members as boxes and points, the label as a diamond."""
-    summary, members_by_category = category_shape_summary(axis_df, concept_metadata)
-    if summary.empty:
-        return summary
-    save_dataframe(summary, out_dir / f"category_entropy_gearys{suffix}.csv")
+def plot_category_entropy_gearys(summary: pd.DataFrame, members_by_category: dict, out_path,
+                                 bins: str = "blocks") -> None:
+    """Per-category normalized entropy and Geary's C at print width, members as boxes and points, the category
+    name as a diamond."""
     categories = list(summary["category"])
     positions = np.arange(len(categories))[::-1].astype(float)
-    fig, axes = plt.subplots(1, 2, figsize=(13, 0.75 * len(categories) + 2.4), sharey=True)
-    panels = (("entropy_norm", 0, "Spread over depth", "Shannon entropy / log2 of the number of bins (1 = even)"),
-              ("gearys_c", 1, "Smoothness over depth", "Geary's C (1 = no depth structure)"))
+    panels = (("entropy_norm", 0, "Spread", rf"Normalized entropy $\tilde{{H}}$ (1 = uniform over {bins})"),
+              ("gearys_c", 1, "Smoothness", "Geary's coefficient $C$ (1 = no autocorrelation)"))
     member_color, label_color = LEVEL_COLORS["Specific Concepts"], LEVEL_COLORS["Broad Categories"]
     jitter = np.random.default_rng(0)
-    for axis, (name, index, title, x_label) in zip(axes, panels):
-        member_values = [members_by_category[c][index] for c in categories]
-        axis.boxplot([v[np.isfinite(v)] for v in member_values], positions=positions, vert=False, widths=0.5,
-                     showfliers=False, patch_artist=True,
-                     boxprops={"facecolor": member_color, "alpha": 0.3, "edgecolor": DETAIL_COLOR},
-                     medianprops={"color": DETAIL_COLOR, "linewidth": 1.4},
-                     whiskerprops={"color": DETAIL_COLOR}, capprops={"color": DETAIL_COLOR})
-        for y, values in zip(positions, member_values):
-            axis.scatter(values, y + jitter.uniform(-0.15, 0.15, len(values)), s=9, color=member_color,
-                         edgecolors="none", alpha=0.8, zorder=3)
-        axis.scatter(summary[f"{name}_members_matched_median"], positions, marker="|", s=300, linewidths=2.2,
-                     color=SERIES_COLORS["muted"], zorder=4)
-        axis.scatter(summary[f"{name}_label"], positions, marker="D", s=70, color=label_color,
-                     edgecolors="white", linewidths=0.6, zorder=5)
-        for y, (_, row) in zip(positions, summary.iterrows()):
-            raw, matched = row[f"{name}_label_percentile"], row[f"{name}_label_percentile_matched"]
-            axis.annotate(f"{raw:.2f} | {matched:.2f}" if np.isfinite(matched) else f"{raw:.2f} | n/a",
-                          xy=(0.99, y + 0.37), xycoords=("axes fraction", "data"), ha="right", va="center",
-                          fontsize=7.5, color=DETAIL_COLOR, zorder=6,
-                          bbox={"facecolor": "white", "edgecolor": "none", "pad": 0.6})
-        if name == "gearys_c":
-            axis.axvline(1.0, color=SERIES_COLORS["muted"], linestyle="--", linewidth=1)
-        set_title(axis, title, "label percentile among members | at the label's expert count")
-        axis.set_xlabel(x_label)
-        axis.grid(axis="y", visible=False)
-    axes[0].set_yticks(positions)
-    axes[0].set_yticklabels([c.capitalize() for c in categories])
-    axes[0].set_ylim(positions.min() - 0.6, positions.max() + 0.7)
-    handles = [Patch(facecolor=member_color, alpha=0.3, edgecolor=DETAIL_COLOR, label="Members, quartiles and points"),
-               Line2D([], [], marker="D", linestyle="none", color=label_color, markersize=7, label="Category label"),
-               Line2D([], [], marker="|", linestyle="none", color=SERIES_COLORS["muted"], markersize=14,
-                      markeredgewidth=2.2, label="Member median at the label's expert count")]
-    fig.legend(handles=handles, loc="lower center", ncol=3, frameon=False, bbox_to_anchor=(0.5, 0.0))
-    set_suptitle(fig, f"Expert allocation per category, members against their category label, {axis_label}")
-    fig.tight_layout(rect=(0, 0.06, 1, 1))
-    fig.savefig(out_dir / f"category_entropy_gearys{suffix}.png", dpi=300, bbox_inches="tight")
-    plt.close(fig)
-    return summary
+    with print_style():
+        fig, axes = plt.subplots(1, 2, figsize=(PRINT_WIDTH["full"], 0.27 * len(categories) + 1.2), sharey=True)
+        for axis, (name, index, title, x_label) in zip(axes, panels):
+            member_values = [members_by_category[c][index] for c in categories]
+            axis.boxplot([v[np.isfinite(v)] for v in member_values], positions=positions, vert=False, widths=0.5,
+                         showfliers=False, patch_artist=True,
+                         boxprops={"facecolor": member_color, "alpha": 0.3, "edgecolor": DETAIL_COLOR,
+                                   "linewidth": 0.6},
+                         medianprops={"color": DETAIL_COLOR, "linewidth": 1.0},
+                         whiskerprops={"color": DETAIL_COLOR, "linewidth": 0.6},
+                         capprops={"color": DETAIL_COLOR, "linewidth": 0.6})
+            for y, values in zip(positions, member_values):
+                axis.scatter(values, y + jitter.uniform(-0.15, 0.15, len(values)), s=4, color=member_color,
+                             edgecolors="none", alpha=0.8, zorder=3)
+            axis.scatter(summary[f"{name}_members_matched_median"], positions, marker="|", s=110, linewidths=1.5,
+                         color=SERIES_COLORS["muted"], zorder=4)
+            axis.scatter(summary[f"{name}_label"], positions, marker="D", s=20, color=label_color,
+                         edgecolors="white", linewidths=0.5, zorder=5)
+            for y, (_, row) in zip(positions, summary.iterrows()):
+                raw, matched = row[f"{name}_label_percentile"], row[f"{name}_label_percentile_matched"]
+                axis.annotate(f"{raw:.2f} | {matched:.2f}" if np.isfinite(matched) else f"{raw:.2f} | n/a",
+                              xy=(0.99, y + 0.37), xycoords=("axes fraction", "data"), ha="right", va="center",
+                              fontsize=NOTE_SIZE, color=DETAIL_COLOR, zorder=6,
+                              bbox={"facecolor": "white", "edgecolor": "none", "pad": 0.4})
+            if name == "gearys_c":
+                axis.axvline(1.0, color=SERIES_COLORS["muted"], linestyle="--", linewidth=0.8)
+            set_title(axis, title, "Percentile rank of the category name,\nwithout | with subsampling")
+            axis.set_xlabel(x_label)
+            axis.grid(axis="y", visible=False)
+        axes[0].set_yticks(positions)
+        axes[0].set_yticklabels([c.capitalize() for c in categories])
+        axes[0].set_ylim(positions.min() - 0.6, positions.max() + 0.7)
+        handles = [Patch(facecolor=member_color, alpha=0.3, edgecolor=DETAIL_COLOR, label="Members"),
+                   Line2D([], [], marker="D", linestyle="none", color=label_color, markersize=4.5,
+                          label="Category name"),
+                   Line2D([], [], marker="|", linestyle="none", color=SERIES_COLORS["muted"], markersize=8,
+                          markeredgewidth=1.5, label="Members' median, subsampled to the category name's expert count")]
+        fig.tight_layout()
+        legend_below(axes, handles, [h.get_label() for h in handles], ncol=3)
+        fig.savefig(out_path, dpi=300, bbox_inches="tight")
+        plt.close(fig)
 
 
 def run_distribution_shape(scope, concept_metadata: pd.DataFrame, descriptors: list, out_dir) -> dict:
@@ -865,7 +902,11 @@ def run_distribution_shape(scope, concept_metadata: pd.DataFrame, descriptors: l
         _log_level_comparison("Geary's C", category_df['gearys_c'], concept_df['gearys_c'])
         # plot_category_entropies_bar(category_df, out_dir, suffix)
         log.info("  Generating per-category entropy and Geary's C figure...")
-        plot_category_entropy_gearys(axis_df, concept_metadata, out_dir, suffix, axis_label)
+        shape, members = category_shape_summary(axis_df, concept_metadata)
+        if not shape.empty:
+            save_dataframe(shape, out_dir / f"category_entropy_gearys{suffix}.csv")
+            plot_category_entropy_gearys(shape, members, out_dir / f"category_entropy_gearys{suffix}.png",
+                                         "blocks" if suffix == "_by_block" else "layers")
 
     concept_df, category_df = descriptors[0][3], descriptors[0][4]
     log.info(f"  [{scope.label}] Generating correlation plots...")
@@ -981,6 +1022,13 @@ def plot_sublayer_informativeness(result: pd.DataFrame, dist_dir) -> None:
 SUMMARY_COLUMNS = ["sublayer", "group", "concept_share_pct", "concept_experts", "label_share_pct", "label_experts",
                    "roc_auc", "mean_depth_norm", "mean_entropy_norm"]
 GROUP_COLORS = {"MLP": SERIES_COLORS["secondary"], "attention": SERIES_COLORS["primary"]}
+GROUP_NAMES = {"MLP": "Feed-forward", "attention": "Attention"}
+SUBLAYER_NAMES = {
+    "mlp.gate_proj": "Gate", "mlp.up_proj": "Up", "mlp.down_proj": "Down", "self_attn.q_proj": "Query",
+    "self_attn.k_proj": "Key", "self_attn.v_proj": "Value", "self_attn.o_proj": "Attention output",
+    "mlp.c_fc": "Expansion", "mlp.c_proj": "Contraction", "attn.c_attn": "Query, key and value",
+    "attn.c_proj": "Attention output",
+}
 
 
 def write_sublayer_summary(result: pd.DataFrame, dist_dir) -> pd.DataFrame:
@@ -1004,25 +1052,25 @@ def write_sublayer_summary(result: pd.DataFrame, dist_dir) -> pd.DataFrame:
 
 
 def plot_sublayer_auc_vs_share(summary: pd.DataFrame, dist_dir) -> None:
-    """Category-alignment ROC-AUC against share of the concepts' experts, one point per sublayer, coloured by projection type."""
+    """AUC of category membership against the members' share of expert units at print width, one named point per
+    sub-layer type, coloured by feed-forward or attention."""
     points = summary[summary["roc_auc"].notna()]
-    fig, ax = plt.subplots(figsize=(7.5, 5.5))
-    for group, color in GROUP_COLORS.items():
-        group_points = points[points["group"] == group]
-        ax.scatter(group_points["concept_share_pct"], group_points["roc_auc"], s=60, color=color,
-                   edgecolors="white", linewidths=0.6, label=group, zorder=3)
-    for _, row in points.iterrows():
-        ax.annotate(row["sublayer"], (row["concept_share_pct"], row["roc_auc"]), xytext=(6, 3),
-                    textcoords="offset points", fontsize=8.5, color=DETAIL_COLOR)
-    ax.axhline(0.5, color=SERIES_COLORS["muted"], linestyle="--", linewidth=1)
-    ax.set_xlabel("Share of the specific concepts' experts (%)")
-    ax.set_ylabel("Category alignment ROC-AUC")
-    set_title(ax, "Category alignment against expert share, per sublayer",
-              "specific concepts (level 2), dashed line at chance")
-    ax.legend(title="Projection", loc="lower right")
-    fig.tight_layout()
-    fig.savefig(dist_dir / "sublayer_auc_vs_share.png", dpi=300, bbox_inches="tight")
-    plt.close(fig)
+    with print_style():
+        fig, ax = plt.subplots(figsize=(PRINT_WIDTH["half"], 2.6))
+        for group, color in GROUP_COLORS.items():
+            group_points = points[points["group"] == group]
+            ax.scatter(group_points["concept_share_pct"], group_points["roc_auc"], s=22, color=color,
+                       edgecolors="white", linewidths=0.5, label=GROUP_NAMES[group], zorder=3)
+        ax.axhline(0.5, color=SERIES_COLORS["muted"], linestyle="--", linewidth=0.8)
+        ax.set_ylim(min(0.45, points["roc_auc"].min() - 0.03), 1.0)
+        ax.set_xlabel("Proportion of the members' expert units (%)")
+        ax.set_ylabel("AUC of category membership")
+        ax.legend(title="Sub-layer type", loc="lower right")
+        fig.tight_layout()
+        label_points(ax, points["concept_share_pct"], points["roc_auc"],
+                     [SUBLAYER_NAMES.get(s, s) for s in points["sublayer"]], fontsize=NOTE_SIZE + 1, color=DETAIL_COLOR)
+        fig.savefig(dist_dir / "sublayer_auc_vs_share.png", dpi=300, bbox_inches="tight")
+        plt.close(fig)
 
 
 def run_sublayer_informativeness(scope, concept_metadata: pd.DataFrame, out_dir) -> None:

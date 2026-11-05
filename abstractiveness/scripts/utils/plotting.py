@@ -6,6 +6,7 @@ Generic drawing code shared by every module, no analysis logic.
 Explanations: none needed.
 """
 
+from contextlib import nullcontext
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
@@ -44,6 +45,25 @@ def apply_plot_style() -> None:
 apply_plot_style()
 
 
+# Thesis figures are drawn at their printed width, so these sizes are the printed ones.
+PRINT_WIDTH = {"full": 6.6, "half": 3.25}
+NOTE_SIZE = 7
+PRINT_RC = {
+    "axes.titlesize": 9, "axes.labelsize": 9, "xtick.labelsize": 8, "ytick.labelsize": 8,
+    "legend.fontsize": 9, "legend.title_fontsize": 9, "figure.titlesize": 9, "axes.titlepad": 4,
+    "axes.labelpad": 3, "legend.handlelength": 1.5, "legend.columnspacing": 1.2,
+    "xtick.major.size": 2.5, "ytick.major.size": 2.5, "xtick.major.width": 0.6, "ytick.major.width": 0.6,
+    "xtick.major.pad": 2, "ytick.major.pad": 2,
+    "mathtext.fontset": "custom", "mathtext.rm": FONT_FAMILY, "mathtext.it": f"{FONT_FAMILY}:italic",
+    "mathtext.bf": f"{FONT_FAMILY}:bold", "mathtext.cal": FONT_FAMILY,
+}
+
+
+def print_style(active: bool = True):
+    """Context with 8 and 9 point text and symbols in the text font, for a figure drawn at its printed width."""
+    return plt.rc_context(PRINT_RC) if active else nullcontext()
+
+
 def _title_scale(fig) -> float:
     """Title size multiplier, growing with figure width so very wide figures keep a readable title."""
     return min(max(1.0, fig.get_figwidth() / 14.0), 1.8)
@@ -52,12 +72,14 @@ def _title_scale(fig) -> float:
 def set_title(ax, title: str, detail: str = None) -> None:
     """Sentence-case title in regular weight, with optional smaller grey detail lines below it."""
     scale = _title_scale(ax.figure)
+    detail_size = plt.rcParams["axes.labelsize"] - 1
     lines = detail.count("\n") + 1 if detail else 0
-    ax.set_title(title, fontsize=TITLE_SIZE * scale, pad=(10 + 16 * lines) * scale)
+    ax.set_title(title, fontsize=plt.rcParams["axes.titlesize"] * scale,
+                 pad=(10 + 16 * lines) * scale * detail_size / 10)
     if detail:
-        ax.annotate(detail, xy=(0.5, 1.0), xycoords="axes fraction", xytext=(0, 7 * scale),
+        ax.annotate(detail, xy=(0.5, 1.0), xycoords="axes fraction", xytext=(0, 7 * scale * detail_size / 10),
                     textcoords="offset points", ha="center", va="bottom",
-                    fontsize=(TICK_SIZE + 1) * scale, color=DETAIL_COLOR)
+                    fontsize=detail_size * scale, color=DETAIL_COLOR)
 
 
 def set_suptitle(fig, title: str, y: float = None) -> None:
@@ -74,7 +96,8 @@ def twin_axis(ax):
     return twin
 
 
-def draw_regression(ax, x, y, fit: bool = True, scatter: bool = True, size: float = 22) -> list:
+def draw_regression(ax, x, y, fit: bool = True, scatter: bool = True, size: float = 22,
+                    linewidth: float = 1.8) -> list:
     """Values with the least-squares line of their complete points over the range of x, and its legend handles."""
     x, y = np.asarray(x, dtype=float), np.asarray(y, dtype=float)
     if scatter:
@@ -84,8 +107,80 @@ def draw_regression(ax, x, y, fit: bool = True, scatter: bool = True, size: floa
     if not fit or len(x) < 3 or np.ptp(x) == 0:
         return []
     ends = np.array([x.min(), x.max()])
-    ax.plot(ends, np.polyval(np.polyfit(x, y, 1), ends), color=CORRELATION_COLORS["line"], linewidth=1.8)
-    return [Line2D([], [], color=CORRELATION_COLORS["line"], linewidth=1.8, label="Least-squares line")]
+    ax.plot(ends, np.polyval(np.polyfit(x, y, 1), ends), color=CORRELATION_COLORS["line"], linewidth=linewidth)
+    return [Line2D([], [], color=CORRELATION_COLORS["line"], linewidth=linewidth, label="Least-squares line")]
+
+
+def legend_below(axes, handles, labels, ncol: int, pad: float = 4, **kwargs):
+    """Unframed figure legend centred under the given axes, below their lowest tick or axis label."""
+    axes = list(axes) if isinstance(axes, (list, tuple, np.ndarray)) else [axes]
+    fig = axes[0].figure
+    fig.canvas.draw()
+    renderer = fig.canvas.get_renderer()
+    bottom = min(axis.get_tightbbox(renderer).y0 for axis in axes) - pad * fig.dpi / 72
+    centre = (min(axis.get_position().x0 for axis in axes) + max(axis.get_position().x1 for axis in axes)) / 2
+    return fig.legend(handles, labels, loc="upper center", ncol=ncol, frameon=False,
+                      bbox_to_anchor=(centre, fig.transFigure.inverted().transform((0, bottom))[1]),
+                      bbox_transform=fig.transFigure, **kwargs)
+
+
+def _overlap(box, x0, y0, x1, y1) -> float:
+    """Area shared by a text box and a rectangle, in square pixels."""
+    return max(0.0, min(box.x1, x1) - max(box.x0, x0)) * max(0.0, min(box.y1, y1) - max(box.y0, y0))
+
+
+def _distance(box, x: float, y: float) -> float:
+    """Distance from a point to a text box, in pixels."""
+    return float(np.hypot(max(box.x0 - x, 0.0, x - box.x1), max(box.y0 - y, 0.0, y - box.y1)))
+
+
+def label_points(ax, x, y, labels, offset: float = 5, marker_radius: float = 3, **text_kwargs) -> None:
+    """Name each point beside it, crowded points first, on the nearest side where the name covers none of the other
+    names, the points, the legend and the area outside the axes, farther sides with a leader line, and next to its
+    own point rather than another."""
+    fig = ax.figure
+    fig.canvas.draw()
+    renderer = fig.canvas.get_renderer()
+    pixels = offset * fig.dpi / 72
+    radius = marker_radius * fig.dpi / 72
+    points, labels = np.column_stack([x, y]), list(labels)
+    centers = ax.transData.transform(points)
+    taken = [(cx - radius, cy - radius, cx + radius, cy + radius) for cx, cy in centers]
+    if ax.get_legend():
+        taken.append(tuple(ax.get_legend().get_window_extent(renderer).extents))
+    frame = ax.get_window_extent(renderer).extents
+    sides = [(1, 0, "left", "center"), (-1, 0, "right", "center"), (0, 1, "center", "bottom"),
+             (0, -1, "center", "top"), (1, 1, "left", "bottom"), (1, -1, "left", "top"),
+             (-1, 1, "right", "bottom"), (-1, -1, "right", "top")]
+    leader = {"arrowstyle": "-", "color": text_kwargs.get("color", DETAIL_COLOR), "linewidth": 0.5,
+              "shrinkA": 1, "shrinkB": marker_radius}
+    crowding = [-(np.hypot(*(centers - center).T) < 6 * pixels).sum() for center in centers]
+    for i in np.argsort(crowding, kind="stable"):
+        others = np.delete(centers, i, axis=0)
+        best = None
+        for distance in (1, 2.5, 4):
+            for dx, dy, ha, va in sides:
+                text = ax.annotate(labels[i], tuple(points[i]), xytext=(dx * distance * offset, dy * distance * offset),
+                                   textcoords="offset points", ha=ha, va=va,
+                                   arrowprops=leader if distance > 1 else None, **text_kwargs)
+                box = text.get_window_extent(renderer)
+                clash = (box.width * box.height - _overlap(box, *frame)
+                         + sum(_overlap(box, *rectangle) for rectangle in taken))
+                if distance == 1 and len(others) and \
+                        min(_distance(box, *c) for c in others) < _distance(box, *centers[i]):
+                    clash += box.width * box.height
+                if best is None or clash < best[0]:
+                    if best is not None:
+                        best[1].remove()
+                    best = (clash, text, box)
+                else:
+                    text.remove()
+                if clash == 0:
+                    break
+            if best[0] == 0:
+                break
+        box = best[2]
+        taken.append((box.x0 - pixels / 4, box.y0 - pixels / 4, box.x1 + pixels / 4, box.y1 + pixels / 4))
 
 
 def stats_line(coefficient: str, value, p=None, n=None, p_label: str = "p") -> str:

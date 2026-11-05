@@ -13,6 +13,7 @@ import functools
 import logging
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
+from matplotlib.ticker import MaxNLocator
 import numpy as np
 import pandas as pd
 import seaborn as sns
@@ -37,8 +38,8 @@ from core.probing_sentences import load_positive_documents
 from utils.plotting import (_plot_bar_with_leaders, _plot_heatmap_with_leaders,
                             apply_rotated_leader_labels, build_category_color_map, fig_width_for,
                             plot_hexbin_with_trends, plot_sublayer_comparison_bars, set_title, set_suptitle,
-                            stats_line, draw_regression, twin_axis, LEVEL_COLORS, SERIES_COLORS,
-                            DETAIL_COLOR, SEQUENTIAL_CMAP, DIVERGING_CMAP)
+                            stats_line, draw_regression, twin_axis, print_style, legend_below, LEVEL_COLORS,
+                            SERIES_COLORS, DETAIL_COLOR, SEQUENTIAL_CMAP, DIVERGING_CMAP, PRINT_WIDTH, NOTE_SIZE)
 
 log = logging.getLogger(__name__)
 
@@ -669,20 +670,20 @@ def category_mean_matrix(concepts, jaccard_matrix: np.ndarray, concept_metadata:
     return table
 
 
-def plot_category_mean_matrix(table: pd.DataFrame, out_dir) -> None:
-    """The category-mean Jaccard matrix as an annotated heatmap."""
+def plot_category_mean_matrix(table: pd.DataFrame, out_dir, vmax: float = None) -> None:
+    """The category-mean Jaccard matrix as an annotated heatmap at print width, its colours from 0 to vmax."""
     labels = [c.capitalize() for c in table.index]
-    fig, ax = plt.subplots(figsize=(8.5, 7))
-    sns.heatmap(table.to_numpy(dtype=float), annot=True, fmt=".2f", cmap=SEQUENTIAL_CMAP, square=True,
-                xticklabels=labels, yticklabels=labels, cbar_kws={"label": "Mean Jaccard (%)"}, ax=ax)
-    ax.grid(False)
-    ax.set_xticklabels(labels, rotation=45, ha="right", rotation_mode="anchor")
-    ax.set_yticklabels(labels, rotation=0)
-    set_title(ax, "Mean pairwise Jaccard within and between categories",
-              "members only, self-pairs excluded, percent")
-    fig.tight_layout()
-    fig.savefig(out_dir / "jaccard_category_mean_matrix.png", dpi=300, bbox_inches="tight")
-    plt.close(fig)
+    with print_style():
+        fig, ax = plt.subplots(figsize=(PRINT_WIDTH["half"], 2.8))
+        sns.heatmap(table.to_numpy(dtype=float), annot=True, fmt=".2f", annot_kws={"fontsize": NOTE_SIZE},
+                    cmap=SEQUENTIAL_CMAP, vmin=0, vmax=vmax, square=True, xticklabels=labels, yticklabels=labels,
+                    cbar_kws={"label": "Mean Jaccard index (%)"}, ax=ax)
+        ax.grid(False)
+        ax.set_xticklabels(labels, rotation=45, ha="right", rotation_mode="anchor")
+        ax.set_yticklabels(labels, rotation=0)
+        fig.tight_layout()
+        fig.savefig(out_dir / "jaccard_category_mean_matrix.png", dpi=300, bbox_inches="tight")
+        plt.close(fig)
 
 
 def plot_category_heatmaps(concepts, jaccard_matrix: np.ndarray, concept_metadata: pd.DataFrame,
@@ -774,9 +775,11 @@ HUMAN_VALIDATION_SUMMARY_LABELS = {
 TEXT_METRIC = "text_tfidf"
 TEXT_LABEL = "probing-text TF-IDF cosine"
 TEXT_SUBJECT = "Probing-text TF-IDF cosine"
+HUMAN_PLOT_SUBJECTS = {"jaccard": "Jaccard index (%)", TEXT_METRIC: TEXT_SUBJECT}
 
 
 HUMAN_SIGNIFICANCE_ALPHA = 0.05
+SCATTER_TICK_STEPS = [1, 2, 2.5, 3, 4, 5, 6, 8, 10]
 
 
 def human_validated_metrics() -> list:
@@ -824,31 +827,35 @@ def _per_group(test: dict) -> dict:
 
 def plot_human_vs_expert(frame: pd.DataFrame, test: dict, metric_label: str, out_path,
                          subject: str | None = None) -> None:
-    """Per-category scatter of model similarity against human rating with the least-squares line, the category's
-    Spearman rho with its Mantel p, and the CSV of the pairs."""
+    """Per-category scatter of model similarity against the mean similarity rating at print width, with the
+    least-squares line, the category's Spearman rho with its Mantel p, and the CSV of the pairs."""
     subject = subject or f"Expert {metric_label}"
     statistics = _per_group(test)
-    fig, axes = plt.subplots(2, 4, figsize=(18, 8.5), sharey=True)
-    legend = True
-    for axis, category in zip(axes.ravel(), sorted(load_human_similarity().category.unique())):
-        rho, p, n = statistics.get(category, (np.nan, np.nan, 0))
-        if not np.isfinite(rho):
-            axis.set_visible(False)
-            continue
-        pairs = frame[frame.category == category]
-        handles = draw_regression(axis, pairs.expert_similarity, pairs.human_rating, size=12)
-        if legend and handles:
-            axis.legend(handles=handles, loc="upper left")
-            legend = False
-        set_title(axis, category.capitalize(),
-                  stats_line("Spearman ρ", rho, p if np.isfinite(p) else None, int(n), p_label="Mantel p"))
-        axis.set_xlabel(subject)
-    for axis in axes[:, 0]:
-        axis.set_ylabel("Human similarity rating (1 to 7)")
-    set_suptitle(fig, f"{subject} against human similarity, within-category pairs")
-    fig.tight_layout()
-    fig.savefig(out_path, dpi=300, bbox_inches="tight")
-    plt.close(fig)
+    with print_style():
+        fig, axes = plt.subplots(2, 4, figsize=(PRINT_WIDTH["full"], 3.8), sharey=True)
+        legend = []
+        for axis, category in zip(axes.ravel(), sorted(load_human_similarity().category.unique())):
+            rho, p, n = statistics.get(category, (np.nan, np.nan, 0))
+            if not np.isfinite(rho):
+                axis.set_visible(False)
+                continue
+            pairs = frame[frame.category == category]
+            legend = draw_regression(axis, pairs.expert_similarity, pairs.human_rating, size=4, linewidth=1.0) or legend
+            set_title(axis, category.capitalize(),
+                      rf"Spearman $\rho_k$ = {rho:.2f}" + (f"\n$p$ = {p:.2g}" if np.isfinite(p) else ""))
+            axis.xaxis.set_major_locator(MaxNLocator(nbins=6, steps=SCATTER_TICK_STEPS, min_n_ticks=6))
+        for axis in axes[-1]:
+            axis.set_xlabel(subject)
+        for axis in axes[:, 0]:
+            axis.set_ylabel("Mean similarity\nrating (1 to 7)")
+            axis.set_yticks([1, 3, 5, 7])
+            axis.set_ylim(0.6, 7.4)
+        fig.tight_layout()
+        if legend:
+            legend_below([axis for axis in axes.ravel() if axis.get_visible()], legend,
+                         [handle.get_label() for handle in legend], ncol=1)
+        fig.savefig(out_path, dpi=300, bbox_inches="tight")
+        plt.close(fig)
     save_dataframe(frame, out_path.with_suffix(".csv"))
 
 
@@ -912,7 +919,7 @@ def validate_against_human(concepts: list, matrices: dict, out_dir, make_plots: 
         if make_plots and out_dir is not None:
             target = out_dir if key in ("jaccard", TEXT_METRIC) else (plot_dir or out_dir)
             plot_human_vs_expert(frame, test, label, target / f"similarity_vs_{key.removeprefix('layer_profile_')}.png",
-                                 subject=TEXT_SUBJECT if key == TEXT_METRIC else None)
+                                 subject=HUMAN_PLOT_SUBJECTS.get(key))
     table = pd.DataFrame(rows)
     if out_dir is not None:
         save_dataframe(table, out_dir / "human_similarity_validation.csv")
@@ -969,9 +976,9 @@ def text_similarity_matrix(dataset_dir: str, concepts: tuple) -> np.ndarray:
 
 
 TEXT_BASELINE_BARS = {
-    "rho_text_human": ("Text against humans", SERIES_COLORS["muted"]),
-    "rho_jaccard_human": ("Expert Jaccard against humans", SERIES_COLORS["primary"]),
-    "partial_rho_jaccard_human_given_text": ("Expert Jaccard against humans, text partialled out",
+    "rho_text_human": ("Text similarity $s$", SERIES_COLORS["muted"]),
+    "rho_jaccard_human": ("Jaccard index $J$", SERIES_COLORS["primary"]),
+    "partial_rho_jaccard_human_given_text": ("Jaccard index $J$ with text similarity $s$ partialled out",
                                              SERIES_COLORS["secondary"]),
 }
 
@@ -1003,27 +1010,28 @@ def text_baseline_table(concepts, jaccard: np.ndarray, text: np.ndarray, with_ex
 
 def _category_names(table: pd.DataFrame) -> list:
     """Category labels of a per-category table, its weighted mean row included."""
-    return [("weighted mean" if c == WEIGHTED_MEAN else c).capitalize() for c in table["category"]]
+    return ["Weighted\n" r"mean ($\rho_W$)" if c == WEIGHTED_MEAN else c.capitalize() for c in table["category"]]
 
 
-def plot_text_baseline(table: pd.DataFrame, out_path) -> None:
-    """Per category and on average, the text's and the experts' agreement with humans, and the experts' without the text."""
+def plot_text_baseline(table: pd.DataFrame, out_path, ylim: tuple = None) -> None:
+    """Per category and as weighted mean at print width, the agreement with the similarity ratings of the text
+    similarity, of the Jaccard index, and of the Jaccard index with the text partialled out."""
     x = np.arange(len(table))
     width = 0.8 / len(TEXT_BASELINE_BARS)
-    fig, ax = plt.subplots(figsize=(11, 5))
-    for offset, (column, (label, color)) in enumerate(TEXT_BASELINE_BARS.items()):
-        ax.bar(x + (offset - 1) * width, table[column], width, label=label, color=color)
-    ax.axhline(0, color="black", linewidth=0.8)
-    ax.set_xticks(x)
-    ax.set_xticklabels(_category_names(table), rotation=30, ha="right", rotation_mode="anchor")
-    ax.set_ylabel("Spearman ρ with the human ratings")
-    set_title(ax, "Agreement with human similarity, probing text against expert sets",
-              "within-category pairs, TF-IDF cosine of each word's positive sentences, "
-              "partial Spearman within category")
-    ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.22), ncol=3, frameon=False)
-    fig.tight_layout()
-    fig.savefig(out_path, dpi=300, bbox_inches="tight")
-    plt.close(fig)
+    with print_style():
+        fig, ax = plt.subplots(figsize=(PRINT_WIDTH["full"], 2.8))
+        for offset, (column, (label, color)) in enumerate(TEXT_BASELINE_BARS.items()):
+            ax.bar(x + (offset - 1) * width, table[column], width, label=label, color=color)
+        ax.axhline(0, color="black", linewidth=0.6)
+        ax.set_xticks(x)
+        ax.set_xticklabels(_category_names(table))
+        ax.set_ylabel("Spearman's $\\rho_k$ with\nthe similarity ratings")
+        if ylim is not None:
+            ax.set_ylim(ylim)
+        fig.tight_layout()
+        legend_below(ax, *ax.get_legend_handles_labels(), ncol=3)
+        fig.savefig(out_path, dpi=300, bbox_inches="tight")
+        plt.close(fig)
 
 
 def _member_and_pair_parts(values: np.ndarray, rows: np.ndarray, columns: np.ndarray, n_members: int) -> tuple:
@@ -1090,29 +1098,32 @@ def human_similarity_decomposition_table(concepts, jaccard: np.ndarray, text: np
 
 
 DECOMPOSITION_BARS = {
-    "member_part": ("Member part (typicality and expert-set centrality)", SERIES_COLORS["primary"]),
-    "pair_part": ("Pair-specific part", SERIES_COLORS["accent"]),
+    "member_part": ("Member contribution", SERIES_COLORS["primary"]),
+    "pair_part": ("Pair-specific contribution", SERIES_COLORS["accent"]),
 }
 
 
-def plot_human_similarity_decomposition(table: pd.DataFrame, out_path) -> None:
-    """Per category and on average, the member and pair-specific parts of the Jaccard against human Spearman rho."""
+def plot_human_similarity_decomposition(table: pd.DataFrame, out_path, ylim: tuple = None) -> None:
+    """Per category and as weighted mean at print width, the member and pair-specific contributions to the Spearman
+    rho of the Jaccard index against the similarity ratings."""
     x = np.arange(len(table))
     width = 0.8 / len(DECOMPOSITION_BARS)
-    fig, ax = plt.subplots(figsize=(11, 5))
-    for offset, (column, (label, color)) in enumerate(DECOMPOSITION_BARS.items()):
-        ax.bar(x + (offset - 0.5) * width, table[column], width, label=label, color=color)
-    ax.scatter(x, table["rho"], marker="D", s=36, color=DETAIL_COLOR, zorder=3, label="Total rho, sum of the two parts")
-    ax.axhline(0, color="black", linewidth=0.8)
-    ax.set_xticks(x)
-    ax.set_xticklabels(_category_names(table), rotation=30, ha="right", rotation_mode="anchor")
-    ax.set_ylabel("Contribution to Spearman ρ")
-    set_title(ax, "Agreement of the expert Jaccard with human similarity, member and pair-specific parts",
-              "within-category pairs on ranks, the member part is the agreement carried by typicality")
-    ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.22), ncol=3, frameon=False)
-    fig.tight_layout()
-    fig.savefig(out_path, dpi=300, bbox_inches="tight")
-    plt.close(fig)
+    with print_style():
+        fig, ax = plt.subplots(figsize=(PRINT_WIDTH["full"], 2.8))
+        for offset, (column, (label, color)) in enumerate(DECOMPOSITION_BARS.items()):
+            ax.bar(x + (offset - 0.5) * width, table[column], width, label=label, color=color)
+        ax.scatter(x, table["rho"], marker="D", s=20, color=DETAIL_COLOR, edgecolors="white", linewidths=0.6,
+                   zorder=3, label=r"Spearman $\rho_k$, sum of the two contributions")
+        ax.axhline(0, color="black", linewidth=0.6)
+        ax.set_xticks(x)
+        ax.set_xticklabels(_category_names(table))
+        ax.set_ylabel(r"Contribution to Spearman $\rho_k$")
+        if ylim is not None:
+            ax.set_ylim(ylim)
+        fig.tight_layout()
+        legend_below(ax, *ax.get_legend_handles_labels(), ncol=3)
+        fig.savefig(out_path, dpi=300, bbox_inches="tight")
+        plt.close(fig)
 
 
 def run_human_similarity_validation(scope, matrices: dict, out_dir, metric_dir, plot_dir,
