@@ -4,7 +4,8 @@ humans with the text partialled out.
 
 Checks:
   1. Text similarity: two concepts with identical sentences have cosine 1, two with no shared term cosine 0,
-     the matrix is symmetric with a unit diagonal, and a concept without a sentence file gets NaN.
+     the matrix is symmetric with a unit diagonal, and a concept without a sentence file gets NaN. The shared
+     text_similarity_frame labels the same matrix by concept and is None without a dataset folder.
   2. Table: on synthetic matrices over every metadata concept, every rated pair is used, each category's coefficients
      equal scipy's Spearman and the closed-form partial on that category's ranks with a permutation p, WEIGHTED_MEAN
      holds their pair-weighted means and a p for the partial, a text equal to the expert matrix leaves nothing to
@@ -24,6 +25,7 @@ from scipy.stats import spearmanr
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 from modules.module_2_similarities import WEIGHTED_MEAN, text_baseline_table, text_similarity_matrix
+from modules.shared_text_measures import text_similarity_frame
 from core.human_similarity_ratings import load_human_similarity
 from utils.statistics import PERMUTATIONS
 from _report import run
@@ -42,6 +44,10 @@ def check_text_similarity() -> str:
             data = {"sentences": {"positive": positives, "negative": ["unused"]}}
             (pathlib.Path(root) / "custom" / f"{concept}.json").write_text(json.dumps(data))
         similarity = text_similarity_matrix(root, ("c1", "c2", "c3", "c4", "c5"))
+        frame = text_similarity_frame(root, ["c1", "c2", "c3", "c4", "c5"])
+    assert list(frame.index) == list(frame.columns) == ["c1", "c2", "c3", "c4", "c5"], "frame labelled by concept"
+    assert np.allclose(frame.to_numpy(), similarity, equal_nan=True), "frame holds the matrix"
+    assert text_similarity_frame(None, ["c1"]) is None, "no dataset folder gives None"
     assert abs(similarity[0, 1] - 1) < 1e-12, f"identical sentences give {similarity[0, 1]}"
     assert similarity[0, 2] == 0 and similarity[1, 3] == 0, "no shared term must give 0"
     known = similarity[:4, :4]

@@ -12,6 +12,9 @@ Checks:
      categories of n_k (n_k - 1) / (N (N - 1)): edges all inside categories reach the floor, edges all across them
      get p below 0.01 where a one-sided test would give about 1, and the mean of the null lies within Monte Carlo
      error of the expectation.
+  3. Link-graph edges flag pairs whose words open with the same token: the strongest edge joins two words of
+     different categories that share a first token, the homonym pair is never flagged, and without a token table the
+     column is missing values throughout.
 
 Usage, from scripts/:
     python tests/check_module5_concept_structure_tests.py
@@ -23,7 +26,7 @@ import numpy as np
 import pandas as pd
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
-from modules.module_5_typicality_prediction import graph_domain_structure, group_separation
+from modules.module_5_typicality_prediction import concept_graph_edges, graph_domain_structure, group_separation
 from utils.statistics import PERMUTATIONS
 from _report import run
 
@@ -82,8 +85,28 @@ def check_domain_structure() -> str:
            f"{edge_rows[1].null_within_category_pct}% against {100 * expected:.1f}%"
 
 
+def check_same_first_token() -> str:
+    items = ["tuxedo", "scarf", "trolley", "bus", "squash__fruit", "squash__sports"]
+    meta = pd.DataFrame({"concept": items, "category": ["clothing", "clothing", "vehicles", "vehicles", "fruit", "sports"],
+                         "abstraction_level": 2})
+    similarity = np.full((6, 6), 0.1)
+    similarity[0, 2] = similarity[2, 0] = 0.9
+    similarity[4, 5] = similarity[5, 4] = 0.8
+    similarity[0, 1] = similarity[1, 0] = similarity[2, 3] = similarity[3, 2] = 0.5
+    tokens = pd.DataFrame({"first_token_id": [7, 11, 7, 13, 17, 17], "first_piece": [" t", " sc", " t", " bus", " sq", " sq"]},
+                          index=pd.Index(items, name="concept"))
+    edges = concept_graph_edges(similarity, items, meta, neighbors=1, tokens=tokens)
+    cross = edges[edges.edge_type == "cross category"]
+    assert cross.same_first_token.sum() == 1 and "shared_prefix" not in edges.columns, edges
+    assert cross.iloc[0][["concept_a", "concept_b"]].tolist() == ["tuxedo", "trolley"], cross
+    homonym = edges.concept_a.str.startswith("squash") & edges.concept_b.str.startswith("squash")
+    assert homonym.any() and edges.loc[homonym, "same_first_token"].eq(False).all(), edges
+    assert concept_graph_edges(similarity, items, meta, neighbors=1).same_first_token.isna().all()
+    return f"same first token: {int(cross.same_first_token.sum())} of {len(cross)} cross edges flagged, homonyms not"
+
+
 def checks(failures: list) -> str:
-    return ", ".join([check_separation(), check_domain_structure()])
+    return ", ".join([check_separation(), check_domain_structure(), check_same_first_token()])
 
 
 if __name__ == "__main__":

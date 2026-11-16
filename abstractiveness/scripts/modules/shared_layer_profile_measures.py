@@ -172,6 +172,14 @@ PROFILE_METRIC_LABELS = {
 # Metrics whose agreement can be negative.
 SIGNED_PROFILE_METRICS = {"pearson", "spearman"}
 
+# The metrics grouped by what they compare, each group's representative first.
+PROFILE_METRIC_GROUPS = {
+    "Overlap of proportions": ("js_divergence", "js_distance", "hellinger", "profile_jaccard"),
+    "Pattern across blocks": ("cosine", "pearson", "spearman"),
+    "Distance along the network": ("wasserstein",),
+}
+REPRESENTATIVE_PROFILE_METRICS = tuple(group[0] for group in PROFILE_METRIC_GROUPS.values())
+
 
 def profile_metric_label(metric: str) -> str:
     """Display name for a registered metric, falling back to the raw key."""

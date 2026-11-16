@@ -8,6 +8,9 @@ Checks:
      rated squash__sports pair is found.
   3. Category identity alone cannot predict pair similarity under the grouped split, so the pair
      construction does not leak the category.
+  4. With a text frame the table carries the four band Jaccard columns, on the 0 to 100 scale and
+     0 in a band no word reaches, and text_similarity read from the frame for each pair, and
+     without a text frame it carries no text_similarity column.
 
 Usage, from scripts/:
     python tests/check_module5_pair_similarity_design.py
@@ -22,7 +25,7 @@ from sklearn.linear_model import LinearRegression
 from sklearn.model_selection import GroupKFold, cross_val_predict
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
-from modules.module_5_typicality_prediction import build_pair_similarity_design, ACTIVE_METRICS
+from modules.module_5_typicality_prediction import build_pair_similarity_design, ACTIVE_METRICS, BAND_COLUMNS
 from core.human_similarity_ratings import human_pair_lookup
 from _report import run
 
@@ -87,7 +90,19 @@ def checks(failures: list) -> str:
     leak = abs(spearmanr(predicted, big.human_similarity).statistic)
     if not leak < 0.2:
         failures.append(f"category identity predicted pair similarity (rho={leak:.3f}), the split leaks")
-    return f"{len(table)} fixture pairs, {joined_with_squash} squash__sports pairs joined, category-shortcut rho {leak:.3f}"
+    assert "text_similarity" not in table.columns, "no text frame must give no text_similarity column"
+    text = pd.DataFrame(rng.uniform(0, 1, (4, 4)), index=concepts, columns=concepts)
+    text = (text + text.T) / 2
+    with_text = build_pair_similarity_design(design, experts, ACTIVE_METRICS, text=text)
+    for column in BAND_COLUMNS:
+        assert column in with_text.columns, f"{column} missing"
+        assert with_text[column].between(0, 100).all(), f"{column} off the 0 to 100 scale"
+    # Three blocks fall in bands 0, 1 and 2 of four, so the last band holds no unit.
+    assert (with_text[BAND_COLUMNS[3]] == 0).all(), "a band no word reaches must give 0"
+    expected_text = [text.loc[a, b] for a, b in zip(with_text.word_a, with_text.word_b)]
+    assert np.allclose(with_text["text_similarity"], expected_text), "text_similarity not read from the frame"
+    return (f"{len(table)} fixture pairs, {joined_with_squash} squash__sports pairs joined, "
+            f"category-shortcut rho {leak:.3f}, band and text columns present")
 
 
 if __name__ == "__main__":

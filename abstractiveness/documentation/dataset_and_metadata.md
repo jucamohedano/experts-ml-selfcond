@@ -408,3 +408,16 @@ The GPT-2 runs cited as `research_plots_150_*` across the module pages use a dif
 It is built by `scripts/prepare_metadata.py` from `conf/concept_group/abstractiveness_150.yaml` rather than from a word-list CSV, and it draws `frequency` from the same Wikipedia count file and `typicality` from the same THINGS ratings file. Its THINGS coverage is complete, 147 of 147, which is unsurprising given that the category vocabulary was chosen to match THINGS in the first place. That completeness is why the `gpt2_150` config can use `typicality` as its typicality column where the Richie-HSJ configs cannot.
 
 The trade made when moving to Richie-HSJ was coverage of a direct typicality rating against availability of pairwise human similarity judgments. The 150-concept set has the former and none of the latter, so module 2's section 2.3 and module 5's Study B have no human target on it at all.
+
+## 12. The concept token table
+
+`assets/concept_tokens.csv` records how each model's tokenizer splits each concept word in the middle of a sentence, so module 5 can tell pairs of words that open with the same token from the rest without loading a tokenizer during the analysis. It is built once, offline, by
+
+```bash
+cd scripts
+HF_HOME=<hf_home> HF_HUB_OFFLINE=1 ../../.venv/bin/python -m core.data_preparation.build_concept_tokens
+```
+
+which encodes `" " + word` for every entry of `assets/metadata_Richie_HSJ.json`, without special tokens, with the GPT-2 tokenizer (`gpt2`) and the Qwen3-1.7B-Base tokenizer (`Qwen/Qwen3-1.7B-Base`), the leading space giving the form a word takes after another word. The file has one row per concept and architecture, 206 concepts for each of `gpt2` and `qwen3`, with the columns `concept`, `word`, `architecture`, `n_tokens`, `first_token_id`, `first_piece` (the first token decoded, its leading space kept) and `pieces` (every token decoded, joined by `|`). 148 words are a single token in Qwen3-1.7B-Base and 135 in GPT-2, and no word takes more than four. Both senses of squash share one row each, since they share the word.
+
+`core/concept_tokens.py` loads it through `load_concept_tokens(architecture)`, a frame indexed by concept, and returns an empty frame with a warning when the architecture is not given, the file is missing or the architecture is absent from it, in which case module 5 writes no same-token output and leaves `same_first_token` empty. The table is derived data under the git-ignored `assets/` and is rebuilt by the command above. `check_concept_tokens.py` covers the builder on a stub tokenizer, the loader's fallbacks and the known shared first tokens, tuxedo, trolley and tangerine on " t" and penguin, pheasant and pomegranate on " p" in Qwen3-1.7B-Base.

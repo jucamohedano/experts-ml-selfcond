@@ -538,3 +538,20 @@ Every clustered space, `dendrogram_summary.csv`.
 | `hellinger` | 0.678 vs 0.650 | 0.204 vs 0.119 | 0.439 vs 0.538 | +0.015 vs -0.002 |
 | `profile_jaccard` | 0.706 vs 0.686 | 0.086 vs 0.046 | 0.508 vs 0.514 | +0.009 vs -0.003 |
 | `expert_set_jaccard` | 0.920 vs 0.917 | 0.772 vs 0.772 | 0.364 vs 0.346 | +0.047 vs +0.044 |
+
+## Study B fitted within categories (module 5, November 2026)
+
+Until 10 November 2026 Study B fitted each cell by least squares on the raw feature values pooled over the training categories, and Study A's ridge baseline, the `regression_accuracy` column, did the same. Both are evaluated within categories, by the within-category Spearman $\rho_W$ and by accuracy on pairs inside one category, while a pooled fit also learns how the category means of a feature relate to the category means of the target. For the layer-profile agreement $S$ that relation runs against the within-category one, the Spearman over the eight category means of $S$ and of the ratings being $-0.26$ / $-0.67$ (Qwen3-1.7B-Base / GPT-2) on the nopad trees, so the pooled fit set the weight of $S$ partly from eight category means. Both now fit on within-category rank scores of the features and of the target (`within_category_predictions`, module 5's *Study B*), which removes every category mean, and `group_cv_r2` is read on the rank scores of the ratings.
+
+On the GPT-2 v3 tree at AP 0.6, whole model, with the Jensen-Shannon divergence, $\rho_W$ of each Study B cell before and after:
+
+| Cell | Pooled fit | Within-category fit |
+|---|---|---|
+| `jaccard` | 0.3419 | 0.3419 |
+| `profile` | $-0.1396$ | 0.1159 |
+| `profile_z` | $-0.0102$ | 0.0917 |
+| `jaccard_profile` | 0.3274 | 0.3456 |
+| `jaccard_profile_z` | 0.3226 | 0.3393 |
+| `jaccard_profile_both` | 0.3357 | 0.3513 |
+
+The Jaccard cell keeps its value, since one feature with a positive weight keeps its order inside every category. The profile alone turns from inverted to weakly positive, and every cell adding a profile feature to $J$ gains 0.016 to 0.018. The ranker accuracies of Study A are unchanged to the last digit, the ranker having always fitted differences inside one category, and `regression_accuracy` moves by up to 3.6 points on the Jensen-Shannon divergence, from 62.5 to 59.0% for $\{J, S, z\}$ under the other members, and by up to 10.6 points on a single profile feature of another metric, from 51.9 to 41.4% for the Wasserstein profile alone under the category name. The old outputs are kept in `results/_archive_2026-11-10/research_plots_gpt2_richie_hsj_v3/AP_0.6/5_typicality_prediction/`, and every other tree keeps the pooled values until module 5 is rerun on it.

@@ -33,7 +33,7 @@ SIGNAL = {"birds": 2.0, "clothing": 0.2, "fruit": 1.0, "furniture": 0.1, "vehicl
 
 def make_table(seed: int = 0) -> pd.DataFrame:
     """A pair table shaped like build_pair_similarity_design's, the ratings tracking the Jaccard by category."""
-    rng = np.random.default_rng(seed)
+    rng, band_rng = np.random.default_rng(seed), np.random.default_rng(seed + 1)
     frames = []
     for category, size in SIZES.items():
         jaccard = rng.uniform(0, 100, size)
@@ -42,7 +42,8 @@ def make_table(seed: int = 0) -> pd.DataFrame:
             "word_b": [f"{category}_b{i}" for i in range(size)],
             "human_similarity": 4 + SIGNAL[category] * (jaccard - 50) / 50 + rng.normal(0, 1, size),
             "jaccard_pct": jaccard, "profile_js_distance": jaccard + rng.normal(0, 40, size),
-            "profile_js_distance_z": rng.normal(0, 1, size)}))
+            "profile_js_distance_z": rng.normal(0, 1, size),
+            **{column: jaccard + band_rng.normal(0, 30, size) for column in m5.BAND_COLUMNS}}))
     return pd.concat(frames, ignore_index=True)
 
 
@@ -50,7 +51,7 @@ def checks(failures: list) -> str:
     real_build_design = m5.build_pair_similarity_design
     m5.build_pair_similarity_design = lambda *args, **kwargs: make_table()
     try:
-        results, per_category = m5.run_pair_similarity(pd.DataFrame(), pd.DataFrame(), ["js_distance"])
+        results, per_category, _, _ = m5.run_pair_similarity(pd.DataFrame(), pd.DataFrame(), ["js_distance"])
     finally:
         m5.build_pair_similarity_design = real_build_design
 
@@ -72,7 +73,7 @@ def checks(failures: list) -> str:
     assert not stale, f"columns that must be gone: {stale}"
     rho_k = per_category.pivot_table(index="category", columns=["model", "metric"], values="rho")
     tested = 0
-    for reduced, full in m5.nested_pairs(m5.build_feature_grid(["js_distance"])):
+    for reduced, full in m5.nested_pairs(m5.build_feature_grid(["js_distance"], with_text=False)):
         t, p = stats.ttest_rel(rho_k[(full["model"], full["metric"])], rho_k[(reduced["model"], reduced["metric"])])
         row = rows.loc[(full["model"], full["metric"])]
         reported = row.get(f"paired_t_vs_{reduced['model']}"), row.get(f"paired_t_p_vs_{reduced['model']}")

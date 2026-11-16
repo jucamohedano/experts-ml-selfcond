@@ -28,11 +28,13 @@ def load_experts_data(root, model, threshold) -> pd.DataFrame:
 # Per-architecture rules turning raw layer strings into sequential layer indices.
 LAYER_ARCHITECTURES = {
     "gpt2": {
+        "n_blocks": 12,
         "block_regex": r"h\.(\d+)",
         "sublayer_regex": r"h\.\d+\.(.*?):0",
         "sublayers": ["attn.c_attn", "attn.c_proj", "mlp.c_fc", "mlp.c_proj"],
     },
     "qwen3": {
+        "n_blocks": 28,
         "block_regex": r"layers\.(\d+)",
         "sublayer_regex": r"layers\.\d+\.(.*?):0",
         "sublayers": [

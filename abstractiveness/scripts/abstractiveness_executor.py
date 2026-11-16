@@ -232,7 +232,15 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run the abstractiveness analysis for one model configuration.")
     parser.add_argument("--config", default=ACTIVE_CONFIG, choices=sorted(MODEL_CONFIGS),
                         help=f"key of MODEL_CONFIGS to run (default {ACTIVE_CONFIG})")
-    ACTIVE_CONFIG = parser.parse_args().config
+    parser.add_argument("--modules", nargs="+", type=int, choices=range(1, 6), metavar="N",
+                        help=f"modules to run, overriding ENABLED_MODULES (default {sorted(ENABLED_MODULES)})")
+    parser.add_argument("--ap", nargs="+", type=float, metavar="T",
+                        help=f"AP thresholds to run, a subset of the sweep (default {AP_THRESHOLDS})")
+    args = parser.parse_args()
+    ACTIVE_CONFIG = args.config
+    if args.modules:
+        ENABLED_MODULES = set(args.modules)
+    RUN_AP_THRESHOLDS = args.ap or AP_THRESHOLDS
     REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
     cfg = MODEL_CONFIGS[ACTIVE_CONFIG]
 
@@ -276,7 +284,7 @@ if __name__ == "__main__":
         OUTPUT_ROOT / "sublayer_rank.csv", _load_reference_expert_frame, REFERENCE_AP)
     rank_by_sublayer = dict(zip(sublayer_rank["sublayer"], sublayer_rank["rank"]))
 
-    for ap in AP_THRESHOLDS:
+    for ap in RUN_AP_THRESHOLDS:
         out_path = OUTPUT_ROOT / f"AP_{ap}"
         set_folder_log(out_path)
 
@@ -327,7 +335,8 @@ if __name__ == "__main__":
                     entries.append((module_dirs[3], module_3_dual_category_jsd.SUMMARY_LABELS, "Module 3", row))
                 if 5 in ENABLED_MODULES and full_scope:
                     _, row = module_5_typicality_prediction.execute_module_5_typicality_prediction(
-                        scope, concept_metadata, module_dirs[5], axis_sensitivity=(ap == REFERENCE_AP))
+                        scope, concept_metadata, module_dirs[5], axis_sensitivity=(ap == REFERENCE_AP),
+                        probing_sentences_dir=PROBING_SENTENCES_DIR, architecture=ARCHITECTURE)
                     entries.append((module_dirs[5], module_5_typicality_prediction.SUMMARY_LABELS, "Module 5", row))
 
                 for folder, labels, title, row in entries:

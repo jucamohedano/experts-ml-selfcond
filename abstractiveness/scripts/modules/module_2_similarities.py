@@ -18,7 +18,6 @@ import numpy as np
 import pandas as pd
 import seaborn as sns
 from scipy import stats
-from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 from utils.logging_and_io import save_dataframe
 from utils.statistics import PERMUTATIONS, correlation, spearman_test
@@ -34,7 +33,7 @@ from core.expert_data_loading import expert_counts_with_metadata
 from core.correlation_reporting import (Panel, panel_rho_columns, run_regression_panel, run_regression_grid,
                                         regression_row, regression_grid_rows, MIN_ABSOLUTE_N)
 from core.human_similarity_ratings import load_human_similarity, human_noise_ceiling
-from core.probing_sentences import load_positive_documents
+from modules.shared_text_measures import text_similarity_matrix
 from utils.plotting import (_plot_bar_with_leaders, _plot_heatmap_with_leaders,
                             apply_rotated_leader_labels, build_category_color_map, fig_width_for,
                             plot_hexbin_with_trends, plot_sublayer_comparison_bars, set_title, set_suptitle,
@@ -961,18 +960,6 @@ def write_pairwise_metric_comparison(profile_contrasts: dict, mean_rho: dict, ou
         f"dark bar is the default metric, {DEFAULT_PROFILE_METRIC}",
         scope_col="metric_label")
     return table
-
-
-@functools.lru_cache(maxsize=2)
-def text_similarity_matrix(dataset_dir: str, concepts: tuple) -> np.ndarray:
-    """Cosine between the TF-IDF vectors of every two concepts' positive sentences, NaN for a concept without sentences."""
-    documents = load_positive_documents(dataset_dir, concepts)
-    vectors = TfidfVectorizer(stop_words="english", sublinear_tf=True, min_df=2).fit_transform(documents)
-    similarity = (vectors @ vectors.T).toarray()
-    missing = np.array([not document for document in documents])
-    similarity[missing, :] = np.nan
-    similarity[:, missing] = np.nan
-    return similarity
 
 
 TEXT_BASELINE_BARS = {

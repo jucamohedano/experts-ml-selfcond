@@ -10,6 +10,9 @@ Checks:
   3. Leave-one-out holds: values match the leave-one-out rebuild and differ from include-self.
   4. Edge rows: a category of one, a word with no experts, a word below MIN_PROFILE_EXPERTS.
   5. The z coordinate has a fixed (concept, centroid) order, not a symmetrised one.
+  6. The band columns mean_jaccard_band_<b>_to_members and mean_text_to_members average the band
+     Jaccard and the text similarity over the same leave-one-out member list as
+     mean_jaccard_to_members, and the text column is absent without a text frame.
 
 Usage, from scripts/:
     python tests/check_module5_centroid_features.py
@@ -22,7 +25,7 @@ import pandas as pd
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 from modules.module_5_typicality_prediction import (
-    add_centroid_features, profile_columns, ACTIVE_METRICS)
+    add_centroid_features, profile_columns, ACTIVE_METRICS, MEMBER_BAND_COLUMNS)
 from modules.shared_layer_distribution_measures import build_layer_probability_matrix
 from core.analysis_scopes import to_block_axis
 from modules.shared_layer_profile_measures import count_matched_z, MIN_PROFILE_EXPERTS
@@ -226,6 +229,32 @@ def checks(failures: list) -> str:
                        for row, (concept, category) in enumerate(zip(out["concept"], out["category"]))
                        if (concept, category) in own_of]
     assert not all(matches_swapped), "the z matches a symmetrised coordinate throughout"
+
+    assert "mean_text_to_members" not in out.columns, "no text frame must give no text column"
+    rng = np.random.default_rng(3)
+    names = list(design["concept"])
+    text = pd.DataFrame(rng.uniform(0, 1, (len(names), len(names))), index=names, columns=names)
+    text = (text + text.T) / 2
+    with_text = add_centroid_features(design, experts, ACTIVE_METRICS, text=text)
+    counts = experts.groupby("concept").size()
+    usable = {concept for concept, count in counts.items() if count >= MIN_PROFILE_EXPERTS}
+    members = design[design["concept"].isin(usable)].groupby("category")["concept"].apply(list).to_dict()
+    bands = {concept: {} for concept in counts.index}
+    for concept, block, unit in zip(experts["concept"], experts["layer_idx"] - 1, experts["unit"]):
+        bands[concept].setdefault(block * 4 // BLOCKS, set()).add((block, unit))
+    for row, (concept, category) in enumerate(zip(with_text["concept"], with_text["category"])):
+        siblings = [other for other in members.get(category, []) if other != concept] if concept in counts else []
+        for band, column in enumerate(MEMBER_BAND_COLUMNS):
+            values = []
+            for other in siblings:
+                a, b = bands[concept].get(band, set()), bands[other].get(band, set())
+                values.append(len(a & b) / len(a | b) if a | b else 0.0)
+            expected = 100 * np.mean(values) if values else np.nan
+            assert np.allclose(with_text[column].iloc[row], expected, equal_nan=True), \
+                f"{concept}: {column} {with_text[column].iloc[row]} != rebuilt {expected}"
+        expected_text = np.mean([text.loc[concept, other] for other in siblings]) if siblings else np.nan
+        assert np.allclose(with_text["mean_text_to_members"].iloc[row], expected_text, equal_nan=True), \
+            f"{concept}: mean_text_to_members does not average the same member list"
 
     return (f"{len(out)} rows, {int(np.isfinite(z_score).sum())} with a finite z, "
             f"{reordered} entries where the concept outweighs its centroid")

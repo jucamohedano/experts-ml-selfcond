@@ -52,14 +52,15 @@ that rule is the study, not the module: Study B never reads the label word and n
 a centroid, so gating its rows on centroid columns would starve it of data for no reason,
 and the two studies are never compared numerically against each other.
 """
+import functools
 import itertools
 import logging
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-from matplotlib.colors import ListedColormap
+from matplotlib.colors import ListedColormap, to_rgb
 from matplotlib.lines import Line2D
-from scipy import stats
+from scipy import sparse, stats
 from scipy.cluster import hierarchy
 from scipy.spatial.distance import squareform, pdist
 from sklearn.manifold import MDS
@@ -67,7 +68,7 @@ from sklearn.metrics import (adjusted_rand_score, normalized_mutual_info_score,
                              silhouette_score)
 from sklearn.linear_model import LinearRegression, LogisticRegression, RidgeCV
 from sklearn.metrics import r2_score
-from sklearn.model_selection import GroupKFold, cross_val_predict
+from sklearn.model_selection import GroupKFold
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 
@@ -75,18 +76,25 @@ from utils.logging_and_io import save_dataframe
 from core.analysis_scopes import scope_out_dir, scope_summary_row, to_block_axis
 from modules.shared_layer_distribution_measures import (gearys_c, build_layer_probability_matrix,
                                                         PEAK_GAP_RELIABLE_PP)
-from modules.shared_expert_set_measures import expert_set_overlap_matrices, pair_similarity_vector
+from modules.shared_expert_set_measures import (expert_presence_matrix, expert_set_overlap_matrices,
+                                                pair_similarity_vector)
 from modules.shared_layer_profile_measures import (pair_layer_profile_vectors,
                                                    layer_profile_matrices, count_matched_z,
                                                    PROFILE_METRICS, DEFAULT_PROFILE_METRIC,
                                                    ACTIVE_PROFILE_METRICS, MIN_PROFILE_EXPERTS,
                                                    layer_profile_metric_matrices,
-                                                   profile_metric_label)
+                                                   profile_metric_label, PROFILE_METRIC_GROUPS,
+                                                   REPRESENTATIVE_PROFILE_METRICS)
 from core.human_similarity_ratings import human_pair_lookup, human_noise_ceiling
-from utils.statistics import permutation_p, reassignments, spearman_test
+from core.concept_tokens import load_concept_tokens
+from core.expert_data_loading import LAYER_ARCHITECTURES
+from modules.shared_text_measures import text_similarity_frame
+from utils.statistics import (PERMUTATIONS, mean_difference_interval, permutation_p, rank_scores, reassignments,
+                              spearman_test)
 from utils.plotting import (COMPARISON_STYLE, COMPARISON_COLORS, comparison_legend,
                             build_category_color_map, annotate_barh_values, style_comparison_axis,
-                            comparison_panel_height, set_title, set_suptitle, SERIES_COLORS)
+                            comparison_panel_height, set_title, set_suptitle, SERIES_COLORS, DETAIL_COLOR,
+                            NOTE_SIZE, PRINT_WIDTH, print_style, legend_below)
 
 log = logging.getLogger(__name__)
 
@@ -98,18 +106,18 @@ log = logging.getLogger(__name__)
 # one, and its name is folded into the affected labels below so a reader of
 # sublayer_comparison.csv or its plot can tell which metric the numbers describe without
 # opening the per-study CSV.
-SUMMARY_METRIC = DEFAULT_PROFILE_METRIC
+SUMMARY_METRIC = "js_divergence"
 
 SUMMARY_LABELS = {
-    "rank_acc_jaccard": "Ranking accuracy, Jaccard only",
-    "rank_acc_full_grid": f"Ranking accuracy, Jaccard + profile + z ({SUMMARY_METRIC})",
-    "rank_acc_delta_profile":
-        f"Ranking accuracy gained from the profile features ({SUMMARY_METRIC})",
-    "rank_acc_centroid_full_grid":
-        f"Ranking accuracy, centroid reference, full cell ({SUMMARY_METRIC})",
-    "pair_sim_rho_jaccard": "Pair similarity vs humans, Jaccard only",
-    "pair_sim_rho_full_grid":
-        f"Pair similarity vs humans, Jaccard + profile + z ({SUMMARY_METRIC})",
+    "rank_acc_jaccard": "Ranking accuracy, {J}",
+    "rank_acc_jaccard_profile": f"Ranking accuracy, {{J, S}}, {SUMMARY_METRIC}",
+    "rank_acc_delta_profile": f"Ranking accuracy gained by {{J, S}} over {{J}}, {SUMMARY_METRIC}",
+    "rank_acc_delta_bands": "Ranking accuracy gained by {J, $J_1$..$J_4$} over {J}",
+    "rank_acc_centroid_jaccard_profile": f"Ranking accuracy, other members, {{J, S}}, {SUMMARY_METRIC}",
+    "pair_sim_rho_jaccard": "Pair similarity against the ratings, {J}",
+    "pair_sim_rho_jaccard_profile": f"Pair similarity against the ratings, {{J, S}}, {SUMMARY_METRIC}",
+    "pair_sim_delta_profile": f"Pair similarity gained by {{J, S}} over {{J}}, {SUMMARY_METRIC}",
+    "pair_sim_delta_bands": "Pair similarity gained by {J, $J_1$..$J_4$} over {J}",
     "cluster_ari_category":
         "Study C, layer-profile dendrogram agreement with the categories (ARI at k=8)",
     "cluster_ari_category_expert_set":
@@ -129,7 +137,7 @@ TARGET = "human_typicality"
 # ExpertLens Figure 4. Folder names follow the "<number>_<name>" convention of the module
 # folders themselves, and Study C's two views get one subfolder each.
 STUDY_DIRS = {"A": "5.1_typicality_ranking", "B": "5.2_pair_similarity",
-              "C": "5.3_concept_structure"}
+              "C": "5.3_concept_structure", "D": "5.4_depth_resolved_overlap"}
 
 
 def study_dir(out_dir, study: str):
@@ -165,14 +173,27 @@ GRID_CELLS = {
     "jaccard_profile": ("J", "S"),
     "jaccard_profile_z": ("J", "z"),
     "jaccard_profile_both": ("J", "S", "z"),
+    "jaccard_bands": ("J", "B"),
+    "text": ("s",),
+    "jaccard_text": ("J", "s"),
 }
+
+# Quarters are the finest split dividing both architectures (28 and 12 blocks) into equal bands.
+DEPTH_BANDS = 4
+BAND_COLUMNS = [f"jaccard_band_{band}_pct" for band in range(1, DEPTH_BANDS + 1)]
+MEMBER_BAND_COLUMNS = [f"mean_jaccard_band_{band}_to_members" for band in range(1, DEPTH_BANDS + 1)]
 
 # How each role resolves to a design-frame column, per reference. The jaccard columns
 # are fixed names, the profile columns are produced per metric by profile_columns.
 REFERENCES = {
-    "label_word": {"J": "jaccard_pct", "S": "S", "z": "z"},
-    "member_centroid": {"J": "mean_jaccard_to_members", "S": "S_cen", "z": "z_cen"},
+    "label_word": {"J": "jaccard_pct", "S": "S", "z": "z", "B": BAND_COLUMNS, "s": "text_to_label"},
+    "member_centroid": {"J": "mean_jaccard_to_members", "S": "S_cen", "z": "z_cen",
+                        "B": MEMBER_BAND_COLUMNS, "s": "mean_text_to_members"},
 }
+
+# Study B's pair columns per role, the metric roles resolved through profile_columns.
+PAIR_COLUMNS = {"J": "jaccard_pct", "B": BAND_COLUMNS, "s": "text_similarity"}
+METRIC_ROLES = {"S", "z"}
 
 
 def profile_columns(metric: str) -> dict:
@@ -181,15 +202,15 @@ def profile_columns(metric: str) -> dict:
             "S_cen": f"centroid_profile_{metric}", "z_cen": f"centroid_profile_{metric}_z"}
 
 
-def build_feature_grid(metrics: list) -> list:
-    """One dict per (cell, metric): {"model", "metric", "roles"}. The jaccard cell
-    uses no profile metric and appears once with metric "none"."""
-    grid = [{"model": "jaccard", "metric": "none", "roles": GRID_CELLS["jaccard"]}]
+def build_feature_grid(metrics: list, with_text: bool = True) -> list:
+    """One dict per (cell, metric): {"model", "metric", "roles"}. A cell without a profile
+    role appears once, first, with metric "none", and text cells only with_text."""
+    cells = {model: roles for model, roles in GRID_CELLS.items() if with_text or "s" not in roles}
+    grid = [{"model": model, "metric": "none", "roles": roles}
+            for model, roles in cells.items() if not METRIC_ROLES & set(roles)]
     for metric in metrics:
-        for model, roles in GRID_CELLS.items():
-            if model == "jaccard":
-                continue
-            grid.append({"model": model, "metric": metric, "roles": roles})
+        grid += [{"model": model, "metric": metric, "roles": roles}
+                 for model, roles in cells.items() if METRIC_ROLES & set(roles)]
     return grid
 
 
@@ -210,16 +231,27 @@ def nested_pairs(grid: list) -> list:
 def resolve_features(cell: dict, reference: str, metric_cols: dict) -> list:
     """Concrete design-frame columns for one grid cell under one reference."""
     mapping = REFERENCES[reference]
-    return [mapping[role] if role == "J" else metric_cols[mapping[role]]
-            for role in cell["roles"]]
+    return _flatten([metric_cols[mapping[role]] if role in METRIC_ROLES else mapping[role]
+                     for role in cell["roles"]])
 
 
-# The two cells every figure marks out, the set feature alone and the fullest cell, which
-# is the comparison the module exists to make.
-HEADLINE_CELLS = ("jaccard", "jaccard_profile_both")
+def resolve_pair_features(cell: dict, metric_cols: dict) -> list:
+    """Concrete Study B pair-table columns for one grid cell."""
+    return _flatten([metric_cols[role] if role in METRIC_ROLES else PAIR_COLUMNS[role]
+                     for role in cell["roles"]])
 
 
-def study_a_columns(metrics: list) -> list:
+def _flatten(columns: list) -> list:
+    """Columns with the list-valued band role expanded in place."""
+    return [name for column in columns for name in (column if isinstance(column, list) else [column])]
+
+
+# The two cells every figure marks out, the set feature alone and {J, S}, the comparison the
+# module exists to make.
+HEADLINE_CELLS = ("jaccard", "jaccard_profile")
+
+
+def study_a_columns(metrics: list, with_text: bool = True) -> list:
     """
     Every candidate feature Study A can fit, over BOTH references, plus its target.
 
@@ -229,7 +261,9 @@ def study_a_columns(metrics: list) -> list:
     against each other inside one figure, so a row usable by one and not the other would
     make that comparison rest on different concepts.
     """
-    columns = ["jaccard_pct", "mean_jaccard_to_members", TARGET]
+    columns = ["jaccard_pct", "mean_jaccard_to_members", TARGET, *BAND_COLUMNS, *MEMBER_BAND_COLUMNS]
+    if with_text:
+        columns += ["text_to_label", "mean_text_to_members"]
     for metric in metrics:
         columns += list(profile_columns(metric).values())
     return columns
@@ -289,8 +323,8 @@ CHANCE_ACCURACY = 0.5
 def _model():
     """Standardised linear regression, Study B's estimator and nothing else.
 
-    Its only consumer is run_pair_similarity's cross_val_predict over the pair table, so the
-    units it ever sees are the 2,391 within-category PAIRS and never the concepts of Study A.
+    Its only consumer is within_category_predictions over the pair table of run_pair_similarity,
+    so the units it ever sees are the 2,391 within-category PAIRS and never the concepts of Study A.
     It is not the regression baseline of Study A, which is a separate cross-validated ridge
     built inline in run_typicality_ranking.
 
@@ -300,6 +334,20 @@ def _model():
     feature.
     """
     return make_pipeline(StandardScaler(), LinearRegression())
+
+
+def within_category_predictions(features: np.ndarray, target: np.ndarray, groups: np.ndarray,
+                                names: list) -> tuple[np.ndarray, pd.DataFrame]:
+    """Leave-one-category-out predictions and fold weights of _model fitted on within-category rank scores."""
+    scored = np.column_stack([rank_scores(column, groups) for column in np.asarray(features, dtype=float).T])
+    target_scores = rank_scores(target, groups)
+    predicted, weights = np.zeros(len(target_scores)), []
+    for train, test in GroupKFold(n_splits=len(np.unique(groups))).split(scored, target_scores, groups):
+        model = _model().fit(scored[train], target_scores[train])
+        predicted[test] = model.predict(scored[test])
+        weights += [{"held_out_category": groups[test][0], "feature": name, "weight": float(weight)}
+                    for name, weight in zip(names, model[-1].coef_)]
+    return predicted, pd.DataFrame(weights)
 
 
 # The two axes any profile feature can be computed on. "block" sums the sublayers of a
@@ -323,8 +371,44 @@ def axis_frame(expert_allocation_df, axis: str):
     return to_block_axis(expert_allocation_df) if axis == "block" else expert_allocation_df
 
 
+def block_coordinates(expert_df: pd.DataFrame) -> tuple[np.ndarray, int]:
+    """The block of every expert row and the block count, the architecture's when its sublayers name one, at least the highest block plus one."""
+    block_axis = to_block_axis(expert_df)
+    sublayers = set(pd.Series(expert_df["layer_name"].cat.categories.astype(str))
+                    .str.extract(r"^\d+\.L\.\d+\.(.+)$")[0].dropna())
+    known = [spec["n_blocks"] for spec in LAYER_ARCHITECTURES.values() if sublayers and sublayers <= set(spec["sublayers"])]
+    n_blocks = max(1 + max(int(name.rsplit(".", 1)[1]) for name in block_axis["layer_name"].cat.categories), *known)
+    return block_axis["layer_idx"].to_numpy(dtype=int) - 1, n_blocks
+
+
+def depth_bands(blocks: np.ndarray, n_blocks: int, n_bands: int = DEPTH_BANDS) -> np.ndarray:
+    """The depth band of each block, n_bands equal bands counted from 0."""
+    return np.asarray(blocks) * n_bands // n_blocks
+
+
+def depth_band_overlap(expert_df: pd.DataFrame, items: list, n_bands: int = DEPTH_BANDS
+                       ) -> tuple[np.ndarray, np.ndarray]:
+    """Intersection and union counts of every two items' expert sets inside each depth band, each (n_bands, n, n)."""
+    blocks, n_blocks = block_coordinates(expert_df)
+    bands = depth_bands(blocks, n_blocks, n_bands)
+    intersection = np.zeros((n_bands, len(items), len(items)))
+    union = np.zeros_like(intersection)
+    for band in range(n_bands):
+        presence = expert_presence_matrix(expert_df[bands == band], items)
+        intersection[band] = (presence @ presence.T).toarray()
+        sizes = np.asarray(presence.sum(axis=1)).ravel()
+        union[band] = sizes[:, None] + sizes[None, :] - intersection[band]
+    return intersection, union
+
+
+def band_jaccard(intersection: np.ndarray, union: np.ndarray) -> np.ndarray:
+    """The Jaccard index inside each band, 0 where neither word holds a unit in it."""
+    with np.errstate(invalid="ignore", divide="ignore"):
+        return np.where(union > 0, intersection / np.where(union > 0, union, 1), 0.0)
+
+
 def build_design_frame(expert_allocation_df: pd.DataFrame, concept_metadata: pd.DataFrame,
-                       metrics: list, axis: str = "block") -> pd.DataFrame:
+                       metrics: list, axis: str = "block", text: pd.DataFrame | None = None) -> pd.DataFrame:
     """
     One row per categorized concept with every candidate feature, computed here from
     the expert rows rather than read from section 2.1, so the module needs no other
@@ -390,6 +474,14 @@ def build_design_frame(expert_allocation_df: pd.DataFrame, concept_metadata: pd.
                              for c, k in zip(design["concept"], design["category"])]
         design[cols["z"]] = [z[item_row[c], item_row[k]]
                              for c, k in zip(design["concept"], design["category"])]
+    # Band Jaccard reads unit identity like jaccard_pct, so it takes the raw frame too.
+    band = band_jaccard(*depth_band_overlap(expert_allocation_df, items))
+    rows_of = [item_row[c] for c in design["concept"]]
+    labels_of = [item_row[k] for k in design["category"]]
+    for index, column in enumerate(BAND_COLUMNS):
+        design[column] = 100.0 * band[index, rows_of, labels_of]
+    if text is not None:
+        design["text_to_label"] = [text.loc[c, k] for c, k in zip(design["concept"], design["category"])]
     return design.dropna(subset=[TARGET, "jaccard_pct"]).reset_index(drop=True)
 
 
@@ -408,7 +500,7 @@ def _ranker():
 
 
 def add_centroid_features(design: pd.DataFrame, expert_allocation_df: pd.DataFrame,
-                          metrics: list, axis: str = "block") -> pd.DataFrame:
+                          metrics: list, axis: str = "block", text: pd.DataFrame | None = None) -> pd.DataFrame:
     """
     Features measured against the OTHER MEMBERS of a concept's category rather than against
     the category label word: is a typical bird the one most like the word "bird", or the one
@@ -457,9 +549,11 @@ def add_centroid_features(design: pd.DataFrame, expert_allocation_df: pd.DataFra
     frame = axis_frame(expert_allocation_df, axis)
     counts_matrix, profiles = build_layer_probability_matrix(frame)
     design = design.copy()
-    columns = ["mean_jaccard_to_members"] + [
+    columns = ["mean_jaccard_to_members", *MEMBER_BAND_COLUMNS] + [
         column for metric in metrics
         for column in (profile_columns(metric)["S_cen"], profile_columns(metric)["z_cen"])]
+    if text is not None:
+        columns.append("mean_text_to_members")
 
     present = [concept for concept in design["concept"] if concept in profiles.index]
     if len(present) < 2:
@@ -487,14 +581,26 @@ def add_centroid_features(design: pd.DataFrame, expert_allocation_df: pd.DataFra
 
     # Mean Jaccard to the other members, the model counterpart of how the human typicality
     # proxy was built, each word's row of the similarity matrix averaged over its category.
-    mean_jaccard = []
+    # The band Jaccard and the text are averaged over the same member list.
+    band = band_jaccard(*depth_band_overlap(expert_allocation_df, present))
+    mean_jaccard, mean_band, mean_text = [], [], []
     for concept, category in zip(design["concept"], design["category"]):
         siblings = ([other for other in members.get(category, []) if other != concept]
                     if concept in position else [])
         mean_jaccard.append(100.0 * float(np.mean(
             [jaccard[position[concept], position[other]] for other in siblings]))
             if siblings else np.nan)
+        others = [position[other] for other in siblings]
+        mean_band.append(100.0 * band[:, position[concept], others].mean(axis=1)
+                         if siblings else np.full(DEPTH_BANDS, np.nan))
+        if text is not None:
+            mean_text.append(float(np.mean([text.loc[concept, other] for other in siblings]))
+                             if siblings else np.nan)
     design["mean_jaccard_to_members"] = mean_jaccard
+    for index, column in enumerate(MEMBER_BAND_COLUMNS):
+        design[column] = [values[index] for values in mean_band]
+    if text is not None:
+        design["mean_text_to_members"] = mean_text
 
     for metric in metrics:
         cols = profile_columns(metric)
@@ -557,11 +663,11 @@ def within_category_pairs(design: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]
     return pairs[keep], gap[keep]
 
 
-def evaluate_ranker(features: np.ndarray, design: pd.DataFrame,
-                    pairs: np.ndarray, gap: np.ndarray) -> tuple[dict, pd.DataFrame, pd.DataFrame]:
+def evaluate_ranker(features: np.ndarray, design: pd.DataFrame, pairs: np.ndarray, gap: np.ndarray,
+                    names: list) -> tuple[dict, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """
-    Grouped accuracy of the pairwise ranker on one feature set, its per-category detail, and
-    the per-pair outcomes behind both.
+    Grouped accuracy of the pairwise ranker on one feature set, its per-category detail, the
+    per-pair outcomes behind both, and the ranker's weight per feature in every fold.
 
     The third return value is what the diagnostic displays consume: one row per held-out pair
     with the two concepts, the human rating gap and whether the model ordered them correctly.
@@ -580,14 +686,18 @@ def evaluate_ranker(features: np.ndarray, design: pd.DataFrame,
     actually distinguishes the two concepts. regression_accuracy applies the per-concept
     ridge of the per-concept regression baseline to exactly the same held-out pairs, ranking each pair by its two
     predicted ratings, so the ranking formulation and the regression formulation are
-    compared on one scale rather than accuracy against R^2.
+    compared on one scale rather than accuracy against R^2. The ridge is fitted on
+    within-category rank scores of the features and the ratings, as the ranker only ever
+    sees differences inside one category, so neither can lean on category means.
     """
     ratings = design[TARGET].to_numpy(dtype=float)
     categories = design["category"].to_numpy()
     n_groups = len(np.unique(categories))
+    scored_features = np.column_stack([rank_scores(column, categories) for column in features.T])
+    scored_ratings = rank_scores(ratings, categories)
 
     concept_names = design["concept"].to_numpy()
-    hits, hits_clear, regression_hits, per_category, per_pair = [], [], [], [], []
+    hits, hits_clear, regression_hits, per_category, per_pair, weights = [], [], [], [], [], []
     for train_rows, test_rows in GroupKFold(n_splits=n_groups).split(features, ratings, groups=categories):
         train_mask = np.isin(pairs[:, 0], train_rows) & np.isin(pairs[:, 1], train_rows)
         test_mask = np.isin(pairs[:, 0], test_rows) & np.isin(pairs[:, 1], test_rows)
@@ -602,16 +712,19 @@ def evaluate_ranker(features: np.ndarray, design: pd.DataFrame,
 
         test_difference = features[pairs[test_mask, 0]] - features[pairs[test_mask, 1]]
         truth = (gap[test_mask] > 0).astype(int)
-        correct = _ranker().fit(design_matrix, labels).predict(test_difference) == truth
+        ranker = _ranker().fit(design_matrix, labels)
+        correct = ranker.predict(test_difference) == truth
         hits.append(correct)
+        weights += [{"held_out_category": categories[test_rows][0], "feature": name, "weight": float(weight)}
+                    for name, weight in zip(names, ranker[-1].coef_[0])]
 
         clear = np.abs(gap[test_mask]) >= RANK_MARGIN
         if clear.any():
             hits_clear.append(correct[clear])
 
         regression = make_pipeline(StandardScaler(), RidgeCV(alphas=np.logspace(-3, 4, 30)))
-        regression.fit(features[train_rows], ratings[train_rows])
-        predicted = regression.predict(features)
+        regression.fit(scored_features[train_rows], scored_ratings[train_rows])
+        predicted = regression.predict(scored_features)
         regression_correct = ((predicted[pairs[test_mask, 0]] - predicted[pairs[test_mask, 1]]) > 0) == truth
         regression_hits.append(regression_correct)
 
@@ -630,7 +743,7 @@ def evaluate_ranker(features: np.ndarray, design: pd.DataFrame,
     if not hits:
         return ({"accuracy": np.nan, "accuracy_clear": np.nan, "regression_accuracy": np.nan,
                  "accuracy_sd_across_categories": np.nan, "n_pairs": 0},
-                pd.DataFrame(), pd.DataFrame())
+                pd.DataFrame(), pd.DataFrame(), pd.DataFrame())
 
     detail = pd.DataFrame(per_category)
     return ({"accuracy": float(np.concatenate(hits).mean()),
@@ -638,15 +751,16 @@ def evaluate_ranker(features: np.ndarray, design: pd.DataFrame,
              "regression_accuracy": float(np.concatenate(regression_hits).mean()),
              "accuracy_sd_across_categories": float(detail["accuracy"].std(ddof=1)),
              "n_pairs": int(sum(len(h) for h in hits))},
-            detail, pd.concat(per_pair, ignore_index=True))
+            detail, pd.concat(per_pair, ignore_index=True), pd.DataFrame(weights))
 
 
-def run_typicality_ranking(design: pd.DataFrame, metrics: list) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
+def run_typicality_ranking(design: pd.DataFrame, metrics: list,
+                           with_text: bool = True) -> tuple[pd.DataFrame, pd.DataFrame, dict, pd.DataFrame]:
     """
     Study A: every grid cell run under both references through the grouped pairwise
     evaluation, "of these two same-category concepts, which is the more typical".
 
-    Returns (results, per_category, per_pair). results carries one row per (reference, grid
+    Returns (results, per_category, per_pair, fold_weights). results carries one row per (reference, grid
     cell) with the accuracies, the columns actually fitted, and the comparison against that
     reference's own Jaccard cell. per_category carries the held-out accuracy per category with
     a reference column, and per_pair maps (reference, metric, model) to the per-pair outcomes
@@ -654,7 +768,8 @@ def run_typicality_ranking(design: pd.DataFrame, metrics: list) -> tuple[pd.Data
     belongs in the paired t below, a cell name alone is not unique once a second metric is
     registered, and keying on the name would silently overwrite one metric with the other so
     the diagnostics would quietly show only one of them. The jaccard cell carries no profile
-    metric and keys on "none", which is what _pair_key resolves.
+    metric and keys on "none", which is what _pair_key resolves. fold_weights carries the
+    ranker's weight per feature and held-out category with reference, model and metric columns.
 
     Each reference is a self-contained arm. The jaccard cell is fitted twice, on jaccard_pct
     under label_word and on mean_jaccard_to_members under member_centroid, so a profile cell is
@@ -670,16 +785,20 @@ def run_typicality_ranking(design: pd.DataFrame, metrics: list) -> tuple[pd.Data
     if len(pairs) < MIN_RANK_PAIRS:
         log.warning(f"  Skipping Study A: {len(pairs)} within-category pairs, "
                     f"need >= {MIN_RANK_PAIRS}.")
-        return pd.DataFrame(), pd.DataFrame(), {}
+        return pd.DataFrame(), pd.DataFrame(), {}, pd.DataFrame()
 
-    grid = build_feature_grid(metrics)
-    rows, details, per_pair = [], [], {}
+    grid = build_feature_grid(metrics, with_text=with_text)
+    rows, details, per_pair, fold_weights = [], [], {}, []
     for reference in REFERENCES:
         for cell in grid:
             metric_cols = profile_columns(cell["metric"]) if cell["metric"] != "none" else {}
             feature_names = resolve_features(cell, reference, metric_cols)
             features = design[feature_names].to_numpy(dtype=float)
-            scores, detail, pair_outcomes = evaluate_ranker(features, design, pairs, gap)
+            scores, detail, pair_outcomes, weights = evaluate_ranker(features, design, pairs, gap,
+                                                                     feature_names)
+            if not weights.empty:
+                fold_weights.append(weights.assign(reference=reference, model=cell["model"],
+                                                   metric=cell["metric"]))
             rows.append({"model": cell["model"], "metric": cell["metric"],
                          "reference": reference, "features": " + ".join(feature_names),
                          "n_concepts": len(design), **scores})
@@ -711,12 +830,14 @@ def run_typicality_ranking(design: pd.DataFrame, metrics: list) -> tuple[pd.Data
                 where = ((results.model == model) & (results.metric == metric)
                          & (results.reference == reference))
                 delta = richer[shared] - baseline[shared]
-                results.loc[where, "delta_accuracy_vs_jaccard"] = delta.mean()
+                (results.loc[where, "delta_accuracy_vs_jaccard"], results.loc[where, "delta_ci_low"],
+                 results.loc[where, "delta_ci_high"]) = mean_difference_interval(delta)
                 results.loc[where, "categories_improved"] = int((delta > 0).sum())
                 results.loc[where, "categories_tested"] = len(shared)
                 results.loc[where, "paired_t_p"] = float(
                     stats.ttest_rel(richer[shared], baseline[shared]).pvalue)
-    return results, per_category, per_pair
+    return (results, per_category, per_pair,
+            pd.concat(fold_weights, ignore_index=True) if fold_weights else pd.DataFrame())
 
 
 def _grid_order(frame: pd.DataFrame) -> list:
@@ -887,7 +1008,7 @@ def plot_pair_similarity(results: pd.DataFrame, per_category: pd.DataFrame, out_
     pass that line.
 
     Right, the same comparison resolved per held-out category, the Jaccard cell against the
-    fullest cell. This panel exists because gains from the layer profile elsewhere in this
+    {J, S} cell. This panel exists because gains from the layer profile elsewhere in this
     module turned out to rest on one or two categories, so a mean is not trustworthy here
     until the spread behind it is shown. Each category is drawn against its OWN ceiling,
     since those differ (0.836 for birds against 0.935 for vehicles) and a category cannot be
@@ -914,7 +1035,7 @@ def plot_pair_similarity(results: pd.DataFrame, per_category: pd.DataFrame, out_
     # much of its column it is given.
     base_key = next((key for key in order if key[0] == "jaccard"), None)
     rich_key = next((key for key in order
-                     if key == ("jaccard_profile_both", _display_metric())), None)
+                     if key == (HEADLINE_CELLS[1], _display_metric())), None)
     detail = pd.DataFrame()
     if base_key is not None and rich_key is not None and not per_category.empty:
         wanted = {base_key, rich_key}
@@ -943,7 +1064,7 @@ def plot_pair_similarity(results: pd.DataFrame, per_category: pd.DataFrame, out_
     left_axis = fig.add_subplot(outer[0, 0])
 
     y_pos = np.arange(len(order))
-    highlight = {"jaccard": colors["base"], "jaccard_profile_both": colors["accent"]}
+    highlight = {"jaccard": colors["base"], HEADLINE_CELLS[1]: colors["accent"]}
     values = frame["mean_category_spearman"].astype(float)
     left_axis.barh(y_pos, values, height=style["bar_height"],
                    color=[highlight.get(model, colors["muted"]) for model, _ in order])
@@ -1002,7 +1123,7 @@ def _summary(rank_results: pd.DataFrame, pair_results: pd.DataFrame) -> dict:
     plus the deltas the module exists to measure.
 
     A summary row carries one number per column, so with several profile metrics active the
-    "jaccard_profile_both" model name alone is ambiguous, one row exists per (model, metric)
+    "jaccard_profile" model name alone is ambiguous, one row exists per (model, metric)
     pair. Every profile-cell lookup below therefore pins metric=SUMMARY_METRIC explicitly
     rather than taking whichever row happens to come first, which used to be a silent,
     unnamed choice of the first registered metric once a second one was added. The jaccard
@@ -1017,21 +1138,23 @@ def _summary(rank_results: pd.DataFrame, pair_results: pd.DataFrame) -> dict:
     _cell checks the column exists before reading it and an all-empty run yields NaN rather
     than a KeyError.
     """
+    label, member = {"reference": "label_word"}, {"reference": "member_centroid"}
     return {
-        "rank_acc_jaccard": _cell(rank_results, "jaccard", "accuracy",
-                                  reference="label_word", metric="none"),
-        "rank_acc_full_grid": _cell(rank_results, "jaccard_profile_both", "accuracy",
-                                    reference="label_word", metric=SUMMARY_METRIC),
-        "rank_acc_delta_profile": _cell(rank_results, "jaccard_profile_both",
-                                        "delta_accuracy_vs_jaccard", reference="label_word",
+        "rank_acc_jaccard": _cell(rank_results, "jaccard", "accuracy", **label, metric="none"),
+        "rank_acc_jaccard_profile": _cell(rank_results, "jaccard_profile", "accuracy", **label,
+                                          metric=SUMMARY_METRIC),
+        "rank_acc_delta_profile": _cell(rank_results, "jaccard_profile", "delta_accuracy_vs_jaccard", **label,
                                         metric=SUMMARY_METRIC),
-        "rank_acc_centroid_full_grid": _cell(rank_results, "jaccard_profile_both", "accuracy",
-                                             reference="member_centroid",
-                                             metric=SUMMARY_METRIC),
-        "pair_sim_rho_jaccard": _cell(pair_results, "jaccard", "mean_category_spearman",
+        "rank_acc_delta_bands": _cell(rank_results, "jaccard_bands", "delta_accuracy_vs_jaccard", **label,
                                       metric="none"),
-        "pair_sim_rho_full_grid": _cell(pair_results, "jaccard_profile_both",
-                                        "mean_category_spearman", metric=SUMMARY_METRIC),
+        "rank_acc_centroid_jaccard_profile": _cell(rank_results, "jaccard_profile", "accuracy", **member,
+                                                   metric=SUMMARY_METRIC),
+        "pair_sim_rho_jaccard": _cell(pair_results, "jaccard", "mean_category_spearman", metric="none"),
+        "pair_sim_rho_jaccard_profile": _cell(pair_results, "jaccard_profile", "mean_category_spearman",
+                                              metric=SUMMARY_METRIC),
+        "pair_sim_delta_profile": _cell(pair_results, "jaccard_profile", "delta_vs_jaccard",
+                                        metric=SUMMARY_METRIC),
+        "pair_sim_delta_bands": _cell(pair_results, "jaccard_bands", "delta_vs_jaccard", metric="none"),
     }
 
 
@@ -1042,7 +1165,7 @@ GAP_BINS = [0.0, 0.05, 0.10, 0.20, 0.30, 0.50, 1.01]
 
 def plot_category_dumbbell(per_category: pd.DataFrame, out_dir) -> None:
     """
-    Per held-out category, the Jaccard cell's accuracy joined to the fullest cell's, one
+    Per held-out category, the Jaccard cell's accuracy joined to the {J, S} cell's, one
     panel per reference.
 
     The pooled mean hides that the profile features help enormously in one category and hurt
@@ -1071,7 +1194,7 @@ def plot_category_dumbbell(per_category: pd.DataFrame, out_dir) -> None:
     for reference in references:
         arm = per_category[per_category.reference == reference]
         base = arm[(arm.model == "jaccard")].set_index("category")["accuracy"]
-        rich = arm[(arm.model == "jaccard_profile_both")
+        rich = arm[(arm.model == HEADLINE_CELLS[1])
                    & (arm.metric == metric)].set_index("category")["accuracy"]
         shared = sorted(set(base.index) & set(rich.index), key=lambda c: rich[c] - base[c])
         if shared:
@@ -1090,7 +1213,7 @@ def plot_category_dumbbell(per_category: pd.DataFrame, out_dir) -> None:
             axis.scatter([base[category]], [row], color="grey", s=55, zorder=2,
                          label="jaccard" if row == 0 else "")
             axis.scatter([rich[category]], [row], color="black", s=55, zorder=3,
-                         label=f"jaccard + profile + z{_metric_suffix()}" if row == 0 else "")
+                         label=f"jaccard + profile{_metric_suffix()}" if row == 0 else "")
             axis.annotate(f"{100 * (rich[category] - base[category]):+.1f}",
                           (max(base[category], rich[category]) + 0.005, row),
                           va="center", fontsize=9)
@@ -1126,7 +1249,7 @@ def plot_accuracy_by_gap(per_pair: dict, out_dir) -> None:
     reading the curve rather than decoration, so it is drawn against the bin's own boundary,
     with the shaded bands and the boundary rules making the grouping explicit.
 
-    Two curves, the Jaccard cell and the fullest cell, both on the label-word reference,
+    Two curves, the Jaccard cell and the {J, S} cell, both on the label-word reference,
     selected through _pair_key because per_pair is keyed on (reference, metric, model), with
     the profile curve's legend entry naming its metric when more than one is active. Every
     cell of every reference would be twenty-two overlapping lines, which shows nothing, and
@@ -1194,7 +1317,7 @@ def plot_accuracy_by_gap(per_pair: dict, out_dir) -> None:
 
 
 def plot_pair_errors(per_pair: dict, design: pd.DataFrame, out_dir,
-                     model: str = "jaccard_profile_both", reference: str = "label_word") -> None:
+                     model: str = HEADLINE_CELLS[1], reference: str = "label_word") -> None:
     """
     Per category, a concept-by-concept grid of which pairs were ranked wrongly.
 
@@ -1203,7 +1326,7 @@ def plot_pair_errors(per_pair: dict, design: pd.DataFrame, out_dir,
     separate. Contiguous blocks away from the diagonal mean something is systematically
     inverted, which is the shape to look for in a category scoring below chance.
 
-    Drawn for the fullest cell on the label-word reference by default, which is the model the
+    Drawn for the {J, S} cell on the label-word reference by default, which is the model the
     module's headline claim rests on, so the errors shown are the errors of the claim. The
     selection goes through _pair_key since per_pair is keyed on (reference, metric, model),
     and the drawn metric is named in the title when more than one is active.
@@ -1256,13 +1379,15 @@ MIN_PAIR_ROWS = 200
 
 
 def build_pair_similarity_design(design: pd.DataFrame, expert_allocation_df: pd.DataFrame,
-                                 metrics: list, axis: str = "block") -> pd.DataFrame:
+                                 metrics: list, axis: str = "block",
+                                 text: pd.DataFrame | None = None) -> pd.DataFrame:
     """
     One row per within-category pair that humans actually rated.
 
     Columns: category, word_a, word_b (canonical order), human_similarity (1 to 7),
-    jaccard_pct, and per metric profile_<metric> and profile_<metric>_z, the pair features
-    of every active metric.
+    jaccard_pct, the four band Jaccard columns, text_similarity when a text frame is given,
+    and per metric profile_<metric> and profile_<metric>_z, the pair features of every
+    active metric.
 
     Unlike Study A, which predicts a DIRECTION from an antisymmetric difference of
     per-concept features, this predicts a VALUE from symmetric pair features, so the
@@ -1279,6 +1404,7 @@ def build_pair_similarity_design(design: pd.DataFrame, expert_allocation_df: pd.
         return pd.DataFrame()
 
     jaccard_vector = pair_similarity_vector(expert_allocation_df, concepts)
+    band = 100.0 * band_jaccard(*depth_band_overlap(expert_allocation_df, concepts))
     frame = axis_frame(expert_allocation_df, axis)
     vectors = {}
     for metric in metrics:
@@ -1297,6 +1423,9 @@ def build_pair_similarity_design(design: pd.DataFrame, expert_allocation_df: pd.
                 row = {"category": category_of[word_a], "word_a": key[0], "word_b": key[1],
                        "human_similarity": lookup[key],
                        "jaccard_pct": 100.0 * jaccard_vector[cursor]}
+                row.update({column: band[index, first, second] for index, column in enumerate(BAND_COLUMNS)})
+                if text is not None:
+                    row["text_similarity"] = text.loc[word_a, word_b]
                 row.update({name: vec[cursor] for name, vec in vectors.items()})
                 rows.append(row)
             cursor += 1
@@ -1304,7 +1433,8 @@ def build_pair_similarity_design(design: pd.DataFrame, expert_allocation_df: pd.
 
 
 def run_pair_similarity(design: pd.DataFrame, expert_allocation_df: pd.DataFrame,
-                        metrics: list, axis: str = "block") -> tuple:
+                        metrics: list, axis: str = "block",
+                        text: pd.DataFrame | None = None) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """
     Predict the human-rated similarity of a pair from the expert similarity of that pair,
     over every cell of the generated feature grid (build_feature_grid).
@@ -1326,24 +1456,30 @@ def run_pair_similarity(design: pd.DataFrame, expert_allocation_df: pd.DataFrame
     training rows than the profile cells and the resulting scores would not be comparable,
     the same identical-rows requirement study_a_columns and study_b_columns document.
 
-    Returns (results, per_category), both empty when too few pairs survive. results carries
+    Every cell is fitted by within_category_predictions on within-category rank scores of its
+    features and of the rated similarity, so a weight answers which pair is more similar inside
+    a category and cannot be bent by the category means, and group_cv_r2 is read on those
+    rank scores of the target.
+
+    Returns (results, per_category, fold_weights, table), all four empty when too few pairs
+    survive. fold_weights carries the weight per feature and held-out category with model and
+    metric columns, and table is the pair table after the shared dropna. results carries
     one row per grid cell keyed by (model, metric), with mean_category_spearman the
     pair-weighted mean of the per-category out-of-fold Spearman coefficients, the noise
     ceiling weighted alike, and per nested comparison the paired t over the held-out
     categories. per_category carries the per-category rho, its noise ceiling, and
     rho_over_ceiling for every (model, metric, category) triple with at least 10 pairs.
     """
-    table = build_pair_similarity_design(design, expert_allocation_df, metrics, axis=axis)
+    empty = pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+    table = build_pair_similarity_design(design, expert_allocation_df, metrics, axis=axis, text=text)
     if table.empty:
-        return pd.DataFrame(), pd.DataFrame()
+        return empty
 
-    grid = build_feature_grid(metrics)
+    grid = build_feature_grid(metrics, with_text=text is not None)
     fitted_columns = {}
     for cell in grid:
         cols = profile_columns(cell["metric"]) if cell["metric"] != "none" else {}
-        columns = ["jaccard_pct" if role == "J" else cols[{"S": "S", "z": "z"}[role]]
-                   for role in cell["roles"]]
-        fitted_columns[(cell["model"], cell["metric"])] = columns
+        fitted_columns[(cell["model"], cell["metric"])] = resolve_pair_features(cell, cols)
 
     # The single shared dropna, over every column any cell uses plus the target, applied once
     # before any cell is fit so all six cells train on exactly the same rows. A per-cell
@@ -1354,7 +1490,7 @@ def run_pair_similarity(design: pd.DataFrame, expert_allocation_df: pd.DataFrame
                          | {"human_similarity"})
     table = table.dropna(subset=all_columns).reset_index(drop=True)
     if len(table) < MIN_PAIR_ROWS or table["category"].nunique() < 3:
-        return pd.DataFrame(), pd.DataFrame()
+        return empty
 
     ceilings = human_noise_ceiling()
     target = table["human_similarity"].to_numpy(dtype=float)
@@ -1364,13 +1500,14 @@ def run_pair_similarity(design: pd.DataFrame, expert_allocation_df: pd.DataFrame
     rated = counts[counts >= 10]
     keep = np.isin(groups, rated.index)
     mean_ceiling = float(sum(rated[c] * ceilings[c] for c in rated.index) / rated.sum())
-    results, per_category = [], []
+    target_scores = rank_scores(target, groups)
+    results, per_category, fold_weights = [], [], []
 
     for cell in grid:
         columns = fitted_columns[(cell["model"], cell["metric"])]
         features = table[columns].to_numpy(dtype=float)
-        predicted = cross_val_predict(_model(), features, target,
-                                      cv=GroupKFold(n_splits=n_groups), groups=groups)
+        predicted, weights = within_category_predictions(features, target, groups, columns)
+        fold_weights.append(weights.assign(model=cell["model"], metric=cell["metric"]))
         test = spearman_test(predicted[keep], target[keep], groups=groups[keep], n_draws=0)
         for category, n_pairs, rho in zip(test["groups"], test["n_k"], test["rho_k"]):
             per_category.append({"model": cell["model"], "metric": cell["metric"],
@@ -1383,7 +1520,7 @@ def run_pair_similarity(design: pd.DataFrame, expert_allocation_df: pd.DataFrame
                         "mean_category_spearman": round(test["rho"], 4),
                         "noise_ceiling_mean": round(mean_ceiling, 4),
                         "rho_over_ceiling": round(test["rho"] / mean_ceiling, 4),
-                        "group_cv_r2": round(float(r2_score(target, predicted)), 4)})
+                        "group_cv_r2": round(float(r2_score(target_scores, predicted)), 4)})
 
     results_df, per_category = pd.DataFrame(results), pd.DataFrame(per_category)
 
@@ -1404,10 +1541,238 @@ def run_pair_similarity(design: pd.DataFrame, expert_allocation_df: pd.DataFrame
                                       (reduced["model"], reduced["metric"])]).dropna()
         t, p = stats.ttest_rel(both.iloc[:, 0], both.iloc[:, 1]) if len(both) >= 3 else (np.nan, np.nan)
         where = (results_df.model == full["model"]) & (results_df.metric == full["metric"])
-        results_df.loc[where, f"paired_t_vs_{reduced['model']}"] = t
-        results_df.loc[where, f"paired_t_p_vs_{reduced['model']}"] = p
+        name = reduced["model"]
+        results_df.loc[where, f"paired_t_vs_{name}"] = t
+        results_df.loc[where, f"paired_t_p_vs_{name}"] = p
+        (results_df.loc[where, f"delta_vs_{name}"], results_df.loc[where, f"delta_ci_low_vs_{name}"],
+         results_df.loc[where, f"delta_ci_high_vs_{name}"]) = mean_difference_interval(
+            both.iloc[:, 0] - both.iloc[:, 1])
 
-    return results_df, per_category
+    return results_df, per_category, pd.concat(fold_weights, ignore_index=True), table
+
+
+# --- added value over the Jaccard index, both studies ------------------------------------
+
+ADDED_VALUE_CELLS = ("jaccard_profile", "jaccard_profile_z", "jaccard_bands", "jaccard_text")
+ADDED_VALUE_LABELS = {"jaccard_profile": "{J, S}", "jaccard_profile_z": "{J, z}",
+                      "jaccard_bands": "{J, $J_1$..$J_4$}", "jaccard_text": "{J, s}\npositive control"}
+ADDED_VALUE_PANELS = [("A", "label_word", "Typicality, category name", "Accuracy difference from {J}"),
+                      ("A", "member_centroid", "Typicality, other members", "Accuracy difference from {J}"),
+                      ("B", "pairs", "Pair similarity", r"Spearman $\rho_k$ difference from {J}")]
+ADDED_VALUE_COLUMNS = ["study", "reference", "model", "metric", "delta_mean", "ci_low", "ci_high",
+                       "categories_improved", "categories_tested", "paired_t_p"]
+
+
+def added_value_deltas(rank_per_category: pd.DataFrame, pair_per_category: pd.DataFrame,
+                       metric: str = SUMMARY_METRIC) -> pd.DataFrame:
+    """Per category, each added-value cell minus the Jaccard cell of its own arm, Study A per reference and Study B."""
+    arms = []
+    if not rank_per_category.empty:
+        arms += [("A", reference, frame, "accuracy") for reference, frame in rank_per_category.groupby("reference")]
+    if not pair_per_category.empty:
+        arms.append(("B", "pairs", pair_per_category, "rho"))
+    rows = []
+    for study, reference, frame, value in arms:
+        base = frame[frame.model == "jaccard"].set_index("category")[value]
+        for model in ADDED_VALUE_CELLS:
+            cell_metric = metric if METRIC_ROLES & set(GRID_CELLS[model]) else "none"
+            rich = frame[(frame.model == model) & (frame.metric == cell_metric)].set_index("category")[value]
+            rows += [{"study": study, "reference": reference, "model": model, "metric": cell_metric,
+                      "category": category, "delta": float(rich[category] - base[category])}
+                     for category in sorted(rich.index.intersection(base.index))]
+    return pd.DataFrame(rows, columns=["study", "reference", "model", "metric", "category", "delta"])
+
+
+def added_value_summary(deltas: pd.DataFrame) -> pd.DataFrame:
+    """Mean per-category difference with its t interval, categories improved and the paired p, per study, arm and cell."""
+    rows = []
+    for (study, reference, model, metric), group in deltas.groupby(["study", "reference", "model", "metric"],
+                                                                   sort=False):
+        mean, low, high = mean_difference_interval(group.delta)
+        rows.append({"study": study, "reference": reference, "model": model, "metric": metric,
+                     "delta_mean": mean, "ci_low": low, "ci_high": high,
+                     "categories_improved": int((group.delta > 0).sum()), "categories_tested": len(group),
+                     "paired_t_p": float(stats.ttest_1samp(group.delta, 0).pvalue) if len(group) >= 3 else np.nan})
+    return pd.DataFrame(rows, columns=ADDED_VALUE_COLUMNS)
+
+
+def plot_added_value(summary: pd.DataFrame, deltas: pd.DataFrame, path, print_width: float = None,
+                     xlims: dict = None) -> None:
+    """Mean gain of each cell over {J} with its 95% interval and per-category gains, one panel per arm, stacked in print."""
+    panels = [panel for panel in ADDED_VALUE_PANELS
+              if ((summary.study == panel[0]) & (summary.reference == panel[1])).any()]
+    if not panels:
+        return
+    printing = print_width is not None
+    cells = {panel: [m for m in ADDED_VALUE_CELLS
+                     if ((summary.study == panel[0]) & (summary.reference == panel[1]) & (summary.model == m)).any()]
+             for panel in panels}
+    n_rows = max(len(rows) for rows in cells.values())
+    dot, mean_size, line_width = (9, 22, 1.4) if printing else (22, 55, 2.2)
+    shape, size = (((len(panels), 1), (print_width, len(panels) * (0.3 * n_rows + 0.8))) if printing
+                   else ((1, len(panels)), (4.4 * len(panels), 0.7 * n_rows + 1.1)))
+    with print_style(printing):
+        fig, axes = plt.subplots(*shape, squeeze=False, figsize=size)
+        for index, (axis, panel) in enumerate(zip(axes.ravel(), panels)):
+            study, reference, title, xlabel = panel
+            for y, model in enumerate(cells[panel]):
+                row = summary[(summary.study == study) & (summary.reference == reference) & (summary.model == model)].iloc[0]
+                values = deltas[(deltas.study == study) & (deltas.reference == reference)
+                                & (deltas.model == model)].delta.to_numpy()
+                color = SERIES_COLORS["muted"] if model == "jaccard_text" else SERIES_COLORS["primary"]
+                axis.scatter(values, y + np.linspace(-0.2, 0.2, len(values)), s=dot, color=color, alpha=0.35,
+                             linewidth=0, zorder=2)
+                axis.plot([row.ci_low, row.ci_high], [y, y], color=color, linewidth=line_width, zorder=3)
+                axis.scatter([row.delta_mean], [y], s=mean_size, color=color, edgecolor="white", linewidth=0.6,
+                             zorder=4)
+            axis.axvline(0, color=DETAIL_COLOR, linewidth=0.8, zorder=1)
+            axis.set_yticks(range(len(cells[panel])))
+            axis.set_yticklabels([ADDED_VALUE_LABELS[m] for m in cells[panel]])
+            axis.tick_params(labelleft=printing or index == 0 or cells[panel] != cells[panels[index - 1]])
+            axis.set_ylim(n_rows - 0.5, -0.5)
+            if xlims and study in xlims:
+                axis.set_xlim(*xlims[study])
+            axis.set_xlabel(xlabel)
+            axis.set_title(title)
+        if not printing:
+            set_suptitle(fig, f"What each feature adds to the Jaccard index ({SUMMARY_METRIC}), "
+                              "mean over held-out categories with its 95% t interval, dots the categories")
+        fig.tight_layout()
+        fig.savefig(path, dpi=300, bbox_inches="tight")
+        plt.close(fig)
+
+
+# --- every cell of both studies, one profile metric per group ------------------------------
+
+GRID_NOTATION = {"jaccard": "{J}", "profile": "{S}", "profile_z": "{z}", "jaccard_profile": "{J, S}",
+                 "jaccard_profile_z": "{J, z}", "jaccard_profile_both": "{J, S, z}",
+                 "jaccard_bands": "{J, $J_1$..$J_4$}", "text": "{s}", "jaccard_text": "{J, s}"}
+SELECTED_METRIC_PANELS = [("A", "label_word", "Typicality, category name", "Ranking accuracy"),
+                          ("A", "member_centroid", "Typicality, other members", "Ranking accuracy"),
+                          ("B", "pairs", "Pair similarity", r"Agreement with the ratings, $\rho_W$")]
+# Colour and marker of the metric-free cells, then of the selected metrics in their order.
+SELECTED_METRIC_STYLES = [("primary", "D"), ("secondary", "o"), ("highlight", "s"), ("accent", "^")]
+MARKER_AREA = {"^": 1.6}
+SELECTED_METRIC_COLUMNS = ["study", "reference", "model", "metric", "metric_group", "value"]
+
+
+def selected_metric_table(rank_results: pd.DataFrame, pair_results: pd.DataFrame,
+                          metrics: tuple = REPRESENTATIVE_PROFILE_METRICS) -> pd.DataFrame:
+    """Every cell of Studies A and B without a profile metric or under one of the given metrics, accuracy for A, rho_W for B."""
+    group_of = {metric: group for group, members in PROFILE_METRIC_GROUPS.items() for metric in members}
+    arms = []
+    if not rank_results.empty:
+        arms += [("A", reference, rank_results[rank_results.reference == reference], "accuracy")
+                 for reference in REFERENCES if reference in set(rank_results.reference)]
+    if not pair_results.empty:
+        arms.append(("B", "pairs", pair_results, "mean_category_spearman"))
+    rows = []
+    for study, reference, frame, column in arms:
+        for model in GRID_CELLS:
+            for metric in ("none", *metrics):
+                match = frame.loc[(frame.model == model) & (frame.metric == metric), column]
+                if not match.empty:
+                    rows.append({"study": study, "reference": reference, "model": model, "metric": metric,
+                                 "metric_group": group_of.get(metric, "none"), "value": float(match.iloc[0])})
+    return pd.DataFrame(rows, columns=SELECTED_METRIC_COLUMNS)
+
+
+def plot_selected_metric_comparison(table: pd.DataFrame, path, print_width: float = None,
+                                    xlims: dict = None) -> None:
+    """Every cell of both studies, one marker per selected metric, the arms side by side and the legend below."""
+    panels = [panel for panel in SELECTED_METRIC_PANELS
+              if ((table.study == panel[0]) & (table.reference == panel[1])).any()]
+    if not panels:
+        return
+    printing = print_width is not None
+    models = [model for model in GRID_CELLS if model in set(table.model)]
+    metrics = list(dict.fromkeys(metric for metric in table.metric if metric != "none"))
+    styles = {metric: (SERIES_COLORS[color], marker)
+              for metric, (color, marker) in zip(["none", *metrics], SELECTED_METRIC_STYLES)}
+    offsets = dict(zip(metrics, np.linspace(-0.25, 0.25, len(metrics)) if len(metrics) > 1 else [0.0]))
+    size = 16 if printing else 42
+    figsize = ((print_width, 0.22 * len(models) + 0.9) if printing
+               else (4.3 * len(panels), 0.5 * len(models) + 1.4))
+    with print_style(printing):
+        fig, axes = plt.subplots(1, len(panels), squeeze=False, figsize=figsize)
+        axes = axes.ravel()
+        for index, (axis, (study, reference, title, xlabel)) in enumerate(zip(axes, panels)):
+            arm = table[(table.study == study) & (table.reference == reference)]
+            base = arm.loc[arm.model == "jaccard", "value"]
+            if not base.empty:
+                axis.axvline(float(base.iloc[0]), color=DETAIL_COLOR, linewidth=0.8, linestyle="--", zorder=1)
+            if study == "A":
+                axis.axvline(CHANCE_ACCURACY, color=DETAIL_COLOR, linewidth=0.8, linestyle=":", zorder=1)
+            if "text" in models:
+                axis.axhline(models.index("text") - 0.5, color=DETAIL_COLOR, linewidth=0.5, zorder=1)
+            for row in arm.itertuples():
+                color, marker = styles[row.metric]
+                axis.scatter([row.value], [models.index(row.model) + offsets.get(row.metric, 0.0)],
+                             s=size * MARKER_AREA.get(marker, 1), marker=marker, color=color, edgecolor="white", linewidth=0.4, zorder=3)
+            axis.set_yticks(range(len(models)))
+            axis.set_yticklabels([GRID_NOTATION[model] for model in models])
+            axis.tick_params(labelleft=index == 0)
+            axis.set_ylim(len(models) - 0.5, -0.5)
+            if xlims and study in xlims:
+                axis.set_xlim(*xlims[study])
+            axis.set_xlabel(xlabel)
+            axis.set_title(title)
+        handles = [Line2D([], [], ls="", marker=styles[key][1], color=styles[key][0], markeredgecolor="white",
+                          markersize=np.sqrt(size * MARKER_AREA.get(styles[key][1], 1)), label=label)
+                   for key, label in [*[(metric, profile_metric_label(metric)) for metric in metrics],
+                                      ("none", "Cell without S or z")]]
+        handles += [Line2D([], [], color=DETAIL_COLOR, linewidth=0.8, linestyle="--", label="{J}"),
+                    Line2D([], [], color=DETAIL_COLOR, linewidth=0.8, linestyle=":", label="Chance")]
+        if not printing:
+            set_suptitle(fig, "Every feature set of Studies A and B, one layer-profile metric per group, "
+                              "mean over held-out categories")
+        fig.tight_layout()
+        legend_below(list(axes), handles, [handle.get_label() for handle in handles], ncol=3)
+        fig.savefig(path, dpi=300, bbox_inches="tight")
+        plt.close(fig)
+
+
+# Control sets of the partial tables, by role. A feature is never controlled for its own role.
+PARTIAL_CONTROLS = {"none": (), "jaccard": ("J",), "text": ("s",), "jaccard_text": ("J", "s")}
+
+
+def _partial_rows(frame: pd.DataFrame, target: str, mapping: dict, metrics: list, with_text: bool,
+                  pairs, n_draws: int) -> pd.DataFrame:
+    """Within-category partial Spearman of every J, band, text and profile column against the target, per control set."""
+    features = [("J", mapping["J"], "none"), *[("B", column, "none") for column in mapping["B"]]]
+    features += [("s", mapping["s"], "none")] if with_text else []
+    for metric in metrics:
+        columns = profile_columns(metric)
+        features += [(role, columns[mapping[role]], metric) for role in ("S", "z")]
+    available = {"J"} | ({"s"} if with_text else set())
+    rows = []
+    for role, feature, metric in features:
+        for name, controls in PARTIAL_CONTROLS.items():
+            if role in controls or not set(controls) <= available:
+                continue
+            test = spearman_test(frame[feature], frame[target], [frame[mapping[c]] for c in controls],
+                                 groups=frame["category"], pairs=pairs, n_draws=n_draws)
+            rows.append({"feature": feature, "role": role, "metric": metric, "controls": name,
+                         "rho": test["rho"], "p": test["p"], "n": test["n"]})
+    return pd.DataFrame(rows)
+
+
+def typicality_partials(design: pd.DataFrame, metrics: list, with_text: bool = True,
+                        n_draws: int = PERMUTATIONS) -> pd.DataFrame:
+    """Study A partial table, every feature of each reference against the typicality ratings within categories."""
+    frames = [_partial_rows(design, TARGET, mapping, metrics, with_text, None, n_draws).assign(reference=reference)
+              for reference, mapping in REFERENCES.items()]
+    table = pd.concat(frames, ignore_index=True)
+    return table[["reference", *[c for c in table.columns if c != "reference"]]]
+
+
+def pair_partials(table: pd.DataFrame, metrics: list, with_text: bool = True,
+                  n_draws: int = PERMUTATIONS) -> pd.DataFrame:
+    """Study B partial table over the rated pairs within categories, permuting words (Mantel)."""
+    codes = {concept: i for i, concept in enumerate(sorted(set(table.word_a) | set(table.word_b)))}
+    positions = (table.word_a.map(codes).to_numpy(), table.word_b.map(codes).to_numpy())
+    mapping = {**PAIR_COLUMNS, "S": "S", "z": "z"}
+    return _partial_rows(table, "human_similarity", mapping, metrics, with_text, positions, n_draws)
 
 
 # --- study C, concept structure ---------------------------------------------------------
@@ -1438,6 +1803,7 @@ CLUSTER_K_RANGE = range(2, 21)
 # Cluster count the composition table and the dendrogram branch colors use, 8 so the cut is
 # directly comparable to the 8 categories of the Richie-HSJ set.
 CLUSTER_CUT_K = 8
+TREE_PAGE_HEIGHT, TREE_LEAF_SIZE, TREE_LINE_WIDTH, TREE_LINE_COLOR = 8.6, 3.0, 0.4, "#555555"
 
 # Linkage methods compared. "average" (UPGMA) is the one that respects a precomputed metric
 # distance, "complete" is its worst-case counterpart, and "ward" is run on the square-rooted
@@ -1945,22 +2311,87 @@ def plot_dendrogram(link: np.ndarray, items: list, meta: pd.DataFrame, color_map
     plt.close(fig)
 
 
-def shared_prefix_length(left: str, right: str) -> int:
-    """
-    Length of the common leading substring of two words, the cheapest available check on
-    whether an edge is semantic or orthographic.
+def _leaf_strip(axis, strip, order: list, category_of: dict, level_of: dict, color_map: dict) -> None:
+    """Leaf names beside one colored cell per leaf, the color naming the category, from the top down."""
+    strip.imshow([[to_rgb(color_map[category_of[word]])] for word in order], aspect="auto",
+                 extent=(0, 1, 10 * len(order), 0), interpolation="nearest")
+    strip.set_xticks([])
+    strip.yaxis.tick_right()
+    strip.set_yticks(5 + 10 * np.arange(len(order)))
+    strip.set_yticklabels([word.replace("__", " (") + ")" if "__" in word else word for word in order],
+                          fontsize=TREE_LEAF_SIZE)
+    strip.tick_params(axis="y", length=0, pad=1.2)
+    for label, word in zip(strip.get_yticklabels(), order):
+        label.set_fontweight("bold" if level_of[word] == 1 else "normal")
+    for spine in strip.spines.values():
+        spine.set_visible(False)
+    for spine in ("left", "top", "right"):
+        axis.spines[spine].set_visible(False)
+    axis.set_ylim(10 * len(order), 0)
+    axis.set_yticks([])
+    axis.grid(False)
 
-    A neuron that is an expert for a word FORM rather than for its meaning would produce
-    cross-domain edges like "dress" to "dresser". The column does not settle the question,
-    since those two are also semantically related, but an edge list whose cross-domain links
-    are mostly long shared prefixes reads very differently from one whose links are not.
-    """
-    limit = min(len(left), len(right))
-    return next((i for i in range(limit) if left[i] != right[i]), limit)
+
+def plot_tree_comparison(trees: list, items: list, meta: pd.DataFrame, color_map: dict, out_paths: list,
+                         cut_k: int = CLUSTER_CUT_K) -> None:
+    """The categories as a flat tree beside each (title, detail, linkage) tree, on one page at print size."""
+    category_of = {row.concept: row.category if pd.notna(row.category) else row.concept
+                   for row in meta.itertuples()}
+    level_of = dict(zip(meta["concept"], meta["abstraction_level"]))
+    categories = sorted(set(category_of.values()))
+    flat = [word for category in categories for word in
+            [category] + sorted(w for w in items if category_of[w] == category and w != category)]
+
+    with print_style():
+        fig = plt.figure(figsize=(PRINT_WIDTH["full"], TREE_PAGE_HEIGHT), layout="none")
+        grid = fig.add_gridspec(1, 9, left=0.005, right=0.995, top=0.945, bottom=0.05, wspace=0,
+                                width_ratios=[0.75, 0.05, 0.62, 1.47, 0.05, 0.62, 1.47, 0.05, 0.62])
+
+        axis, strip = fig.add_subplot(grid[0, 0]), fig.add_subplot(grid[0, 1])
+        _leaf_strip(axis, strip, flat, category_of, level_of, color_map)
+        rows = {word: 5 + 10 * i for i, word in enumerate(flat)}
+        for category in categories:
+            spots = [rows[w] for w in flat if category_of[w] == category]
+            axis.plot([1, 1], [min(spots), max(spots)], color=TREE_LINE_COLOR, lw=TREE_LINE_WIDTH)
+            axis.hlines(spots, 1, 0, color=TREE_LINE_COLOR, lw=TREE_LINE_WIDTH)
+            axis.plot([3, 1], [np.mean(spots)] * 2, color=TREE_LINE_COLOR, lw=TREE_LINE_WIDTH)
+            axis.text(1.1, np.mean(spots) - 4, category, fontsize=NOTE_SIZE, ha="right", va="bottom",
+                      color=DETAIL_COLOR)
+        centres = [np.mean([rows[w] for w in flat if category_of[w] == category]) for category in categories]
+        axis.plot([3, 3], [min(centres), max(centres)], color=TREE_LINE_COLOR, lw=TREE_LINE_WIDTH)
+        axis.set_xlim(3.05, 0)
+        axis.set_xticks([])
+        axis.spines["bottom"].set_visible(False)
+        set_title(axis, "Categories", "reference")
+
+        for slot, (title, detail, link) in zip((3, 6), trees):
+            axis, strip = fig.add_subplot(grid[0, slot]), fig.add_subplot(grid[0, slot + 1])
+            drawn = hierarchy.dendrogram(link, labels=list(items), no_plot=True, orientation="left")
+            order = list(drawn["ivl"])
+            for across, height in zip(drawn["icoord"], drawn["dcoord"]):
+                axis.plot(height, across, color=TREE_LINE_COLOR, lw=TREE_LINE_WIDTH, solid_capstyle="butt")
+            axis.axvline(link[-(cut_k - 1), 2], color=SERIES_COLORS["secondary"], ls="--", lw=0.7)
+            _leaf_strip(axis, strip, order, category_of, level_of, color_map)
+            axis.set_xlim(link[-1, 2] * 1.02, 0)
+            axis.set_xlabel("Merge height")
+            set_title(axis, title, detail)
+
+        for out_path in out_paths:
+            fig.savefig(out_path, dpi=600)
+    plt.close(fig)
+
+
+def same_first_token(left: str, right: str, first_of: dict, word_of: dict):
+    """True when two words open with one token, NA when either has no token, False for one word in two categories."""
+    if left not in first_of or right not in first_of:
+        return pd.NA
+    if word_of.get(left, left.split("__")[0]) == word_of.get(right, right.split("__")[0]):
+        return False
+    return bool(first_of[left] == first_of[right])
 
 
 def concept_graph_edges(similarity: np.ndarray, items: list, meta: pd.DataFrame,
-                        neighbors: int = GRAPH_NEIGHBORS) -> pd.DataFrame:
+                        neighbors: int = GRAPH_NEIGHBORS, tokens: pd.DataFrame | None = None) -> pd.DataFrame:
     """
     The edge list of a concept graph, each node keeping its ``neighbors`` strongest partners,
     one row per retained undirected edge.
@@ -1975,8 +2406,14 @@ def concept_graph_edges(similarity: np.ndarray, items: list, meta: pd.DataFrame,
     ``neighbors`` edges. That asymmetry is deliberate: dropping an edge one concept counts
     among its strongest because the other does not would hide exactly the hub structure the
     figure exists to show.
+
+    same_first_token marks the edges whose two words open with one token of the model's
+    tokenizer (``tokens``, the frame of load_concept_tokens), the written form the expert sets
+    pick up, and is missing throughout without a token table.
     """
     category_of = dict(zip(meta["concept"], meta["category"]))
+    word_of = dict(zip(meta["concept"], meta["word"])) if "word" in meta else {}
+    first_of = {} if tokens is None or tokens.empty else tokens["first_token_id"].to_dict()
     level_of = dict(zip(meta["concept"], meta["abstraction_level"]))
     ranked = np.argsort(-similarity, axis=1)
     keep = set()
@@ -2005,9 +2442,11 @@ def concept_graph_edges(similarity: np.ndarray, items: list, meta: pd.DataFrame,
             "same_category": same,
             "edge_type": ("label to member" if 1 in (level_of.get(left), level_of.get(right))
                           else "within category" if same else "cross category"),
-            "shared_prefix": shared_prefix_length(left, right),
+            "same_first_token": same_first_token(left, right, first_of, word_of),
         })
-    return pd.DataFrame(rows).sort_values("weight", ascending=False)
+    edges = pd.DataFrame(rows)
+    edges["same_first_token"] = edges["same_first_token"].astype("boolean")
+    return edges.sort_values("weight", ascending=False)
 
 
 def graph_domain_structure(edges: pd.DataFrame, meta: pd.DataFrame) -> pd.DataFrame:
@@ -2250,7 +2689,7 @@ def run_dendrograms(space: str, distance: np.ndarray, usable: np.ndarray, items:
 
 
 def run_linkgraph(name: str, label: str, similarity: np.ndarray, distance: np.ndarray,
-                  items: list, meta: pd.DataFrame, out_dir) -> dict:
+                  items: list, meta: pd.DataFrame, out_dir, tokens: pd.DataFrame | None = None) -> dict:
     """
     One link graph: its figure, its edge list, and its domain-structure test.
 
@@ -2259,7 +2698,7 @@ def run_linkgraph(name: str, label: str, similarity: np.ndarray, distance: np.nd
     """
     out_dir.mkdir(parents=True, exist_ok=True)
     coords = _layout_coordinates(distance)
-    edges = concept_graph_edges(similarity, items, meta)
+    edges = concept_graph_edges(similarity, items, meta, tokens=tokens)
     save_dataframe(edges, out_dir / "concept_graph_edges.csv")
     structure = graph_domain_structure(edges, meta)
     save_dataframe(structure, out_dir / "concept_graph_domain_structure.csv")
@@ -2277,8 +2716,9 @@ def run_linkgraph(name: str, label: str, similarity: np.ndarray, distance: np.nd
         "null_within_category_pct": _cell_or_nan(structure, "null_within_category_pct"),
         "ratio_observed_over_null": _cell_or_nan(structure, "ratio_observed_over_null"),
         "p_permutation": _cell_or_nan(structure, "p_permutation"),
-        "cross_category_with_shared_prefix": int(
-            ((edges["edge_type"] == "cross category") & (edges["shared_prefix"] >= 3)).sum()),
+        "cross_category_same_first_token": (
+            int(edges.loc[edges["edge_type"] == "cross category", "same_first_token"].sum())
+            if tokens is not None and not tokens.empty else np.nan),
     }
 
 
@@ -2340,7 +2780,7 @@ def _study_c_log_lines(trees: pd.DataFrame, graphs: pd.DataFrame) -> list:
 
 
 def execute_study_c_concept_structure(scope, concept_metadata: pd.DataFrame,
-                                      module_out_dir) -> dict:
+                                      module_out_dir, tokens: pd.DataFrame | None = None) -> dict:
     """
     Study C: the two unsupervised views of the expert representations, written into
     5.3_concept_structure/dendrograms/ and 5.3_concept_structure/linkgraphs/.
@@ -2432,13 +2872,269 @@ def execute_study_c_concept_structure(scope, concept_metadata: pd.DataFrame,
                                   spaces[metric][0][graph_block])
 
     graph_rows = [run_linkgraph(name, *graphs_to_draw[name], graph_items, graph_meta,
-                                out_dir / "linkgraphs" / name) for name in graphs_to_draw]
+                                out_dir / "linkgraphs" / name, tokens=tokens) for name in graphs_to_draw]
     graphs = pd.DataFrame(graph_rows)
     save_dataframe(graphs, out_dir / "linkgraphs" / "linkgraph_summary.csv")
 
     for line in _study_c_log_lines(trees, graphs):
         log.info(f"  [{scope.label}] {line}")
     return _study_c_summary(trees, graphs)
+
+
+# --- study D, depth-resolved overlap -----------------------------------------------------
+
+DEPTH_GROUPS = {"within_category": ("Pairs within a category", SERIES_COLORS["primary"]),
+                "same_token": ("Pairs across categories, same first token", SERIES_COLORS["secondary"]),
+                "other_cross": ("Other pairs across categories", SERIES_COLORS["accent"]),
+                "all_units": ("All expert units of the members (reference)", SERIES_COLORS["muted"])}
+
+
+def _shares(units: np.ndarray) -> np.ndarray:
+    """Units over their total, NaN when the total is 0."""
+    total = units.sum()
+    return units / total if total > 0 else np.full(len(units), np.nan)
+
+
+def depth_resolved_curve(expert_df: pd.DataFrame, pair_table: pd.DataFrame, design: pd.DataFrame) -> pd.DataFrame:
+    """Per block, the within-category Spearman of the block's Jaccard index with the ratings, and the rated pairs' units."""
+    _, n_blocks = block_coordinates(expert_df)
+    design = design if not design.empty else pd.DataFrame(columns=["concept", "category", TARGET])
+    items = sorted(set(pair_table.word_a) | set(pair_table.word_b) | set(design.concept) | set(design.category))
+    pos = {item: i for i, item in enumerate(items)}
+    intersection, union = depth_band_overlap(expert_df, items, n_bands=n_blocks)
+    jaccard = band_jaccard(intersection, union)
+    first, second = pair_table.word_a.map(pos).to_numpy(), pair_table.word_b.map(pos).to_numpy()
+    concept, label = design.concept.map(pos).to_numpy(dtype=int), design.category.map(pos).to_numpy(dtype=int)
+    text = [pair_table["text_similarity"]] if "text_similarity" in pair_table else None
+    rho = lambda x, y, groups, controls=(): spearman_test(x, y, controls, groups=groups, n_draws=0)["rho"]
+    rows = []
+    for block in range(n_blocks):
+        pair_j = jaccard[block, first, second]
+        rows.append({
+            "block": block, "quarter": int(depth_bands(block, n_blocks)) + 1,
+            "pair_rho": rho(pair_j, pair_table.human_similarity, pair_table.category),
+            "pair_rho_given_text": (rho(pair_j, pair_table.human_similarity, pair_table.category, text)
+                                    if text else np.nan),
+            "typicality_rho": (rho(jaccard[block, concept, label], design[TARGET], design.category)
+                               if len(design) else np.nan),
+            "shared_units": int(intersection[block, first, second].sum()),
+            "union_units": int(union[block, first, second].sum())})
+    curve = pd.DataFrame(rows)
+    curve["shared_share"] = _shares(curve.shared_units.to_numpy())
+    curve["union_share"] = _shares(curve.union_units.to_numpy())
+    return curve[["block", "quarter", "pair_rho", "pair_rho_given_text", "typicality_rho",
+                  "shared_units", "shared_share", "union_units", "union_share"]]
+
+
+DEPTH_NULL_DRAWS = 200
+DEPTH_NULL_SEED = 0
+DEPTH_NULL_BAND = "Random units of the block's size, 95% range"
+
+
+def random_unit_set(column_rows: np.ndarray, target: float, rng: np.random.Generator) -> np.ndarray:
+    """Units of the whole model in random order, up to the first that brings the set to the target count of expert rows."""
+    order = rng.permutation(len(column_rows))
+    return order[: np.searchsorted(np.cumsum(column_rows[order]), target) + 1]
+
+
+def _range(values: np.ndarray) -> tuple[float, float, float]:
+    """Mean and 2.5th and 97.5th percentiles of the finite values, NaN without any."""
+    finite = values[np.isfinite(values)]
+    return (float(finite.mean()), *np.percentile(finite, [2.5, 97.5]).tolist()) if len(finite) else (np.nan,) * 3
+
+
+def size_matched_null(expert_df: pd.DataFrame, pair_table: pd.DataFrame, n_draws: int = DEPTH_NULL_DRAWS,
+                      seed: int = DEPTH_NULL_SEED) -> pd.DataFrame:
+    """Per block, the rated pairs sharing no unit in it, and the agreement of random unit sets of the block's size drawn from every depth."""
+    blocks, n_blocks = block_coordinates(expert_df)
+    items = sorted(set(pair_table.word_a) | set(pair_table.word_b))
+    pos = {item: i for i, item in enumerate(items)}
+    keep = expert_df["concept"].isin(pos).to_numpy()
+    rated = expert_df[keep]
+    unit = rated["unit"].to_numpy(dtype=np.int64)
+    codes = pd.factorize(rated["layer_idx"].to_numpy(dtype=np.int64) * (unit.max() + 1) + unit)[0]
+    column_block = np.zeros(codes.max() + 1, dtype=int)
+    column_block[codes] = blocks[keep]
+    presence = sparse.csr_matrix((np.ones(len(codes)), (rated["concept"].map(pos).to_numpy(), codes)),
+                                 shape=(len(items), codes.max() + 1))
+    presence = (presence > 0).astype(float).tocsc()
+    column_rows = np.asarray(presence.sum(axis=0)).ravel()
+    first, second = pair_table.word_a.map(pos).to_numpy(), pair_table.word_b.map(pos).to_numpy()
+    text = [pair_table["text_similarity"]] if "text_similarity" in pair_table else None
+
+    def pair_jaccard(columns: np.ndarray) -> np.ndarray:
+        sub = presence[:, columns]
+        intersection = (sub @ sub.T).toarray()
+        sizes = np.asarray(sub.sum(axis=1)).ravel()
+        return band_jaccard(intersection, sizes[:, None] + sizes[None, :] - intersection)[first, second]
+
+    def agreement(columns: np.ndarray) -> tuple[float, float, float]:
+        jaccard = pair_jaccard(columns)
+        rho = lambda controls: spearman_test(jaccard, pair_table.human_similarity, controls,
+                                             groups=pair_table.category, n_draws=0)["rho"]
+        return rho(()), rho(text) if text else np.nan, float((jaccard == 0).mean())
+
+    rng = np.random.default_rng(seed)
+    rows = []
+    for block in range(n_blocks):
+        columns = np.flatnonzero(column_block == block)
+        target = column_rows[columns].sum()
+        draws = (np.array([agreement(random_unit_set(column_rows, target, rng)) for _ in range(n_draws)])
+                 if target > 0 and n_draws else np.full((1, 3), np.nan))
+        plain, given_text = _range(draws[:, 0]), _range(draws[:, 1])
+        rows.append({"block": block, "zero_share": float((pair_jaccard(columns) == 0).mean()) if len(columns) else 1.0,
+                     "random_pair_rho_mean": plain[0], "random_pair_rho_low": plain[1], "random_pair_rho_high": plain[2],
+                     "random_pair_rho_given_text_mean": given_text[0], "random_pair_rho_given_text_low": given_text[1],
+                     "random_pair_rho_given_text_high": given_text[2], "random_zero_share": float(np.nanmean(draws[:, 2]))})
+    return pd.DataFrame(rows)
+
+
+def shared_unit_depth(expert_df: pd.DataFrame, members: pd.DataFrame,
+                      tokens: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Where member pairs share units, by block, for pairs across categories opening with the same token against the rest."""
+    if tokens.empty:
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+    _, n_blocks = block_coordinates(expert_df)
+    items = sorted(members.concept)
+    word, category = dict(zip(members.concept, members.word)), dict(zip(members.concept, members.category))
+    first_id = tokens["first_token_id"].reindex(items).to_numpy(dtype=float)
+    intersection, union = depth_band_overlap(expert_df, items, n_bands=n_blocks)
+    pairs = np.array([(a, b) for a, b in itertools.combinations(range(len(items)), 2)
+                      if word[items[a]] != word[items[b]]])
+    ia, ib = pairs[:, 0], pairs[:, 1]
+    same_category = np.array([category[items[a]] == category[items[b]] for a, b in pairs])
+    same_token = ~same_category & (first_id[ia] == first_id[ib])
+    same_letter = np.array([word[items[a]][:1].lower() == word[items[b]][:1].lower() for a, b in pairs])
+    groups = {"within_category": same_category, "same_token": same_token,
+              "first_letter_only": ~same_category & ~same_token & same_letter,
+              "other_cross": ~same_category & ~same_token}
+
+    full_union = union.sum(axis=0)[ia, ib]
+    with np.errstate(invalid="ignore", divide="ignore"):
+        jaccard = np.where(full_union > 0, intersection.sum(axis=0)[ia, ib] / full_union, np.nan)
+    shared = intersection[:, ia, ib]
+    depth = np.arange(n_blocks) / (n_blocks - 1)
+    late = depth_bands(np.arange(n_blocks), n_blocks) == DEPTH_BANDS - 1
+
+    def located(units: np.ndarray) -> tuple[float, float]:
+        total = units.sum()
+        return (float(units @ depth / total), float(units[late].sum() / total)) if total > 0 else (np.nan, np.nan)
+
+    by_block = pd.DataFrame({"block": np.arange(n_blocks)})
+    for group in ("within_category", "same_token", "other_cross"):
+        by_block[f"{group}_units"] = shared[:, groups[group]].sum(axis=1).astype(int)
+    by_block["all_units_units"] = np.einsum("bii->b", intersection).astype(int)
+    for group in DEPTH_GROUPS:
+        by_block[f"{group}_share"] = _shares(by_block[f"{group}_units"].to_numpy())
+
+    cross = ~same_category & np.isfinite(jaccard)
+    percentile = np.full(len(pairs), np.nan)
+    percentile[cross] = stats.rankdata(jaccard[cross]) / cross.sum()
+    same_rows = []
+    for k in np.flatnonzero(same_token):
+        shared_depth, late_share = located(shared[:, k])
+        same_rows.append({"concept_a": items[ia[k]], "concept_b": items[ib[k]],
+                          "first_piece": tokens.loc[items[ia[k]], "first_piece"],
+                          "jaccard_pct": 100 * jaccard[k], "percentile": percentile[k],
+                          "shared_units": int(shared[:, k].sum()), "shared_depth": shared_depth,
+                          "shared_last_quarter_share": late_share})
+    same_token_pairs = pd.DataFrame(same_rows, columns=["concept_a", "concept_b", "first_piece", "jaccard_pct",
+                                                        "percentile", "shared_units", "shared_depth",
+                                                        "shared_last_quarter_share"])
+
+    other_mean = np.nanmean(jaccard[groups["other_cross"]]) if groups["other_cross"].any() else np.nan
+    summary = []
+    for group in ("same_token", "first_letter_only", "other_cross", "within_category"):
+        mask = groups[group]
+        mean = np.nanmean(jaccard[mask]) if mask.any() and np.isfinite(jaccard[mask]).any() else np.nan
+        units = shared[:, mask].sum(axis=1)
+        shared_depth, late_share = located(units)
+        summary.append({"group": group, "n_pairs": int(mask.sum()),
+                        "n_pairs_with_experts": int(np.isfinite(jaccard[mask]).sum()), "mean_jaccard_pct": 100 * mean,
+                        "ratio_to_other_cross": mean / other_mean if other_mean > 0 else np.nan,
+                        "shared_units": int(units.sum()), "shared_depth": shared_depth,
+                        "shared_last_quarter_share": late_share})
+    return by_block, same_token_pairs, pd.DataFrame(summary)
+
+
+def plot_overlap_by_depth(curve: pd.DataFrame, by_block: pd.DataFrame, jaccard_rho: tuple[float, float],
+                          path, print_width: float = None) -> None:
+    """Per-block agreement of the Jaccard index with the ratings over the depth of shared units, legends on top in print."""
+    printing = print_width is not None
+    panels = 1 if by_block.empty else 2
+    n_blocks = len(curve)
+    with print_style(printing):
+        fig, axes = plt.subplots(panels, 1, sharex=True, squeeze=False,
+                                 figsize=(print_width or 10.0, (2.6 if printing else 3.4) * panels))
+        axes = axes[:, 0]
+        line = {"linewidth": 1.2 if printing else 1.8, "markersize": 2.5 if printing else 4, "marker": "o"}
+        top = axes[0]
+        series = [("pair_rho", ("This block's units", "All units (whole model)"), SERIES_COLORS["primary"]),
+                  ("pair_rho_given_text", ("This block's units, text partialled out", "All units, text partialled out"),
+                   SERIES_COLORS["secondary"])]
+        for (column, (block_label, whole_label), color), whole in zip(series, jaccard_rho):
+            if curve[column].notna().any():
+                top.plot(curve.block, curve[column], color=color, label=block_label, **line)
+            if np.isfinite(whole):
+                top.axhline(whole, color=color, linestyle="--", linewidth=0.9, label=whole_label)
+        if "random_pair_rho_low" in curve and curve.random_pair_rho_low.notna().any():
+            top.fill_between(curve.block, curve.random_pair_rho_low, curve.random_pair_rho_high, linewidth=0,
+                             color=SERIES_COLORS["primary"], alpha=0.18, label=DEPTH_NULL_BAND)
+        top.axhline(0, color=DETAIL_COLOR, linewidth=0.5)
+        top.set_ylabel(r"Agreement with" "\n" r"ratings, $\rho_W$" if printing
+                       else r"Agreement of the Jaccard index" "\n" r"with the ratings, $\rho_W$")
+        if panels == 2:
+            bottom = axes[1]
+            for group, (label, color) in DEPTH_GROUPS.items():
+                bottom.plot(by_block.block, 100 * by_block[f"{group}_share"], color=color, label=label, **line)
+            bottom.set_ylabel("Group's shared units\nin the block (%)" if printing
+                              else "Group's shared units in the block (%)")
+        bands = depth_bands(np.arange(n_blocks), n_blocks)
+        for axis in axes:
+            for block in np.flatnonzero(np.diff(bands)) + 1:
+                axis.axvline(block - 0.5, color=SERIES_COLORS["band"], linewidth=1.0, zorder=0)
+        axes[-1].set_xlabel("Block, rules between quarters of depth")
+        axes[-1].set_xticks(range(0, n_blocks, 1 if n_blocks <= 12 else 3))
+        if not printing:
+            set_title(top, "The Jaccard index block by block",
+                      "agreement with the human pair ratings within categories, and where each group's pairs share units")
+        for axis in axes:
+            if printing:
+                axis.legend(loc="lower center", bbox_to_anchor=(0.5, 1.02), frameon=False, borderaxespad=0)
+            else:
+                axis.legend(loc="center left", bbox_to_anchor=(1.01, 0.5), frameon=False)
+        fig.tight_layout()
+        fig.savefig(path, dpi=300, bbox_inches="tight")
+        plt.close(fig)
+
+
+def execute_study_d_depth_resolved_overlap(scope, concept_metadata: pd.DataFrame, design: pd.DataFrame,
+                                           pair_table: pd.DataFrame, tokens: pd.DataFrame, module_out_dir) -> None:
+    """Study D: the Jaccard index block by block against the ratings, and where words opening with the same token share units."""
+    if not scope.is_whole_model:
+        return
+    if pair_table.empty:
+        log.warning(f"  [{scope.label}] Skipping Study D: Study B fitted no pair table.")
+        return
+    out_dir = study_dir(module_out_dir, "D")
+    curve = depth_resolved_curve(scope.expert_df, pair_table, design).merge(
+        size_matched_null(scope.expert_df, pair_table), on="block", how="left")
+    save_dataframe(curve, out_dir / "overlap_by_block.csv")
+    members = concept_metadata[(concept_metadata["abstraction_level"] == 2)
+                               & concept_metadata["category"].notna()][["concept", "word", "category"]]
+    by_block, same_token_pairs, summary = shared_unit_depth(scope.expert_df, members, tokens)
+    if tokens.empty:
+        log.warning(f"  [{scope.label}] Study D: no concept token table for this architecture, "
+                    f"shared_unit_depth.csv, same_token_pairs.csv and same_token_summary.csv not written.")
+    else:
+        save_dataframe(by_block, out_dir / "shared_unit_depth.csv")
+        save_dataframe(same_token_pairs, out_dir / "same_token_pairs.csv")
+        save_dataframe(summary, out_dir / "same_token_summary.csv")
+    text = [pair_table["text_similarity"]] if "text_similarity" in pair_table else None
+    whole = lambda controls: spearman_test(pair_table.jaccard_pct, pair_table.human_similarity, controls,
+                                           groups=pair_table.category, n_draws=0)["rho"]
+    jaccard_rho = (whole(()), whole(text) if text else np.nan)
+    plot_overlap_by_depth(curve, by_block, jaccard_rho, out_dir / "overlap_by_depth.png")
 
 
 def _run_axis_sensitivity(scope, concept_metadata: pd.DataFrame, dir_a, dir_b) -> None:
@@ -2455,26 +3151,33 @@ def _run_axis_sensitivity(scope, concept_metadata: pd.DataFrame, dir_a, dir_b) -
     if design.empty:
         return
     design = add_centroid_features(design, scope.expert_df, ACTIVE_METRICS, axis="layer")
-    study_a = design.dropna(subset=study_a_columns(ACTIVE_METRICS)).reset_index(drop=True)
+    study_a = design.dropna(subset=study_a_columns(ACTIVE_METRICS, with_text=False)).reset_index(drop=True)
     study_b = design.dropna(subset=study_b_columns(ACTIVE_METRICS)).reset_index(drop=True)
 
     if len(study_a) >= MIN_TRAIN_CONCEPTS:
-        rank_results, _, _ = run_typicality_ranking(study_a, ACTIVE_METRICS)
+        rank_results, _, _, _ = run_typicality_ranking(study_a, ACTIVE_METRICS, with_text=False)
         if not rank_results.empty:
             keep_a = rank_results[(rank_results.reference == "label_word")
                                   & rank_results.model.isin(["jaccard", "jaccard_profile"])]
             save_dataframe(keep_a.assign(axis="layer"), dir_a / "axis_sensitivity.csv")
 
     if len(study_b) >= MIN_PAIR_CONCEPTS:
-        pair_results, _ = run_pair_similarity(study_b, scope.expert_df, ACTIVE_METRICS,
+        pair_results, _, _, _ = run_pair_similarity(study_b, scope.expert_df, ACTIVE_METRICS,
                                               axis="layer")
         if not pair_results.empty:
             keep_b = pair_results[pair_results.model.isin(["jaccard", "jaccard_profile"])]
             save_dataframe(keep_b.assign(axis="layer"), dir_b / "axis_sensitivity.csv")
 
 
+@functools.lru_cache(maxsize=2)
+def _concept_tokens(architecture: str | None) -> pd.DataFrame:
+    """The architecture's token table, read and warned about once per run."""
+    return load_concept_tokens(architecture)
+
+
 def execute_module_5_typicality_prediction(scope, concept_metadata: pd.DataFrame,
-                                           model_dir, axis_sensitivity: bool = False
+                                           model_dir, axis_sensitivity: bool = False,
+                                           probing_sentences_dir=None, architecture: str | None = None
                                            ) -> tuple[pd.DataFrame, dict]:
     """Execute Module 5: human-typicality ranking (Study A) and human pair-similarity
     regression (Study B) over one generated feature grid, then unsupervised clustering and
@@ -2507,24 +3210,29 @@ def execute_module_5_typicality_prediction(scope, concept_metadata: pd.DataFrame
     """
     out_dir = scope_out_dir(model_dir, scope)
     empty = pd.DataFrame()
-    rank_results, pair_results = empty, empty
+    rank_results, pair_results, rank_weights, pair_weights, pair_table = empty, empty, empty, empty, empty
+    per_category, pair_per_category = empty, empty
+    text = text_similarity_frame(probing_sentences_dir, list(concept_metadata["concept"]))
+    tokens = _concept_tokens(architecture)
+    if text is None and scope.is_whole_model:
+        log.info(f"  [{scope.label}] No probing_sentences_dir, the text cells and text controls are left out.")
 
-    design = build_design_frame(scope.expert_df, concept_metadata, ACTIVE_METRICS)
+    design = build_design_frame(scope.expert_df, concept_metadata, ACTIVE_METRICS, text=text)
     if design.empty:
         # Studies A and B are out, Study C is not: it needs no design frame and no human
         # target, so an empty design is a reason to skip them and still run the clustering.
         log.warning(f"  [{scope.label}] Studies A and B skipped: the design frame is empty. "
                     f"Study C still runs, it reads scope.expert_df directly.")
-        clustering = execute_study_c_concept_structure(scope, concept_metadata, out_dir)
+        clustering = execute_study_c_concept_structure(scope, concept_metadata, out_dir, tokens=tokens)
         return empty, scope_summary_row(scope, n_concepts=0, n_concepts_pair_study=0,
                                         **_summary(empty, empty), **clustering)
 
-    design = add_centroid_features(design, scope.expert_df, ACTIVE_METRICS)
+    design = add_centroid_features(design, scope.expert_df, ACTIVE_METRICS, text=text)
     # The frame every study derives from, before either study's dropna, so it sits at the
     # scope root rather than inside one study's folder.
     save_dataframe(design, out_dir / "typicality_model_design.csv")
 
-    study_a = design.dropna(subset=study_a_columns(ACTIVE_METRICS)).reset_index(drop=True)
+    study_a = design.dropna(subset=study_a_columns(ACTIVE_METRICS, with_text=text is not None)).reset_index(drop=True)
     study_b = design.dropna(subset=study_b_columns(ACTIVE_METRICS)).reset_index(drop=True)
     log.info(f"  [{scope.label}] Design frames from {len(design)} gated concepts: "
              f"Study A keeps {len(study_a)} over {study_a['category'].nunique()} categories, "
@@ -2539,10 +3247,14 @@ def execute_module_5_typicality_prediction(scope, concept_metadata: pd.DataFrame
     dir_a = study_dir(out_dir, "A")
     if len(study_a) >= MIN_TRAIN_CONCEPTS:
         save_dataframe(study_a, dir_a / "study_a_design.csv")
-        rank_results, per_category, per_pair = run_typicality_ranking(study_a, ACTIVE_METRICS)
+        rank_results, per_category, per_pair, rank_weights = run_typicality_ranking(
+            study_a, ACTIVE_METRICS, with_text=text is not None)
         if not rank_results.empty:
             save_dataframe(rank_results, dir_a / "ranker_comparison.csv")
             save_dataframe(per_category, dir_a / "ranker_per_category.csv")
+            save_dataframe(rank_weights, dir_a / "ranker_fold_weights.csv")
+            save_dataframe(typicality_partials(study_a, ACTIVE_METRICS, with_text=text is not None),
+                           dir_a / "ranker_partials.csv")
             plot_ranker_comparison(rank_results, per_category, dir_a)
             plot_category_dumbbell(per_category, dir_a)
         if per_pair:
@@ -2558,11 +3270,15 @@ def execute_module_5_typicality_prediction(scope, concept_metadata: pd.DataFrame
         # The concepts Study B's pairs are drawn from. The rows actually fitted are the pairs
         # humans rated, built and gated inside run_pair_similarity.
         save_dataframe(study_b, dir_b / "study_b_design.csv")
-        pair_results, pair_per_category = run_pair_similarity(study_b, scope.expert_df,
-                                                              ACTIVE_METRICS)
+        pair_results, pair_per_category, pair_weights, pair_table = run_pair_similarity(
+            study_b, scope.expert_df, ACTIVE_METRICS, text=text)
         if not pair_results.empty:
             save_dataframe(pair_results, dir_b / "pair_similarity_comparison.csv")
             save_dataframe(pair_per_category, dir_b / "pair_similarity_per_category.csv")
+            save_dataframe(pair_weights, dir_b / "pair_similarity_fold_weights.csv")
+            save_dataframe(pair_table, dir_b / "pair_similarity_table.csv")
+            save_dataframe(pair_partials(pair_table, ACTIVE_METRICS, with_text=text is not None),
+                           dir_b / "pair_similarity_partials.csv")
             plot_pair_similarity(pair_results, pair_per_category, dir_b)
         else:
             log.warning(f"  [{scope.label}] Study B produced no results, too few rated pairs "
@@ -2571,11 +3287,24 @@ def execute_module_5_typicality_prediction(scope, concept_metadata: pd.DataFrame
         log.warning(f"  [{scope.label}] Skipping Study B: {len(study_b)} usable concepts, "
                     f"need >= {MIN_PAIR_CONCEPTS}.")
 
+    execute_study_d_depth_resolved_overlap(scope, concept_metadata, study_a, pair_table, tokens, out_dir)
+
+    deltas = added_value_deltas(per_category, pair_per_category)
+    if not deltas.empty:
+        added_value = added_value_summary(deltas)
+        save_dataframe(deltas, out_dir / "added_value_deltas.csv")
+        save_dataframe(added_value, out_dir / "added_value.csv")
+        plot_added_value(added_value, deltas, out_dir / "added_value.png")
+    selected = selected_metric_table(rank_results, pair_results)
+    if not selected.empty:
+        save_dataframe(selected, out_dir / "selected_metric_comparison.csv")
+        plot_selected_metric_comparison(selected, out_dir / "selected_metric_comparison.png")
+
     # Study C needs neither design frame. It reads scope.expert_df directly and keeps
     # every word with a usable profile, labels included, so it runs even at thresholds
     # where the two supervised studies have been starved out.
     log.info(f"  [{scope.label}] Study C: concept structure...")
-    clustering = execute_study_c_concept_structure(scope, concept_metadata, out_dir)
+    clustering = execute_study_c_concept_structure(scope, concept_metadata, out_dir, tokens=tokens)
 
     if axis_sensitivity and scope.is_whole_model:
         _run_axis_sensitivity(scope, concept_metadata, dir_a, dir_b)

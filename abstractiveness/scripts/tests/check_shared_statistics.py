@@ -20,6 +20,7 @@ Checks:
      constant similarity gives AUC 0.5 without a p.
   8. Residuals in the values' own units: the deviation from the mean without controls, from each group's mean within
      groups, and from each group's own least-squares line on a control.
+  9. The mean difference interval is the t interval with n - 1 degrees of freedom, three NaN below two values.
 
 Usage, from scripts/:
     python tests/check_shared_statistics.py
@@ -33,8 +34,8 @@ from scipy import stats
 from sklearn.metrics import roc_auc_score
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
-from utils.statistics import (PERMUTATIONS, correlation, permutation_p, rank_scores, reassignments, residuals,
-                              spearman_test)
+from utils.statistics import (PERMUTATIONS, correlation, mean_difference_interval, permutation_p, rank_scores,
+                              reassignments, residuals, spearman_test)
 from modules.shared_expert_set_measures import category_alignment_metrics
 from _report import run
 
@@ -237,9 +238,19 @@ def check_residuals() -> str:
     return f"residuals: per-group control lines, sd {expected_partial.std():.2f} against pooled {pooled.std():.2f}"
 
 
+def check_interval() -> str:
+    d = np.array([0.10, -0.05, 0.20, 0.00, 0.05, 0.10, -0.02, 0.07])
+    mean, low, high = mean_difference_interval(d)
+    half = stats.t.ppf(0.975, 7) * d.std(ddof=1) / np.sqrt(8)
+    assert abs(mean - d.mean()) < 1e-12 and abs(low - (d.mean() - half)) < 1e-12 and abs(high - (d.mean() + half)) < 1e-12
+    assert np.isnan(mean_difference_interval([0.1])).all()
+    assert np.allclose(mean_difference_interval([*d, np.nan]), (mean, low, high)), "a NaN must be dropped"
+    return f"interval: {mean:.3f} [{low:.3f}, {high:.3f}]"
+
+
 def checks(failures: list) -> str:
     return ", ".join([check_scores(), check_pooled(), check_partial(), check_within(), check_exact(),
-                      check_mantel(), check_small_groups_and_alignment(), check_residuals()])
+                      check_mantel(), check_small_groups_and_alignment(), check_residuals(), check_interval()])
 
 
 if __name__ == "__main__":

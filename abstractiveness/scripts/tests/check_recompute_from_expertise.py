@@ -14,7 +14,7 @@ Checks, on the whole model and the block axis wherever depth order matters:
      category, as the size-weighted mean of the per-category rho, and the six rows of the two partial figures.
 
 Usage, from scripts/:
-    python tests/check_recompute_from_expertise.py [--config gpt2_richie_hsj] [--ap 0.6]
+    python tests/check_recompute_from_expertise.py [--config gpt2_richie_hsj_v3] [--ap 0.6]
 """
 import argparse
 import json
@@ -80,8 +80,10 @@ class Recomputed:
         cfg = MODEL_CONFIGS[config]
         self.cfg, self.threshold = cfg, threshold
         self.tree = ROOT / "results" / cfg["output_subdir"] / f"AP_{threshold}"
-        files = sorted((ROOT / "responses" / cfg["responses_subdir"] / cfg["model_subdir"]).glob(
-            "**/expertise/expertise.csv"))
+        folder = ROOT / "responses" / cfg["responses_subdir"] / cfg["model_subdir"]
+        files = sorted(folder.glob("**/expertise/expertise.csv"))
+        if not files:
+            raise FileNotFoundError(f"no expertise.csv under {folder}, run the check on a config whose responses exist")
         with Pool(8) as pool:
             loaded = pool.map(read_experts, [(path, threshold) for path in files])
         mapping = pd.read_csv(ROOT / "assets" / cfg["layer_mapping_file"]).set_index("layer")
@@ -291,7 +293,7 @@ def check_correlations(m: Recomputed, failures: list) -> int:
     return compared
 
 
-def checks(failures: list, config: str = "gpt2_richie_hsj", threshold: float = 0.6) -> str:
+def checks(failures: list, config: str = "gpt2_richie_hsj_v3", threshold: float = 0.6) -> str:
     m = Recomputed(config, threshold)
     check_distribution(m, failures)
     check_sublayers(m, failures)
@@ -304,7 +306,7 @@ def checks(failures: list, config: str = "gpt2_richie_hsj", threshold: float = 0
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", default="gpt2_richie_hsj", choices=sorted(MODEL_CONFIGS))
+    parser.add_argument("--config", default="gpt2_richie_hsj_v3", choices=sorted(MODEL_CONFIGS))
     parser.add_argument("--ap", type=float, default=0.6)
     arguments = parser.parse_args()
     sys.exit(run(__file__, lambda failures: checks(failures, arguments.config, arguments.ap)))

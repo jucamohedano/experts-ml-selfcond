@@ -258,6 +258,17 @@ def spearman_test(x, y, controls=(), groups=None, pairs=None, ranks: bool = True
             "n_k": sizes, "rho_k": observed, "p_k": p_k, "used": used, "x_scores": x_scores, "y_scores": y_scores}
 
 
+def mean_difference_interval(differences, level: float = 0.95) -> tuple[float, float, float]:
+    """Mean of the finite differences and its t interval with n - 1 degrees of freedom, three NaN below two values."""
+    values = np.asarray(differences, dtype=float)
+    values = values[np.isfinite(values)]
+    if len(values) < 2:
+        return np.nan, np.nan, np.nan
+    mean = float(values.mean())
+    half = float(stats.t.ppf((1 + level) / 2, len(values) - 1) * values.std(ddof=1) / math.sqrt(len(values)))
+    return mean, mean - half, mean + half
+
+
 def correlation(x, y, controls=(), groups=None, ranks: bool = True) -> float:
     """Spearman's rho of spearman_test without the test, or with ranks=False Pearson's r, partial on the controls."""
     return spearman_test(x, y, controls, groups, ranks=ranks, n_draws=0)["rho"]
